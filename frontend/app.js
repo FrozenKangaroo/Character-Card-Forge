@@ -2639,7 +2639,8 @@ async function selectCardImage() {
     $('#cardImagePath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    setStatus('Selected card image: ' + res.path, 'ok');
+    if (hasOutput()) await saveCurrentWorkspace('silent');
+    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -2658,7 +2659,8 @@ async function importCardImageFiles(files) {
     $('#cardImagePath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    setStatus('Selected card image: ' + res.path, 'ok');
+    if (hasOutput()) await saveCurrentWorkspace('silent');
+    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -2710,7 +2712,8 @@ function renderGeneratedImages(images) {
       $('#cardImagePath').value = img.path;
       settings = collectSettings();
       await window.pywebview.api.save_settings(settings);
-      setStatus('Selected generated image for Character Card V2 PNG export.', 'ok');
+      if (hasOutput()) await saveCurrentWorkspace('silent');
+      setStatus('Selected generated image for Character Card V2 PNG export' + (hasOutput() ? ' and updated the saved workspace.' : '.'), 'ok');
     });
     $('.delete-generated', card).addEventListener('click', async () => {
       const res = await window.pywebview.api.delete_generated_image(img.path);
