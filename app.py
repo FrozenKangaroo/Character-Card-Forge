@@ -15,6 +15,7 @@ import sqlite3
 import uuid
 import io
 import socket
+import hashlib
 from pathlib import Path
 
 import webview
@@ -2612,6 +2613,8 @@ class Api:
             "projectPath": project.get("projectPath") or "",
             "builderState": project.get("builderState") or workspace.get("builderState") or {},
             "qnaAnswers": project.get("qnaAnswers") or workspace.get("qnaAnswers") or "",
+            "browserDescription": project.get("browserDescription") or workspace.get("browserDescription") or "",
+            "browserDescriptionSourceHash": project.get("browserDescriptionSourceHash") or workspace.get("browserDescriptionSourceHash") or "",
             "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
             "emotionManifest": project.get("emotionManifest") or workspace.get("emotionManifest") or "",
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
@@ -2876,6 +2879,88 @@ class Api:
         except Exception:
             return {}
 
+
+    def _browser_description_source_hash(self, output, concept=''):
+        source = ((concept or '') + '\n\n' + (output or '')).strip()
+        return hashlib.sha256(source.encode('utf-8', errors='ignore')).hexdigest()[:16]
+
+    def _fallback_browser_description(self, output, concept=''):
+        sections = self._parse_sections(output or '')
+        name = self._extract_name(output or '') or 'This character'
+        scenario = self._clean_section_text(sections.get('scenario', ''))
+        personality = self._clean_section_text(sections.get('personality', ''))
+        first = self._clean_section_text(sections.get('first_message', ''))
+        concept = self._clean_section_text(concept or '')
+        pieces = []
+        if scenario:
+            pieces.append(scenario)
+        elif concept:
+            pieces.append(concept)
+        if personality:
+            pieces.append(personality)
+        if first and len(' '.join(pieces)) < 300:
+            pieces.append(first)
+        text = re.sub(r'\s+', ' ', ' '.join(pieces)).strip()
+        if not text:
+            text = f'{name} is a saved character card with a ready-to-load roleplay setup.'
+        # Keep the browser description short and useful.
+        if len(text) > 420:
+            cut = text[:420].rsplit(' ', 1)[0].rstrip('.,;:')
+            text = cut + '…'
+        if name and not text.lower().startswith(name.lower()):
+            text = f'{name}: {text}'
+        return text
+
+    def _generate_browser_description(self, output, concept='', settings=None):
+        """Create a short Character Browser blurb about the route, not just appearance."""
+        output = output or ''
+        concept = concept or ''
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        fallback = self._fallback_browser_description(output, concept)
+        if not output.strip():
+            return fallback
+        # If the text API is not configured, still provide a useful non-AI fallback
+        # instead of blocking autosave/export.
+        if not self._validate_text_api_settings(merged).get('ok'):
+            return fallback
+        try:
+            sections = self._parse_sections(output)
+            compact = {
+                'name': self._extract_name(output),
+                'scenario': sections.get('scenario', '')[:2500],
+                'personality': sections.get('personality', '')[:2200],
+                'first_message': sections.get('first_message', '')[:1600],
+                'tags': sections.get('tags', '')[:600],
+                'concept': concept[:1800],
+            }
+            prompt = '\n'.join([
+                'Create a short library/browser description for this fictional AI character card.',
+                'This is NOT the physical Description field. Summarize what the scenario is about and give a brief overview of the character/dynamic involved.',
+                'Return 2-4 sentences, maximum 90 words.',
+                'Mention the main setup, relationship/tension, and roleplay hook. Avoid markdown, headings, lists, and quoted dialogue.',
+                'Do not focus on clothing/body details unless they are central to the premise.',
+                '',
+                'CARD DATA JSON:',
+                json.dumps(compact, ensure_ascii=False, indent=2),
+            ]).strip()
+            check = self._context_check(prompt, merged, mode_label='Browser description')
+            if not check.get('ok'):
+                return fallback
+            local_settings = dict(merged)
+            local_settings['maxOutputTokens'] = min(350, int(local_settings.get('maxOutputTokens') or 350))
+            local_settings['temperature'] = min(0.55, float(local_settings.get('temperature', 0.45) or 0.45))
+            text = self._chat_once(prompt, local_settings, (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip(), 'browser_description')
+            text = re.sub(r'(?is)^```(?:\w+)?\s*|\s*```$', '', text or '').strip()
+            text = re.sub(r'\s+', ' ', text).strip()
+            if not text or self._looks_like_text_refusal(text):
+                return fallback
+            if len(text) > 620:
+                text = text[:620].rsplit(' ', 1)[0].rstrip('.,;:') + '…'
+            return text
+        except Exception as e:
+            self._log_event('browser_description_generation_failed', {'error': str(e)})
+            return fallback
+
     def save_character_workspace(self, workspace):
         """Autosave the complete editable workspace into exports/<Character Name>/.
 
@@ -2895,6 +2980,26 @@ class Api:
         image_path = workspace.get("cardImagePath") or workspace.get("imagePath") or settings.get("cardImagePath") or ""
         template = workspace.get("template") or self.template
         concept = workspace.get("concept") or ""
+        latest_project = folder / "latest_ccf_project.json"
+        previous_project = {}
+        if latest_project.exists():
+            try:
+                previous_payload = json.loads(latest_project.read_text(encoding="utf-8"))
+                previous_project = previous_payload.get("project", previous_payload) or {}
+            except Exception:
+                previous_project = {}
+        browser_source_hash = self._browser_description_source_hash(output, concept)
+        browser_description = str(
+            workspace.get("browserDescription")
+            or workspace.get("libraryDescription")
+            or workspace.get("scenarioDescription")
+            or ""
+        ).strip()
+        previous_hash = str(previous_project.get("browserDescriptionSourceHash") or "").strip()
+        if not browser_description and previous_hash == browser_source_hash:
+            browser_description = str(previous_project.get("browserDescription") or "").strip()
+        if not browser_description:
+            browser_description = self._generate_browser_description(output, concept, settings)
         # Keep latest text files simple and inspectable.
         (folder / "latest_output.md").write_text(output, encoding="utf-8")
         if workspace.get("qnaAnswers"):
@@ -2925,7 +3030,9 @@ class Api:
                 "settings": settings,
                 "imagePath": image_path,
                 "cardImagePath": image_path,
-                "projectPath": str(folder / "latest_ccf_project.json"),
+                "browserDescription": browser_description,
+                "browserDescriptionSourceHash": browser_source_hash,
+                "projectPath": str(latest_project),
                 "exportedPath": str(latest_card) if str(latest_card) else "",
                 "frontend": "front_porch",
                 "exportFormat": "chara_v2_png",
@@ -2938,7 +3045,6 @@ class Api:
                 "workspace": workspace,
             }
         }
-        latest_project = folder / "latest_ccf_project.json"
         latest_project.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
         # Also keep a timestamped project snapshot on first generation/export moments.
         snapshot = folder / f"{self._safe_slug(safe_name)}_{stamp}_ccf_project.json"
@@ -2965,12 +3071,16 @@ class Api:
                 image_path = project.get("imagePath") or project.get("cardImagePath") or ""
                 latest_pngs = [folder / f"{self._safe_slug(name)}_latest_cardv2.png"] + sorted(folder.glob("*_cardv2.png"), key=lambda p: p.stat().st_mtime, reverse=True)
                 thumb_source = next((str(p) for p in latest_pngs if p and Path(p).exists()), image_path)
+                browser_description = str(project.get("browserDescription") or "").strip()
+                if not browser_description:
+                    browser_description = self._fallback_browser_description(project.get("output") or "", project.get("concept") or "")
                 cards.append({
                     "name": name,
                     "folder": str(folder),
                     "projectPath": str(project_path),
                     "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(Path(project_path).stat().st_mtime)),
                     "thumbnail": self._image_data_url(thumb_source or image_path),
+                    "browserDescription": browser_description,
                     "outputPreview": (project.get("output") or "")[:500],
                     "hasEmotionImages": any(folder.glob("*.png")) and any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
                 })

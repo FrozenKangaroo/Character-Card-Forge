@@ -10,6 +10,7 @@ let isBusy = false;
 let currentTask = "";
 let currentVisionImagePath = "";
 let lastQnaAnswers = "";
+let currentBrowserDescription = "";
 let selectedCharacterProjectPath = "";
 let characterBrowserCards = [];
 
@@ -284,6 +285,7 @@ function applyLoadedState(state) {
   if (typeof state.output === 'string') {
     $('#outputText').value = state.output;
   }
+  currentBrowserDescription = state.browserDescription || state.libraryDescription || '';
   lastQnaAnswers = typeof state.qnaAnswers === 'string' ? state.qnaAnswers : '';
   const qaBox = $('#qaAnswersText');
   if (qaBox) qaBox.value = lastQnaAnswers;
@@ -2357,6 +2359,7 @@ function collectWorkspacePayload() {
     visionDescription: $('#visionDescription')?.value || '',
     conceptAttachments: conceptAttachments || [],
     cardImagePath: settings.cardImagePath || $('#cardImagePath')?.value || '',
+    browserDescription: currentBrowserDescription || '',
   };
 }
 
@@ -2398,6 +2401,7 @@ function renderCharacterBrowser() {
     <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''}" data-project="${escapeAttr(card.projectPath)}">
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(card.name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
       <div class="character-tile-name">${escapeHtml(card.name || 'Unnamed')}</div>
+      <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
     </div>
   `).join('');
@@ -2417,7 +2421,7 @@ function selectCharacterBrowserCard(projectPath) {
   const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
   $$('.character-card-tile').forEach(el => el.classList.toggle('selected', el.dataset.project === selectedCharacterProjectPath));
   $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${card.folder}` : 'Select a character card.';
-  $('#browserPreview').value = card ? (card.outputPreview || '') : '';
+  $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
 }
 
 async function loadSelectedCharacterWorkspace() {
@@ -2566,6 +2570,7 @@ async function generateCard() {
     const res = await window.pywebview.api.generate_with_qa_answers(conceptForModel, template, settings, qaAnswers);
     if (!res.ok) throw new Error(res.error || 'Generation failed.');
     $('#outputText').value = res.output;
+    currentBrowserDescription = '';
     lastQnaAnswers = res.qaAnswers || qaAnswers || '';
     const qaBox = $('#qaAnswersText');
     if (qaBox) qaBox.value = lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.';
@@ -2612,6 +2617,7 @@ async function reviseCard() {
     );
     if (!res.ok) throw new Error(res.error || 'Revision failed.');
     $('#outputText').value = res.output;
+    currentBrowserDescription = '';
     updateAvailability();
     $('#followupText').value = '';
     const backupMsg = describeBackupInfo(res.backupInfo, 'followup_revision');

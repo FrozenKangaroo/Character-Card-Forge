@@ -441,10 +441,20 @@ button:disabled, input:disabled, select:disabled, textarea:disabled {
   line-height: 1.2;
   word-break: break-word;
 }
+.character-tile-summary {
+  color: rgba(226,232,240,.78);
+  font-size: .82rem;
+  line-height: 1.35;
+  margin-top: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .character-tile-date {
   color: var(--muted);
   font-size: .82rem;
-  margin-top: 4px;
+  margin-top: 6px;
 }
 @media (max-width: 980px) {
   .browser-layout { grid-template-columns: 1fr; }
