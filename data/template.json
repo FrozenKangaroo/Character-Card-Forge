@@ -1,0 +1,210 @@
+{
+  "globalRules": [
+    "You are a fictional character generator and formatter.",
+    "Convert the user's concept into a concise roleplay character card.",
+    "Use only the enabled sections in this template and keep the same section order.",
+    "Do not add extra sections unless the user asks for them.",
+    "All primary characters and romantic participants must be 18 or older.",
+    "Use {{char}} for the character and {{user}} for the user when useful.",
+    "Keep details specific, playable, and consistent instead of overly long.",
+    "Prefer compact paragraphs and short bullet lists that work in smaller context windows."
+  ],
+  "sections": [
+    {
+      "id": "name",
+      "title": "Name",
+      "enabled": true,
+      "category": "core",
+      "description": "The character's full name or display name.",
+      "fields": []
+    },
+    {
+      "id": "description",
+      "title": "Description",
+      "enabled": true,
+      "category": "core",
+      "description": "Visible appearance and quick external summary only. Keep it compact.",
+      "fields": [
+        {
+          "id": "age",
+          "label": "Age",
+          "enabled": true,
+          "hint": "18+ only."
+        },
+        {
+          "id": "appearance",
+          "label": "Appearance",
+          "enabled": true,
+          "hint": "Face, hair, eyes, body type, notable features."
+        },
+        {
+          "id": "outfit",
+          "label": "Outfit Style",
+          "enabled": true,
+          "hint": "Usual clothing or starting outfit."
+        }
+      ]
+    },
+    {
+      "id": "personality",
+      "title": "Personality",
+      "enabled": true,
+      "category": "core",
+      "description": "Core traits and behavior. Focus on what affects roleplay.",
+      "fields": [
+        {
+          "id": "traits",
+          "label": "Personality Traits",
+          "enabled": true,
+          "hint": "3-6 defining traits."
+        },
+        {
+          "id": "motivation",
+          "label": "Motivation",
+          "enabled": true,
+          "hint": "What they want and why."
+        },
+        {
+          "id": "behavior",
+          "label": "Behavior Toward {{user}}",
+          "enabled": true,
+          "hint": "How they act with {{user}} at the start."
+        },
+        {
+          "id": "speech",
+          "label": "Speech Style",
+          "enabled": true,
+          "hint": "Tone, vocabulary, quirks, formality."
+        }
+      ]
+    },
+    {
+      "id": "scenario",
+      "title": "Scenario",
+      "enabled": true,
+      "category": "core",
+      "description": "The starting situation for the chat. Mention {{user}} and keep it immediately playable.",
+      "fields": []
+    },
+    {
+      "id": "first_message",
+      "title": "First Message",
+      "enabled": true,
+      "category": "core",
+      "description": "Opening message from {{char}}. Include a small scene setup and natural dialogue to {{user}}.",
+      "fields": []
+    },
+    {
+      "id": "alternate_first_messages",
+      "title": "Alternative First Messages",
+      "enabled": false,
+      "category": "extras",
+      "description": "Optional alternate openings. Disabled by default for small-context cards.",
+      "fields": []
+    },
+    {
+      "id": "example_dialogues",
+      "title": "Example Dialogues",
+      "enabled": true,
+      "category": "core",
+      "description": "2-3 short examples in SillyTavern-compatible style. No # prefix.",
+      "fields": []
+    },
+    {
+      "id": "tags",
+      "title": "Tags",
+      "enabled": true,
+      "category": "core",
+      "description": "6-10 lowercase comma-separated tags.",
+      "fields": []
+    },
+    {
+      "id": "lorebook",
+      "title": "Lorebook Entries",
+      "enabled": false,
+      "category": "extras",
+      "description": "Optional concise lore entries. Disabled by default for smaller context windows.",
+      "fields": []
+    },
+    {
+      "id": "system_prompt",
+      "title": "Custom System Prompt",
+      "enabled": false,
+      "category": "advanced",
+      "description": "Optional behavior rules. Leave disabled unless needed.",
+      "fields": []
+    },
+    {
+      "id": "state_tracking",
+      "title": "State Tracking",
+      "enabled": false,
+      "category": "front_porch",
+      "description": "Optional Front Porch realism/state values. Disabled by default for compact cards.",
+      "fields": [
+        {
+          "id": "emotion",
+          "label": "Starting Emotion",
+          "enabled": true,
+          "hint": "Primary emotional state."
+        },
+        {
+          "id": "objective",
+          "label": "Current Objective",
+          "enabled": true,
+          "hint": "Immediate goal."
+        }
+      ]
+    },
+    {
+      "id": "stable_diffusion",
+      "title": "Stable Diffusion Prompt",
+      "enabled": false,
+      "category": "image",
+      "description": "Optional image prompt. Disabled by default for text-only small-context card creation.",
+      "fields": [
+        {
+          "id": "positive",
+          "label": "Positive Prompt",
+          "enabled": true,
+          "hint": "Comma-separated visual descriptors."
+        },
+        {
+          "id": "negative",
+          "label": "Negative Prompt",
+          "enabled": true,
+          "hint": "low quality, bad anatomy, blurry, watermark, text"
+        }
+      ]
+    }
+  ],
+  "qa": {
+    "enabled": false,
+    "questions": [
+      "What does this character want from {{user}} at the start?",
+      "What personality flaw or contradiction makes them interesting?",
+      "What should the first scene feel like?"
+    ],
+    "sections": [
+      {
+        "id": "qa_basic",
+        "title": "Basic Character Depth",
+        "enabled": true,
+        "collapsed": false,
+        "questions": [
+          {
+            "enabled": true,
+            "text": "What does this character want from {{user}} at the start?"
+          },
+          {
+            "enabled": true,
+            "text": "What personality flaw or contradiction makes them interesting?"
+          },
+          {
+            "enabled": true,
+            "text": "What should the first scene feel like?"
+          }
+        ]
+      }
+    ]
+  }
+}

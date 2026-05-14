@@ -1,0 +1,28 @@
+{
+  "apiBaseUrl": "https://nano-gpt.com/api/v1",
+  "apiKey": "",
+  "model": "",
+  "temperature": 0.75,
+  "maxInputTokens": 200000,
+  "maxOutputTokens": 131000,
+  "mode": "full",
+  "frontend": "front_porch",
+  "firstMessageStyle": "cinematic",
+  "alternateFirstMessages": 2,
+  "emotionImageEmotions": [
+    "neutral"
+  ],
+  "alternateFirstMessageStyles": [],
+  "cardMode": "single",
+  "multiCharacterCount": 2,
+  "visionApiBaseUrl": "",
+  "visionApiKey": "",
+  "visionModel": "",
+  "visionImagePath": "",
+  "backupTextModel": "",
+  "backupTextMode": "same",
+  "exportFormat": "chara_v2_png",
+  "settingsSchemaVersion": "0.9.0",
+  "aiSuggestionModel": "",
+  "frontPorchDataFolder": ""
+}
