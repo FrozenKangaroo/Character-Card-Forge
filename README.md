@@ -237,3 +237,46 @@ Only redistribute this package if you have the right to share all included files
 
 - Improved Character Card PNG loading for V2/V3 cards that store metadata in compressed, URL-safe base64, or alternate PNG text chunks.
 - Added fallback loading from sidecar files such as `CharacterName.extracted.json` when a PNG metadata extractor can read the card but the PNG chunk is non-standard.
+
+## v0.9.11 browser folder/description polish
+
+- Virtual folders now appear directly in the Character Browser grid before character cards.
+- Folder tiles can show a small preview collage from characters inside the folder.
+- Folders remain virtual and can still be selected from the folder dropdown.
+- Added a **Show subfolders** checkbox beside **Saved Characters** to show or hide nested folder tiles.
+- Selected character descriptions now show whether the browser description is **AI generated** or **extracted from card**.
+- The destructive multi-select delete button was renamed to **Delete Physical Saved Card Folders** to clarify it deletes real local Character Card Forge saved/export directories, not virtual folders or Front Porch entries.
+
+
+## 0.9.12
+
+- Fixed virtual folder browsing so Root / Unfiled no longer leaks characters stored in subfolders.
+- Fixed the folder dropdown so selecting a folder changes the folder being viewed.
+- Fixed Show subfolders so it controls nested folder/card visibility in the current folder view.
+- Added rename and delete actions for virtual folders.
+- Deleting a virtual folder moves affected characters back to Root / Unfiled and does not delete physical folders or Front Porch entries.
+- New virtual folders are created inside the currently viewed virtual folder.
+
+
+### 0.9.13
+
+- Added clickable breadcrumb navigation above the Character Browser grid so nested virtual folders are easy to back out of.
+- Added an Up button when viewing a subfolder.
+
+
+## v0.9.14
+
+- Fixed virtual folder moves still appearing in the previous folder after rescanning physical saved character directories.
+- Virtual folder assignments are now cached separately from scanned project files, so browser organization wins over disk layout.
+- Moving characters to Root / Unfiled now clears the cached virtual-folder assignment.
+
+## Character Browser database
+
+From v0.9.15, the Character Browser uses a local SQLite database at `data/character_library.sqlite3` for virtual folder membership. The app still scans the physical `exports/` directory to discover saved character projects, but folder assignments are now stored in SQLite and are no longer guessed from the physical folder layout. This fixes moved cards reappearing in Root / Unfiled after refresh.
+
+Virtual folders remain browser-only. They do not move physical files on disk and they do not touch Front Porch AI entries.
+
+
+## Character Browser SQLite cache
+
+Character Browser now uses `data/character_library.sqlite3` as a cached index. The app still scans `exports/` to discover saved projects, but it stores card names, tags, browser descriptions, thumbnail image data, virtual folder membership, and hash checks in SQLite. If a project JSON, latest card PNG, or selected source image changes on disk, the next browser refresh or character open detects the hash change and refreshes the cached row. Editing the output text also autosaves back into the project and refreshes the SQLite cache after a short delay.

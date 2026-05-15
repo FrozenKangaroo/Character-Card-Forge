@@ -23,8 +23,10 @@ let browserTagMerges = {};
 let aiTagCleanupSuggestions = [];
 let browserSelectedProjects = new Set();
 let browserVirtualFolders = [];
-let browserCurrentFolderId = "__all__";
+let browserCurrentFolderId = "";
 let browserFolderScope = "global";
+let outputEditorSaveTimer = null;
+let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
 
@@ -279,6 +281,8 @@ function hydrateSettings() {
   $('#altCount').value = settings.alternateFirstMessages ?? 2;
   browserTagMerges = cleanBrowserTagMerges(settings.browserTagMerges || {});
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
+  browserShowSubfolders = !!settings.browserShowSubfolders;
+  const showSubfolders = $('#browserShowSubfolders'); if (showSubfolders) showSubfolders.checked = browserShowSubfolders;
 }
 
 
@@ -471,6 +475,7 @@ function collectSettings() {
     emotionImageEmotions: $$('#emotionOptions input:checked').map(el => el.value),
     browserTagMerges: browserTagMerges || {},
     browserVirtualFolders: browserVirtualFolders || [],
+    browserShowSubfolders: !!browserShowSubfolders,
   };
 }
 
@@ -990,7 +995,7 @@ function bindActions() {
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
-  $('#outputText').addEventListener('input', updateAvailability);
+  $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#generateBtn').addEventListener('click', generateCard);
   $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
@@ -999,8 +1004,11 @@ function bindActions() {
   $('#browserMultiExportJsonBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_json'));
   $('#browserMultiFrontPorchBtn')?.addEventListener('click', exportSelectedCharactersToFrontPorchBatch);
   $('#browserCreateFolderBtn')?.addEventListener('click', createBrowserVirtualFolder);
+  $('#browserRenameFolderBtn')?.addEventListener('click', renameCurrentBrowserFolder);
+  $('#browserDeleteFolderBtn')?.addEventListener('click', deleteCurrentBrowserFolder);
   $('#browserMoveToFolderBtn')?.addEventListener('click', moveSelectedCharactersToFolder);
-  $('#browserFolderSelect')?.addEventListener('change', (e) => { browserCurrentFolderId = e.target.value || '__all__'; renderCharacterBrowser(); });
+  $('#browserShowSubfolders')?.addEventListener('change', (e) => { browserShowSubfolders = !!e.currentTarget.checked; settings = { ...(settings || {}), browserShowSubfolders }; try { window.pywebview.api.save_settings(settings); } catch (_) {} renderCharacterBrowser(); });
+  $('#browserFolderSelect')?.addEventListener('change', (e) => { setBrowserCurrentFolder(e.target.value || '', `Opened ${browserFolderPathLabel(e.target.value || '')}.`); });
   $('#browserFolderScope')?.addEventListener('change', (e) => { browserFolderScope = e.target.value || 'global'; renderCharacterBrowser(); });
   $('#browserSortMode')?.addEventListener('change', (e) => { browserSortMode = e.target.value || 'date_desc'; renderCharacterBrowser(); });
   $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; renderCharacterBrowser(); });
@@ -2460,6 +2468,14 @@ function collectWorkspacePayload() {
   };
 }
 
+function scheduleOutputEditorAutosave() {
+  if (outputEditorSaveTimer) clearTimeout(outputEditorSaveTimer);
+  outputEditorSaveTimer = setTimeout(() => {
+    outputEditorSaveTimer = null;
+    if (!isBusy && hasOutput()) saveCurrentWorkspace('silent');
+  }, 1500);
+}
+
 async function saveCurrentWorkspace(reason='autosave') {
   if (!hasOutput()) return null;
   try {
@@ -2480,6 +2496,10 @@ async function refreshCharacterBrowser(showStatus=true) {
     const res = await window.pywebview.api.list_character_library();
     if (!res.ok) throw new Error(res.error || 'Could not load character browser.');
     characterBrowserCards = res.cards || [];
+    if (Array.isArray(res.folders)) {
+      browserVirtualFolders = res.folders;
+      if (settings) settings.browserVirtualFolders = res.folders;
+    }
     if (selectedCharacterProjectPath && !characterBrowserCards.some(c => c.projectPath === selectedCharacterProjectPath)) {
       selectedCharacterProjectPath = '';
     }
@@ -2521,20 +2541,43 @@ function browserCardFolderId(card) {
   return normaliseFolderId(card?.virtualFolderId || '');
 }
 
-function browserCardMatchesFolderScope(card) {
-  if (browserFolderScope === 'global' || browserCurrentFolderId === '__all__') return true;
+function browserFolderIdsForView(mode = 'view') {
   const current = normaliseFolderId(browserCurrentFolderId);
-  const cardFolder = browserCardFolderId(card);
-  if (browserFolderScope === 'current') return cardFolder === current;
-  if (browserFolderScope === 'current_subfolders') {
-    if (cardFolder === current) return true;
-    return browserFolderDescendantIds(current).has(cardFolder);
+  if (current === '__all__') return null; // null means every folder/card is in scope.
+  const includeSubfolders = mode === 'current_subfolders' || (mode === 'view' && browserShowSubfolders);
+  const ids = new Set([current]);
+  if (includeSubfolders) {
+    browserFolderDescendantIds(current).forEach(id => ids.add(id));
   }
-  return true;
+  return ids;
+}
+
+function browserCardMatchesFolderView(card) {
+  const ids = browserFolderIdsForView('view');
+  if (ids === null) return true;
+  return ids.has(browserCardFolderId(card));
+}
+
+function browserCardsForSearchAndFilter() {
+  // Folder dropdown controls the normal view. When search/filter is active,
+  // this dropdown decides how far the search/filter should reach.
+  if (browserFolderScope === 'global') return characterBrowserCards.slice();
+  if (browserCurrentFolderId === '__all__') return characterBrowserCards.slice();
+  const ids = browserFolderIdsForView(browserFolderScope === 'current_subfolders' ? 'current_subfolders' : 'current');
+  if (ids === null) return characterBrowserCards.slice();
+  return characterBrowserCards.filter(card => ids.has(browserCardFolderId(card)));
+}
+
+function browserViewCards() {
+  return characterBrowserCards.filter(browserCardMatchesFolderView);
+}
+
+function browserSearchOrFilterActive() {
+  return !!browserSearchTerm.trim() || browserIncludeTags.size > 0 || browserExcludeTags.size > 0;
 }
 
 function browserScopeCards() {
-  return characterBrowserCards.filter(browserCardMatchesFolderScope);
+  return browserSearchOrFilterActive() ? browserCardsForSearchAndFilter() : browserViewCards();
 }
 
 function browserFolderLabel(folderId) {
@@ -2555,22 +2598,69 @@ function browserFolderPathLabel(folderId) {
   return parts.join(' / ') || 'Unfiled';
 }
 
+function browserFolderPathParts(folderId) {
+  const id = normaliseFolderId(folderId);
+  if (id === '__all__') return [{ id: '__all__', name: 'All folders' }];
+  const parts = [{ id: '', name: 'Root / Unfiled' }];
+  if (!id) return parts;
+  let current = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === id);
+  const chain = [];
+  const guard = new Set();
+  while (current && !guard.has(current.id)) {
+    guard.add(current.id);
+    chain.unshift({ id: current.id, name: current.name || 'Folder' });
+    current = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === normaliseFolderId(current.parentId));
+  }
+  return parts.concat(chain);
+}
+
+function setBrowserCurrentFolder(folderId, message = '') {
+  browserCurrentFolderId = normaliseFolderId(folderId);
+  const folderSelect = $('#browserFolderSelect');
+  if (folderSelect) folderSelect.value = browserCurrentFolderId;
+  renderCharacterBrowser();
+  if (message) setStatus(message, 'ok');
+}
+
+function renderBrowserBreadcrumb() {
+  const holder = $('#browserBreadcrumb');
+  if (!holder) return;
+  const parts = browserFolderPathParts(browserCurrentFolderId);
+  const current = normaliseFolderId(browserCurrentFolderId);
+  const parentId = (() => {
+    if (!current || current === '__all__') return '';
+    const folder = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === current);
+    return normaliseFolderId(folder?.parentId || '');
+  })();
+  const upButton = current && current !== '__all__'
+    ? `<button type="button" class="breadcrumb-up" data-folder="${escapeAttr(parentId)}">↑ Up</button>`
+    : '';
+  holder.innerHTML = `${upButton}<span class="breadcrumb-label">Location:</span> ` + parts.map((part, index) => {
+    const isLast = index === parts.length - 1;
+    const cls = isLast ? 'breadcrumb-part current' : 'breadcrumb-part';
+    return `<button type="button" class="${cls}" data-folder="${escapeAttr(part.id)}" ${isLast ? 'disabled' : ''}>${escapeHtml(part.name)}</button>`;
+  }).join('<span class="breadcrumb-sep">›</span>');
+  $$('.breadcrumb-part:not(.current), .breadcrumb-up', holder).forEach(btn => {
+    btn.addEventListener('click', () => setBrowserCurrentFolder(btn.dataset.folder || '', `Opened ${browserFolderPathLabel(btn.dataset.folder || '')}.`));
+  });
+}
+
 function renderBrowserFolderControls() {
   const folderSelect = $('#browserFolderSelect');
   const moveSelect = $('#browserMoveFolderSelect');
   const scopeSelect = $('#browserFolderScope');
-  const options = ['<option value="__all__">All folders</option>', '<option value="">Unfiled</option>']
+  const options = ['<option value="">Root / Unfiled</option>', '<option value="__all__">All folders</option>']
     .concat((browserVirtualFolders || [])
       .slice()
       .sort((a,b) => browserFolderPathLabel(a.id).localeCompare(browserFolderPathLabel(b.id), undefined, { sensitivity: 'base' }))
       .map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(browserFolderPathLabel(f.id))}</option>`));
   if (folderSelect) {
     folderSelect.innerHTML = options.join('');
-    if (![...folderSelect.options].some(o => o.value === browserCurrentFolderId)) browserCurrentFolderId = '__all__';
+    if (![...folderSelect.options].some(o => o.value === browserCurrentFolderId)) browserCurrentFolderId = '';
     folderSelect.value = browserCurrentFolderId;
   }
   if (moveSelect) {
-    const moveOptions = ['<option value="">Unfiled</option>'].concat((browserVirtualFolders || [])
+    const moveOptions = ['<option value="">Root / Unfiled</option>'].concat((browserVirtualFolders || [])
       .slice()
       .sort((a,b) => browserFolderPathLabel(a.id).localeCompare(browserFolderPathLabel(b.id), undefined, { sensitivity: 'base' }))
       .map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(browserFolderPathLabel(f.id))}</option>`));
@@ -2591,7 +2681,7 @@ function updateBrowserMultiActionState() {
 }
 
 async function saveBrowserVirtualFolders() {
-  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [] };
+  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [], browserShowSubfolders: !!browserShowSubfolders };
   try {
     await window.pywebview.api.save_settings(settings);
     if (window.pywebview.api.save_browser_virtual_folders) await window.pywebview.api.save_browser_virtual_folders(browserVirtualFolders || []);
@@ -2611,6 +2701,57 @@ async function createBrowserVirtualFolder() {
   browserCurrentFolderId = folder.id;
   renderCharacterBrowser();
   setStatus(`Created virtual folder: ${clean}`, 'ok');
+}
+
+async function renameCurrentBrowserFolder() {
+  const folderId = normaliseFolderId(browserCurrentFolderId);
+  if (!folderId || folderId === '__all__') {
+    setStatus('Select a virtual folder first. Root / All folders cannot be renamed.', 'error');
+    return;
+  }
+  const folder = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === folderId);
+  if (!folder) { setStatus('Selected virtual folder was not found.', 'error'); return; }
+  const name = prompt('Rename virtual folder:', folder.name || '');
+  const clean = String(name || '').trim();
+  if (!clean) return;
+  folder.name = clean;
+  await saveBrowserVirtualFolders();
+  renderCharacterBrowser();
+  setStatus(`Renamed virtual folder to: ${clean}`, 'ok');
+}
+
+async function deleteCurrentBrowserFolder() {
+  const folderId = normaliseFolderId(browserCurrentFolderId);
+  if (!folderId || folderId === '__all__') {
+    setStatus('Select a virtual folder first. Root / All folders cannot be deleted.', 'error');
+    return;
+  }
+  const folder = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === folderId);
+  if (!folder) { setStatus('Selected virtual folder was not found.', 'error'); return; }
+  const deleteIds = folderDescendantOrSelfIds(folderId);
+  const affectedCards = (characterBrowserCards || []).filter(card => deleteIds.has(browserCardFolderId(card)));
+  const childFolderCount = Math.max(0, deleteIds.size - 1);
+  const ok = confirm(`Delete virtual folder "${folder.name}"${childFolderCount ? ` and ${childFolderCount} subfolder${childFolderCount === 1 ? '' : 's'}` : ''}?
+
+${affectedCards.length} character${affectedCards.length === 1 ? '' : 's'} will be moved back to Root / Unfiled. Physical saved card folders and Front Porch entries are not deleted.`);
+  if (!ok) return;
+  setBusy('DELETING VIRTUAL FOLDER…');
+  try {
+    const paths = affectedCards.map(card => card.projectPath).filter(Boolean);
+    if (paths.length) {
+      const res = await window.pywebview.api.move_character_projects_to_folder(paths, '');
+      if (!res.ok) throw new Error(res.error || 'Could not move characters back to root.');
+    }
+    browserVirtualFolders = (browserVirtualFolders || []).filter(f => !deleteIds.has(normaliseFolderId(f.id)));
+    browserCurrentFolderId = '';
+    await saveBrowserVirtualFolders();
+    await refreshCharacterBrowser(false);
+    setStatus(`Deleted virtual folder. Moved ${affectedCards.length} character${affectedCards.length === 1 ? '' : 's'} back to Root / Unfiled.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
 }
 
 async function moveSelectedCharactersToFolder() {
@@ -2633,16 +2774,16 @@ async function moveSelectedCharactersToFolder() {
 async function deleteSelectedCharacterDirectories() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
-  const ok = confirm(`Delete ${paths.length} local Character Card Forge director${paths.length === 1 ? 'y' : 'ies'}?\n\nThis only removes the local saved/export folder. It does not touch Front Porch AI database entries.`);
+  const ok = confirm(`Delete ${paths.length} physical saved Character Card Forge folder${paths.length === 1 ? '' : 's'} from disk?\n\nThis removes the real saved/export folder inside Character Card Forge. It does not delete virtual folders and does not touch Front Porch AI database entries.`);
   if (!ok) return;
-  setBusy('DELETING LOCAL CHARACTER DIRECTORIES…');
+  setBusy('DELETING PHYSICAL SAVED CHARACTER FOLDERS…');
   try {
     const res = await window.pywebview.api.delete_character_project_directories(paths);
     if (!res.ok) throw new Error(res.error || 'Delete failed.');
     browserSelectedProjects.clear();
     selectedCharacterProjectPath = '';
     await refreshCharacterBrowser(false);
-    setStatus(`Deleted ${res.deleted || 0} local character director${res.deleted === 1 ? 'y' : 'ies'}. Front Porch was not touched.`, 'ok');
+    setStatus(`Deleted ${res.deleted || 0} physical saved character folder${res.deleted === 1 ? '' : 's'}. Virtual folders and Front Porch were not touched.`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -3030,9 +3171,20 @@ async function regenerateSelectedBrowserDescription() {
     const res = await window.pywebview.api.regenerate_browser_description_for_project(selectedCharacterProjectPath, settings || {});
     if (!res.ok) throw new Error(res.error || 'Could not regenerate description.');
     const card = getSelectedBrowserCard();
-    if (card) card.browserDescription = res.browserDescription || card.browserDescription || '';
+    if (card) {
+      card.browserDescription = res.browserDescription || card.browserDescription || '';
+      card.browserDescriptionSource = res.browserDescriptionSource || 'ai';
+    }
     const preview = $('#browserPreview');
     if (preview) preview.value = res.browserDescription || '';
+    const sourceBadge = $('#browserDescriptionSource');
+    if (sourceBadge) {
+      const source = res.browserDescriptionSource || 'ai';
+      sourceBadge.textContent = descriptionSourceLabel(source);
+      sourceBadge.classList.remove('hidden');
+      sourceBadge.classList.toggle('ai-source', String(source).toLowerCase() === 'ai');
+      sourceBadge.classList.toggle('extracted-source', String(source).toLowerCase() !== 'ai');
+    }
     await refreshCharacterBrowser(false);
     setStatus('AI browser description updated.', 'ok');
   } catch (err) {
@@ -3165,26 +3317,92 @@ function renderBrowserLetterStrip(cards) {
   });
 }
 
+
+function folderDescendantOrSelfIds(folderId) {
+  const id = normaliseFolderId(folderId);
+  const ids = browserFolderDescendantIds(id);
+  ids.add(id);
+  return ids;
+}
+
+function browserFolderVisibleInGrid(folder) {
+  const fid = normaliseFolderId(folder?.id);
+  if (!fid) return false;
+  const parent = normaliseFolderId(folder?.parentId);
+  const current = normaliseFolderId(browserCurrentFolderId);
+  if (current === '__all__') {
+    return browserShowSubfolders ? true : parent === '';
+  }
+  if (browserShowSubfolders) {
+    if (parent === current) return true;
+    return browserFolderDescendantIds(current).has(fid);
+  }
+  return parent === current;
+}
+
+function browserFolderCardCards(folderId, sourceCards = null) {
+  const ids = folderDescendantOrSelfIds(folderId);
+  const pool = sourceCards || characterBrowserCards || [];
+  return pool.filter(card => ids.has(browserCardFolderId(card)));
+}
+
+function getVisibleBrowserFolders(visibleCards) {
+  const folders = (browserVirtualFolders || []).filter(browserFolderVisibleInGrid);
+  // When searching/filtering, hide folder tiles that contain no matching character
+  // within the active search/filter result set. Otherwise keep empty folders visible.
+  const searchActive = browserSearchOrFilterActive();
+  const filtered = searchActive
+    ? folders.filter(folder => browserFolderCardCards(folder.id, visibleCards).length > 0)
+    : folders;
+  return filtered.slice().sort((a,b) => browserFolderPathLabel(a.id).localeCompare(browserFolderPathLabel(b.id), undefined, { sensitivity: 'base' }));
+}
+
+function renderFolderPreviewThumbs(folder, visibleCards) {
+  const source = browserSearchOrFilterActive() ? visibleCards : characterBrowserCards;
+  const cards = browserFolderCardCards(folder.id, source)
+    .filter(card => card.thumbnail)
+    .slice(0, 4);
+  if (!cards.length) return '<div class="folder-empty-icon">📁</div>';
+  return cards.map(card => `<img src="${card.thumbnail}" alt="${escapeAttr(card.name || '')}" />`).join('');
+}
+
+function folderCardCount(folderId) {
+  return browserFolderCardCards(folderId, characterBrowserCards).length;
+}
+
 function renderCharacterBrowser() {
   const grid = $('#characterGrid');
   if (!grid) return;
   renderBrowserFolderControls();
+  renderBrowserBreadcrumb();
   renderBrowserFilterPanel();
   const visibleCards = getVisibleBrowserCards();
   renderBrowserLetterStrip(visibleCards);
   const countEl = $('#browserResultCount');
   const scopedTotal = browserScopeCards().length;
   if (countEl) countEl.textContent = `${visibleCards.length} / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
-  if (!characterBrowserCards.length) {
+  const visibleFolders = getVisibleBrowserFolders(visibleCards);
+  if (!characterBrowserCards.length && !visibleFolders.length) {
     grid.innerHTML = '<div class="empty">No saved characters yet. Generate a card first.</div>';
     return;
   }
-  if (!visibleCards.length) {
-    grid.innerHTML = '<div class="empty">No characters match the current search/filter.</div>';
+  if (!visibleCards.length && !visibleFolders.length) {
+    grid.innerHTML = '<div class="empty">No characters or folders match the current search/filter.</div>';
     return;
   }
   updateBrowserMultiActionState();
-  grid.innerHTML = visibleCards.map(card => {
+  const folderHtml = visibleFolders.map(folder => {
+    const count = folderCardCount(folder.id);
+    return `
+    <div class="browser-folder-tile" data-folder="${escapeAttr(folder.id)}">
+      <div class="folder-thumb-grid">${renderFolderPreviewThumbs(folder, visibleCards)}</div>
+      <div class="folder-tile-name">📁 ${escapeHtml(folder.name || 'Folder')}</div>
+      <div class="folder-tile-path">${escapeHtml(browserFolderPathLabel(folder.id))}</div>
+      <div class="folder-tile-count">${count} character${count === 1 ? '' : 's'}</div>
+      <div class="folder-tile-actions"><button type="button" class="folder-rename-btn" data-folder="${escapeAttr(folder.id)}">Rename</button><button type="button" class="folder-delete-btn danger-ghost" data-folder="${escapeAttr(folder.id)}">Delete</button></div>
+    </div>`;
+  }).join('');
+  const cardHtml = visibleCards.map(card => {
     const name = card.name || 'Unnamed';
     const ch = String(name).trim().charAt(0).toUpperCase();
     const letter = /^[A-Z]$/.test(ch) ? ch : '#';
@@ -3194,12 +3412,34 @@ function renderCharacterBrowser() {
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
+      <div class="character-tile-summary-source ${String(card.browserDescriptionSource || '').toLowerCase() === 'ai' ? 'ai-source' : 'extracted-source'}">${escapeHtml(descriptionSourceLabel(card.browserDescriptionSource))}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
       <div class="character-tile-tags">${cardEffectiveTags(card).slice(0, 5).map(t => `<button type="button" class="character-tag-chip ${isMergedBrowserTag(t) ? 'merged-display' : ''}" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`).join('')}</div>
       <div class="character-tile-folder">${escapeHtml(browserFolderPathLabel(card.virtualFolderId || ''))}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
     </div>
   `}).join('');
+  grid.innerHTML = folderHtml + cardHtml;
+  $$('.folder-rename-btn', grid).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      browserCurrentFolderId = btn.dataset.folder || '';
+      renameCurrentBrowserFolder();
+    });
+  });
+  $$('.folder-delete-btn', grid).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      browserCurrentFolderId = btn.dataset.folder || '';
+      deleteCurrentBrowserFolder();
+    });
+  });
+  $$('.browser-folder-tile', grid).forEach(tile => {
+    tile.addEventListener('click', () => {
+      const id = tile.dataset.folder || '';
+      setBrowserCurrentFolder(id, `Opened virtual folder: ${browserFolderPathLabel(id)}`);
+    });
+  });
   $$('.browser-card-checkbox', grid).forEach(box => {
     box.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -3251,11 +3491,24 @@ function renderSelectedCharacterTags(card) {
   wireTagEditor();
 }
 
+function descriptionSourceLabel(source) {
+  const s = String(source || '').toLowerCase();
+  if (s === 'ai') return 'AI generated description';
+  return 'Extracted from card';
+}
+
 function selectCharacterBrowserCard(projectPath) {
   selectedCharacterProjectPath = projectPath || '';
   const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
   $$('.character-card-tile').forEach(el => el.classList.toggle('selected', el.dataset.project === selectedCharacterProjectPath));
   $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${browserFolderPathLabel(card.virtualFolderId || '')} — ${card.folder}` : 'Select a character card.';
+  const sourceBadge = $('#browserDescriptionSource');
+  if (sourceBadge) {
+    sourceBadge.textContent = card ? descriptionSourceLabel(card.browserDescriptionSource) : '';
+    sourceBadge.classList.toggle('hidden', !card);
+    sourceBadge.classList.toggle('ai-source', !!card && String(card.browserDescriptionSource || '').toLowerCase() === 'ai');
+    sourceBadge.classList.toggle('extracted-source', !!card && String(card.browserDescriptionSource || '').toLowerCase() !== 'ai');
+  }
   $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
   renderSelectedCharacterTags(card);
 }

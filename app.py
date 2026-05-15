@@ -31,6 +31,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 TEMPLATE_FILE = DATA_DIR / "template.json"
 TEMPLATES_DIR = DATA_DIR / "templates"
 LOG_FILE = DATA_DIR / "debug.log"
+LIBRARY_DB_FILE = DATA_DIR / "character_library.sqlite3"
 DATA_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 EXPORT_DIR.mkdir(exist_ok=True)
@@ -91,6 +92,8 @@ DEFAULT_SETTINGS = {
     "frontPorchDataFolder": "",
     "browserTagMerges": {},
     "browserVirtualFolders": [],
+    "browserVirtualFolderAssignments": {},
+    "browserShowSubfolders": False,
 }
 
 DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and formatter.',
@@ -259,6 +262,8 @@ class Api:
         self.template = self._normalise_template(self._load_json(TEMPLATE_FILE, DEFAULT_TEMPLATE))
         self._save_json(TEMPLATE_FILE, self.template)
         self.cancel_event = threading.Event()
+        self._last_browser_description_source = "extracted"
+        self._init_library_db()
 
     def _load_json(self, path, default):
         if path.exists():
@@ -271,6 +276,377 @@ class Api:
 
     def _save_json(self, path, data):
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _library_connect(self):
+        conn = sqlite3.connect(str(LIBRARY_DB_FILE))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_library_db(self):
+        """Create the browser library database and migrate old settings-based folders/assignments."""
+        DATA_DIR.mkdir(exist_ok=True)
+        with self._library_connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS browser_folders (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    parent_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS browser_cards (
+                    project_path TEXT PRIMARY KEY,
+                    folder_path TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    virtual_folder_id TEXT NOT NULL DEFAULT '',
+                    updated_ts REAL NOT NULL DEFAULT 0,
+                    last_seen_ts REAL NOT NULL DEFAULT 0,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    project_hash TEXT NOT NULL DEFAULT '',
+                    output_hash TEXT NOT NULL DEFAULT '',
+                    card_png_path TEXT NOT NULL DEFAULT '',
+                    card_png_hash TEXT NOT NULL DEFAULT '',
+                    image_path TEXT NOT NULL DEFAULT '',
+                    image_hash TEXT NOT NULL DEFAULT '',
+                    thumbnail_data_url TEXT NOT NULL DEFAULT '',
+                    browser_description TEXT NOT NULL DEFAULT '',
+                    browser_description_source TEXT NOT NULL DEFAULT '',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    output_preview TEXT NOT NULL DEFAULT '',
+                    has_emotion_images INTEGER NOT NULL DEFAULT 0,
+                    metadata_json TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_cards_virtual_folder ON browser_cards(virtual_folder_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_cards_last_seen ON browser_cards(last_seen_ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_folders_parent ON browser_folders(parent_id)")
+            # Lightweight migrations for older browser-library databases.
+            existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(browser_cards)").fetchall()}
+            new_cols = {
+                "project_hash": "TEXT NOT NULL DEFAULT ''",
+                "output_hash": "TEXT NOT NULL DEFAULT ''",
+                "card_png_path": "TEXT NOT NULL DEFAULT ''",
+                "card_png_hash": "TEXT NOT NULL DEFAULT ''",
+                "image_path": "TEXT NOT NULL DEFAULT ''",
+                "image_hash": "TEXT NOT NULL DEFAULT ''",
+                "thumbnail_data_url": "TEXT NOT NULL DEFAULT ''",
+                "browser_description": "TEXT NOT NULL DEFAULT ''",
+                "browser_description_source": "TEXT NOT NULL DEFAULT ''",
+                "tags_json": "TEXT NOT NULL DEFAULT '[]'",
+                "output_preview": "TEXT NOT NULL DEFAULT ''",
+                "has_emotion_images": "INTEGER NOT NULL DEFAULT 0",
+                "metadata_json": "TEXT NOT NULL DEFAULT ''",
+            }
+            for col, ddl in new_cols.items():
+                if col not in existing_cols:
+                    conn.execute(f"ALTER TABLE browser_cards ADD COLUMN {col} {ddl}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_cards_project_hash ON browser_cards(project_hash)")
+
+            # Migrate old settings virtual folders into DB. This is idempotent.
+            folders = self.settings.get("browserVirtualFolders") if isinstance(self.settings.get("browserVirtualFolders"), list) else []
+            for item in folders:
+                if not isinstance(item, dict):
+                    continue
+                fid = str(item.get("id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                parent = str(item.get("parentId") or "").strip()
+                if fid and name:
+                    conn.execute(
+                        "INSERT INTO browser_folders(id, name, parent_id) VALUES(?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, parent_id=excluded.parent_id, updated_at=CURRENT_TIMESTAMP",
+                        (fid, name[:120], parent),
+                    )
+            conn.commit()
+
+    def _library_folders(self):
+        self._init_library_db()
+        with self._library_connect() as conn:
+            rows = conn.execute("SELECT id, name, parent_id FROM browser_folders ORDER BY lower(name), id").fetchall()
+        return [{"id": r["id"], "name": r["name"], "parentId": r["parent_id"] or ""} for r in rows]
+
+    def _library_known_folder_ids(self):
+        return {f["id"] for f in self._library_folders()}
+
+    def _library_card_exists(self, project_path):
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        with self._library_connect() as conn:
+            row = conn.execute("SELECT 1 FROM browser_cards WHERE project_path=?", (key,)).fetchone()
+        return row is not None
+
+    def _library_get_card_folder(self, project_path, fallback=""):
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        with self._library_connect() as conn:
+            row = conn.execute("SELECT virtual_folder_id FROM browser_cards WHERE project_path=? AND deleted=0", (key,)).fetchone()
+        return str(row["virtual_folder_id"] or "").strip() if row else str(fallback or "").strip()
+
+    def _library_upsert_card(self, project_path, folder_path, name, virtual_folder_id=None, updated_ts=None, metadata=None):
+        """Upsert a card row. Existing DB folder assignment wins unless virtual_folder_id is explicitly supplied.
+
+        metadata is the cached browser/index payload. It lets the browser use SQLite
+        instead of reparsing every project/image on each refresh.
+        """
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        folder = str(Path(folder_path).resolve()) if folder_path else ""
+        name = str(name or "").strip()
+        now = time.time()
+        if updated_ts is None:
+            try:
+                updated_ts = Path(project_path).stat().st_mtime
+            except Exception:
+                updated_ts = now
+        metadata = metadata if isinstance(metadata, dict) else {}
+        with self._library_connect() as conn:
+            existing = conn.execute("SELECT * FROM browser_cards WHERE project_path=?", (key,)).fetchone()
+            existing_d = dict(existing) if existing else {}
+            if not metadata and existing_d:
+                # Folder-only updates should not wipe cached card metadata/images.
+                try:
+                    existing_tags = json.loads(existing_d.get("tags_json") or "[]")
+                except Exception:
+                    existing_tags = []
+                metadata = {
+                    "projectHash": existing_d.get("project_hash") or "",
+                    "outputHash": existing_d.get("output_hash") or "",
+                    "cardPngPath": existing_d.get("card_png_path") or "",
+                    "cardPngHash": existing_d.get("card_png_hash") or "",
+                    "imagePath": existing_d.get("image_path") or "",
+                    "imageHash": existing_d.get("image_hash") or "",
+                    "thumbnail": existing_d.get("thumbnail_data_url") or "",
+                    "browserDescription": existing_d.get("browser_description") or "",
+                    "browserDescriptionSource": existing_d.get("browser_description_source") or "",
+                    "tags": existing_tags if isinstance(existing_tags, list) else [],
+                    "outputPreview": existing_d.get("output_preview") or "",
+                    "hasEmotionImages": bool(existing_d.get("has_emotion_images")),
+                }
+            if virtual_folder_id is None:
+                chosen_folder = str(existing_d.get("virtual_folder_id") or "").strip() if existing_d else ""
+            else:
+                chosen_folder = str(virtual_folder_id or "").strip()
+            conn.execute(
+                "INSERT INTO browser_cards(" 
+                "project_path, folder_path, name, virtual_folder_id, updated_ts, last_seen_ts, deleted, "
+                "project_hash, output_hash, card_png_path, card_png_hash, image_path, image_hash, "
+                "thumbnail_data_url, browser_description, browser_description_source, tags_json, "
+                "output_preview, has_emotion_images, metadata_json" 
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(project_path) DO UPDATE SET "
+                "folder_path=excluded.folder_path, name=excluded.name, "
+                "updated_ts=excluded.updated_ts, last_seen_ts=excluded.last_seen_ts, deleted=0, "
+                "virtual_folder_id=excluded.virtual_folder_id, "
+                "project_hash=excluded.project_hash, output_hash=excluded.output_hash, "
+                "card_png_path=excluded.card_png_path, card_png_hash=excluded.card_png_hash, "
+                "image_path=excluded.image_path, image_hash=excluded.image_hash, "
+                "thumbnail_data_url=excluded.thumbnail_data_url, "
+                "browser_description=excluded.browser_description, browser_description_source=excluded.browser_description_source, "
+                "tags_json=excluded.tags_json, output_preview=excluded.output_preview, "
+                "has_emotion_images=excluded.has_emotion_images, metadata_json=excluded.metadata_json",
+                (
+                    key, folder, name, chosen_folder, float(updated_ts or 0), now, 0,
+                    str(metadata.get("projectHash") or ""),
+                    str(metadata.get("outputHash") or ""),
+                    str(metadata.get("cardPngPath") or ""),
+                    str(metadata.get("cardPngHash") or ""),
+                    str(metadata.get("imagePath") or ""),
+                    str(metadata.get("imageHash") or ""),
+                    str(metadata.get("thumbnail") or ""),
+                    str(metadata.get("browserDescription") or ""),
+                    str(metadata.get("browserDescriptionSource") or ""),
+                    json.dumps(metadata.get("tags") if isinstance(metadata.get("tags"), list) else [], ensure_ascii=False),
+                    str(metadata.get("outputPreview") or ""),
+                    1 if metadata.get("hasEmotionImages") else 0,
+                    json.dumps(metadata.get("extra") if isinstance(metadata.get("extra"), dict) else {}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+        return chosen_folder
+
+    def _library_get_card_row(self, project_path):
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        with self._library_connect() as conn:
+            row = conn.execute("SELECT * FROM browser_cards WHERE project_path=? AND deleted=0", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def _hash_file(self, path):
+        try:
+            p = Path(str(path or ""))
+            if not p.exists() or not p.is_file():
+                return ""
+            h = hashlib.sha256()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return ""
+
+    def _hash_text(self, text):
+        try:
+            return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()
+        except Exception:
+            return ""
+
+    def _latest_card_png_for_folder(self, folder, name):
+        folder = Path(folder)
+        latest_pngs = [folder / f"{self._safe_slug(name)}_latest_cardv2.png"] + sorted(folder.glob("*_cardv2.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return next((p for p in latest_pngs if p and Path(p).exists()), None)
+
+    def _browser_card_from_db_row(self, row):
+        try:
+            tags = json.loads(row.get("tags_json") or "[]")
+            if not isinstance(tags, list):
+                tags = []
+        except Exception:
+            tags = []
+        updated_ts = float(row.get("updated_ts") or 0)
+        return {
+            "name": row.get("name") or Path(row.get("folder_path") or "").name,
+            "folder": row.get("folder_path") or "",
+            "projectPath": row.get("project_path") or "",
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_ts or time.time())),
+            "thumbnail": row.get("thumbnail_data_url") or "",
+            "browserDescription": row.get("browser_description") or "",
+            "browserDescriptionSource": row.get("browser_description_source") or "extracted",
+            "tags": tags,
+            "virtualFolderId": str(row.get("virtual_folder_id") or ""),
+            "outputPreview": row.get("output_preview") or "",
+            "hasEmotionImages": bool(row.get("has_emotion_images")),
+            "cached": True,
+            "projectHash": row.get("project_hash") or "",
+            "cardPngHash": row.get("card_png_hash") or "",
+            "imageHash": row.get("image_hash") or "",
+        }
+
+    def _refresh_library_cache_for_project(self, project_path, force=False):
+        """Refresh one project cache if its project/card/image hashes changed."""
+        path = Path(project_path)
+        if not path.exists():
+            return None
+        folder = path.parent
+        project_hash = self._hash_file(path)
+        row = self._library_get_card_row(path)
+        if row and not force and str(row.get("project_hash") or "") == project_hash:
+            # Do a quick real-file hash check for the cached images too.
+            card_png_path = str(row.get("card_png_path") or "")
+            image_path = str(row.get("image_path") or "")
+            card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
+            image_hash_ok = (not image_path) or self._hash_file(image_path) == str(row.get("image_hash") or "")
+            if card_hash_ok and image_hash_ok:
+                return self._browser_card_from_db_row(row)
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        project = payload.get("project", payload) if isinstance(payload, dict) else {}
+        if not isinstance(project, dict):
+            return None
+        workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+        name = project.get("name") or self._extract_name(project.get("output") or "") or folder.name
+        output = project.get("output") or ""
+        concept = project.get("concept") or ""
+        image_path = project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or ""
+        card_png = self._latest_card_png_for_folder(folder, name)
+        thumb_source = str(card_png) if card_png else image_path
+        browser_description = str(project.get("browserDescription") or "").strip()
+        browser_description_source = str(project.get("browserDescriptionSource") or "").strip().lower()
+        if browser_description:
+            browser_description_source = browser_description_source or "ai"
+        if not browser_description:
+            browser_description = self._fallback_browser_description(output, concept)
+            browser_description_source = "extracted"
+        tags = project.get("tags") if isinstance(project.get("tags"), list) else []
+        if not tags:
+            tags = self._extract_tags_from_output(output, project.get("template") or self.template)
+        old_assignment = self._get_virtual_folder_assignment(path, folder, name, project.get("virtualFolderId") or "")
+        if row:
+            virtual_folder_id = self._library_upsert_card(path, folder, name, None, path.stat().st_mtime, {
+                "projectHash": project_hash,
+                "outputHash": self._hash_text(output),
+                "cardPngPath": str(card_png or ""),
+                "cardPngHash": self._hash_file(card_png) if card_png else "",
+                "imagePath": str(image_path or ""),
+                "imageHash": self._hash_file(image_path) if image_path else "",
+                "thumbnail": self._image_data_url(thumb_source or image_path),
+                "browserDescription": browser_description,
+                "browserDescriptionSource": browser_description_source,
+                "tags": tags,
+                "outputPreview": output[:500],
+                "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
+                "extra": {"conceptHash": self._hash_text(concept)},
+            })
+        else:
+            virtual_folder_id = self._library_upsert_card(path, folder, name, old_assignment, path.stat().st_mtime, {
+                "projectHash": project_hash,
+                "outputHash": self._hash_text(output),
+                "cardPngPath": str(card_png or ""),
+                "cardPngHash": self._hash_file(card_png) if card_png else "",
+                "imagePath": str(image_path or ""),
+                "imageHash": self._hash_file(image_path) if image_path else "",
+                "thumbnail": self._image_data_url(thumb_source or image_path),
+                "browserDescription": browser_description,
+                "browserDescriptionSource": browser_description_source,
+                "tags": tags,
+                "outputPreview": output[:500],
+                "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
+                "extra": {"conceptHash": self._hash_text(concept)},
+            })
+        if virtual_folder_id != str(project.get("virtualFolderId") or ""):
+            try:
+                project["virtualFolderId"] = virtual_folder_id
+                workspace["virtualFolderId"] = virtual_folder_id
+                project["workspace"] = workspace
+                path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                # Project changed because of portability mirror; refresh hash but keep same cached metadata.
+                self._library_upsert_card(path, folder, name, virtual_folder_id, path.stat().st_mtime, {
+                    "projectHash": self._hash_file(path),
+                    "outputHash": self._hash_text(output),
+                    "cardPngPath": str(card_png or ""),
+                    "cardPngHash": self._hash_file(card_png) if card_png else "",
+                    "imagePath": str(image_path or ""),
+                    "imageHash": self._hash_file(image_path) if image_path else "",
+                    "thumbnail": self._image_data_url(thumb_source or image_path),
+                    "browserDescription": browser_description,
+                    "browserDescriptionSource": browser_description_source,
+                    "tags": tags,
+                    "outputPreview": output[:500],
+                    "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
+                    "extra": {"conceptHash": self._hash_text(concept)},
+                })
+            except Exception:
+                pass
+        row = self._library_get_card_row(path)
+        return self._browser_card_from_db_row(row) if row else None
+
+    def _library_set_card_folder(self, project_path, folder_id):
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        folder_id = str(folder_id or "").strip()
+        with self._library_connect() as conn:
+            conn.execute(
+                "UPDATE browser_cards SET virtual_folder_id=?, updated_ts=?, last_seen_ts=?, deleted=0 WHERE project_path=?",
+                (folder_id, time.time(), time.time(), key),
+            )
+            # If the card was never scanned/upserted, create a minimal row so the assignment still survives.
+            if conn.total_changes == 0:
+                conn.execute(
+                    "INSERT OR REPLACE INTO browser_cards(project_path, folder_path, name, virtual_folder_id, updated_ts, last_seen_ts, deleted) VALUES(?,?,?,?,?,?,0)",
+                    (key, str(Path(project_path).parent.resolve()), Path(project_path).parent.name, folder_id, time.time(), time.time()),
+                )
+            conn.commit()
+
+    def _library_delete_folders(self, folder_ids):
+        ids = [str(x or "").strip() for x in (folder_ids or []) if str(x or "").strip()]
+        if not ids:
+            return
+        self._init_library_db()
+        with self._library_connect() as conn:
+            conn.executemany("DELETE FROM browser_folders WHERE id=?", [(x,) for x in ids])
+            conn.executemany("UPDATE browser_cards SET virtual_folder_id='', updated_ts=?, last_seen_ts=? WHERE virtual_folder_id=?", [(time.time(), time.time(), x) for x in ids])
+            conn.commit()
 
     def _normalise_template(self, template):
         template = template or {}
@@ -544,6 +920,7 @@ class Api:
                 seen_folders.add(fid)
                 clean_folders.append({"id": fid, "name": name[:120], "parentId": parent})
         settings["browserVirtualFolders"] = clean_folders
+        settings["browserShowSubfolders"] = bool(settings.get("browserShowSubfolders", DEFAULT_SETTINGS.get("browserShowSubfolders", False)))
         emo = settings.get("emotionImageEmotions", DEFAULT_SETTINGS["emotionImageEmotions"])
         if not isinstance(emo, list):
             emo = DEFAULT_SETTINGS["emotionImageEmotions"]
@@ -621,6 +998,10 @@ class Api:
 
     def get_state(self):
         self.settings = self._normalise_settings(self.settings)
+        try:
+            self.settings["browserVirtualFolders"] = self._library_folders()
+        except Exception:
+            pass
         self._save_json(SETTINGS_FILE, self.settings)
         return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default")}
 
@@ -3106,6 +3487,8 @@ class Api:
 
     def _generate_browser_description(self, output, concept='', settings=None):
         """Create a short Character Browser blurb about the route, not just appearance."""
+        self._last_browser_description_source = "extracted"
+        self._init_library_db()
         output = output or ''
         concept = concept or ''
         merged = self._normalise_settings({**self.settings, **(settings or {})})
@@ -3149,6 +3532,7 @@ class Api:
                 return fallback
             if len(text) > 620:
                 text = text[:620].rsplit(' ', 1)[0].rstrip('.,;:') + '…'
+            self._last_browser_description_source = "ai"
             return text
         except Exception as e:
             self._log_event('browser_description_generation_failed', {'error': str(e)})
@@ -3379,14 +3763,21 @@ class Api:
             if not output.strip() and not concept.strip():
                 return {"ok": False, "error": "This project has no card text to summarize."}
             desc = self._generate_browser_description(output, concept, settings or project.get("settings") or self.settings)
+            source = "ai" if self._last_browser_description_source == "ai" else "extracted"
             project["browserDescription"] = desc
             project["browserDescriptionSourceHash"] = self._browser_description_source_hash(output, concept)
+            project["browserDescriptionSource"] = source
             workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
             workspace["browserDescription"] = desc
+            workspace["browserDescriptionSource"] = source
             project["workspace"] = workspace
             project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-            return {"ok": True, "browserDescription": desc, "projectPath": str(path)}
+            try:
+                self._refresh_library_cache_for_project(path, force=True)
+            except Exception:
+                pass
+            return {"ok": True, "browserDescription": desc, "browserDescriptionSource": source, "projectPath": str(path)}
         except Exception as e:
             self._log_event("regenerate_browser_description_failed", {"project": str(project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not regenerate browser description: {e}"}
@@ -3433,6 +3824,10 @@ class Api:
             except Exception as e:
                 self._log_event("update_project_tags_card_refresh_failed", {"error": str(e), "project": str(path)})
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                self._refresh_library_cache_for_project(path, force=True)
+            except Exception:
+                pass
             self._log_event("character_project_tags_updated", {"project": str(path), "tags": clean_tags})
             return {"ok": True, "tags": clean_tags, "output": output, "projectPath": str(path)}
         except Exception as e:
@@ -3475,8 +3870,12 @@ class Api:
         previous_hash = str(previous_project.get("browserDescriptionSourceHash") or "").strip()
         if not browser_description and previous_hash == browser_source_hash:
             browser_description = str(previous_project.get("browserDescription") or "").strip()
+        browser_description_source = str(workspace.get("browserDescriptionSource") or previous_project.get("browserDescriptionSource") or "").strip()
+        if browser_description:
+            browser_description_source = browser_description_source or ("ai" if previous_project.get("browserDescription") else "extracted")
         if not browser_description:
             browser_description = self._generate_browser_description(output, concept, settings)
+            browser_description_source = "ai" if self._last_browser_description_source == "ai" else "extracted"
         # Keep latest text files simple and inspectable.
         (folder / "latest_output.md").write_text(output, encoding="utf-8")
         if workspace.get("qnaAnswers"):
@@ -3511,6 +3910,7 @@ class Api:
                 "cardImagePath": image_path,
                 "browserDescription": browser_description,
                 "browserDescriptionSourceHash": browser_source_hash,
+                "browserDescriptionSource": browser_description_source,
                 "tags": tags,
                 "virtualFolderId": virtual_folder_id,
                 "projectPath": str(latest_project),
@@ -3531,51 +3931,108 @@ class Api:
         snapshot = folder / f"{self._safe_slug(safe_name)}_{stamp}_ccf_project.json"
         if not snapshot.exists():
             snapshot.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            vf = str(project.get("virtualFolderId") or (project.get("workspace") or {}).get("virtualFolderId") or "").strip()
+            # Refresh SQLite cache immediately after editor/output changes. This stores
+            # metadata, tags, thumbnail image data, and hash checks for fast browsing.
+            self._refresh_library_cache_for_project(latest_project, force=True)
+            if vf:
+                self._library_set_card_folder(latest_project, vf)
+        except Exception as e:
+            self._log_event("library_db_workspace_upsert_failed", {"name": safe_name, "error": str(e)})
         self._log_event("character_workspace_saved", {"name": safe_name, "folder": str(folder), "project": str(latest_project)})
         return {"ok": True, "name": safe_name, "folder": str(folder), "projectPath": str(latest_project), "cardPath": str(latest_card) if str(latest_card) else ""}
 
+    def _virtual_folder_assignment_keys(self, project_path, folder, name=""):
+        keys = []
+        try:
+            keys.append(str(Path(project_path).resolve()))
+        except Exception:
+            if project_path:
+                keys.append(str(project_path))
+        try:
+            keys.append(str(Path(folder).resolve()))
+        except Exception:
+            if folder:
+                keys.append(str(folder))
+        safe_name = self._safe_slug(name or "") if name else ""
+        if safe_name:
+            keys.append(f"name:{safe_name}")
+        # Preserve insertion order while removing duplicates.
+        out = []
+        seen = set()
+        for key in keys:
+            key = str(key or "").strip()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+
+    def _get_virtual_folder_assignment(self, project_path, folder, name="", fallback=""):
+        assignments = self.settings.get("browserVirtualFolderAssignments") if isinstance(self.settings.get("browserVirtualFolderAssignments"), dict) else {}
+        for key in self._virtual_folder_assignment_keys(project_path, folder, name):
+            if key in assignments:
+                return str(assignments.get(key) or "").strip()
+        return str(fallback or "").strip()
+
+    def _set_virtual_folder_assignment(self, project_path, folder, name, folder_id):
+        assignments = self.settings.get("browserVirtualFolderAssignments") if isinstance(self.settings.get("browserVirtualFolderAssignments"), dict) else {}
+        folder_id = str(folder_id or "").strip()
+        for key in self._virtual_folder_assignment_keys(project_path, folder, name):
+            assignments[key] = folder_id
+        self.settings["browserVirtualFolderAssignments"] = assignments
+        self.save_settings(self.settings)
+
     def list_character_library(self):
+        """Return Character Browser cards from the SQLite cache.
+
+        Disk scan only discovers project files and checks hashes. Full JSON/image parsing
+        happens only when hashes changed or a card is new.
+        """
         cards = []
         if not EXPORT_DIR.exists():
-            return {"ok": True, "cards": []}
+            return {"ok": True, "cards": [], "folders": self._library_folders()}
+        seen_paths = set()
+        project_files = []
         for folder in sorted([p for p in EXPORT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
             project_path = folder / "latest_ccf_project.json"
             if not project_path.exists():
                 projects = sorted(folder.glob("*_ccf_project.json"), key=lambda p: p.stat().st_mtime, reverse=True)
                 project_path = projects[0] if projects else None
-            if not project_path or not Path(project_path).exists():
-                continue
+            if project_path and Path(project_path).exists():
+                project_files.append(Path(project_path))
+
+        for project_path in project_files:
             try:
-                payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
-                project = payload.get("project", payload)
-                name = project.get("name") or folder.name
-                image_path = project.get("imagePath") or project.get("cardImagePath") or ""
-                latest_pngs = [folder / f"{self._safe_slug(name)}_latest_cardv2.png"] + sorted(folder.glob("*_cardv2.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-                thumb_source = next((str(p) for p in latest_pngs if p and Path(p).exists()), image_path)
-                browser_description = str(project.get("browserDescription") or "").strip()
-                if not browser_description:
-                    browser_description = self._fallback_browser_description(project.get("output") or "", project.get("concept") or "")
-                tags = project.get("tags") if isinstance(project.get("tags"), list) else []
-                if not tags:
-                    tags = self._extract_tags_from_output(project.get("output") or "", project.get("template") or self.template)
-                cards.append({
-                    "name": name,
-                    "folder": str(folder),
-                    "projectPath": str(project_path),
-                    "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(Path(project_path).stat().st_mtime)),
-                    "thumbnail": self._image_data_url(thumb_source or image_path),
-                    "browserDescription": browser_description,
-                    "tags": tags,
-                    "virtualFolderId": str(project.get("virtualFolderId") or ""),
-                    "outputPreview": (project.get("output") or "")[:500],
-                    "hasEmotionImages": any(folder.glob("*.png")) and any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
-                })
+                seen_paths.add(str(project_path.resolve()))
+                card = self._refresh_library_cache_for_project(project_path, force=False)
+                if card:
+                    cards.append(card)
             except Exception as e:
-                self._log_event("character_library_card_error", {"folder": str(folder), "error": str(e)})
-        return {"ok": True, "cards": cards}
+                self._log_event("character_library_card_error", {"project": str(project_path), "error": str(e)})
+
+        # Mark DB rows whose physical project vanished as deleted, rather than
+        # showing stale cards from the cache.
+        try:
+            with self._library_connect() as conn:
+                rows = conn.execute("SELECT project_path FROM browser_cards WHERE deleted=0").fetchall()
+                missing = [(time.time(), str(r["project_path"])) for r in rows if str(r["project_path"] or "") not in seen_paths and not Path(str(r["project_path"] or "")).exists()]
+                if missing:
+                    conn.executemany("UPDATE browser_cards SET deleted=1, last_seen_ts=? WHERE project_path=?", missing)
+                    conn.commit()
+        except Exception:
+            pass
+
+        folders = self._library_folders()
+        self.settings["browserVirtualFolders"] = folders
+        self.save_settings(self.settings)
+        return {"ok": True, "cards": cards, "folders": folders, "dbPath": str(LIBRARY_DB_FILE)}
 
     def load_character_project(self, project_path):
         try:
+            # Quick real-file check before opening. If the project/card/image changed
+            # outside the app, refresh the SQLite cache first.
+            self._refresh_library_cache_for_project(project_path, force=False)
             payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
             res = self._load_project_payload(payload)
             res["projectPath"] = str(project_path)
@@ -3605,8 +4062,9 @@ class Api:
 
 
     def save_browser_virtual_folders(self, folders):
-        """Persist virtual folder definitions in settings. They are browser-only and never move files."""
+        """Persist virtual folder definitions in SQLite. They are browser-only and never move files."""
         try:
+            self._init_library_db()
             clean = []
             seen = set()
             for item in folders or []:
@@ -3618,7 +4076,23 @@ class Api:
                 if not fid or not name or fid in seen:
                     continue
                 seen.add(fid)
-                clean.append({"id": fid, "name": name, "parentId": parent})
+                clean.append({"id": fid, "name": name[:120], "parentId": parent})
+
+            new_ids = {f["id"] for f in clean}
+            with self._library_connect() as conn:
+                old_ids = {r["id"] for r in conn.execute("SELECT id FROM browser_folders").fetchall()}
+                deleted_ids = old_ids - new_ids
+                for item in clean:
+                    conn.execute(
+                        "INSERT INTO browser_folders(id, name, parent_id) VALUES(?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, parent_id=excluded.parent_id, updated_at=CURRENT_TIMESTAMP",
+                        (item["id"], item["name"], item["parentId"]),
+                    )
+                for fid in deleted_ids:
+                    conn.execute("DELETE FROM browser_folders WHERE id=?", (fid,))
+                    conn.execute("UPDATE browser_cards SET virtual_folder_id='', updated_ts=?, last_seen_ts=? WHERE virtual_folder_id=?", (time.time(), time.time(), fid))
+                conn.commit()
+
             self.settings["browserVirtualFolders"] = clean
             self.save_settings(self.settings)
             return {"ok": True, "folders": clean}
@@ -3655,6 +4129,8 @@ class Api:
                     project["workspace"] = workspace
                     project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                    self._library_upsert_card(path, path.parent, project.get("name") or path.parent.name, folder_id, path.stat().st_mtime)
+                    self._set_virtual_folder_assignment(path, path.parent, project.get("name") or path.parent.name, folder_id)
                     updated += 1
                     touched.append(str(path))
                 except Exception as e:
