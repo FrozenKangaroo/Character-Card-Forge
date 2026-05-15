@@ -72,6 +72,7 @@ DEFAULT_SETTINGS = {
     "exportFormat": "chara_v2_png",
     "cardImagePath": "",
     "sdBaseUrl": "http://127.0.0.1:7860",
+    "sdModel": "",
     "sdSteps": 28,
     "sdCfgScale": 7.0,
     "sdSampler": "Euler a",
@@ -86,6 +87,8 @@ DEFAULT_SETTINGS = {
     "visionImagePath": "",
     "activeTemplateName": "Default",
     "frontPorchDataFolder": "",
+    "browserTagMerges": {},
+    "browserVirtualFolders": [],
 }
 
 DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and formatter.',
@@ -516,6 +519,29 @@ class Api:
         except Exception:
             settings["apiRetryCount"] = DEFAULT_SETTINGS["apiRetryCount"]
         settings["frontPorchDataFolder"] = str(settings.get("frontPorchDataFolder") or "").strip()
+        settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
+        settings["sdModel"] = str(settings.get("sdModel") or "").strip()
+        merges = settings.get("browserTagMerges") if isinstance(settings.get("browserTagMerges"), dict) else {}
+        clean_merges = {}
+        for raw_from, raw_to in merges.items():
+            from_key = str(raw_from or "").strip().lower()
+            to_tag = str(raw_to or "").strip()
+            if from_key and to_tag and from_key != to_tag.lower():
+                clean_merges[from_key] = to_tag[:120]
+        settings["browserTagMerges"] = clean_merges
+        folders = settings.get("browserVirtualFolders") if isinstance(settings.get("browserVirtualFolders"), list) else []
+        clean_folders = []
+        seen_folders = set()
+        for item in folders:
+            if not isinstance(item, dict):
+                continue
+            fid = str(item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            parent = str(item.get("parentId") or "").strip()
+            if fid and name and fid not in seen_folders:
+                seen_folders.add(fid)
+                clean_folders.append({"id": fid, "name": name[:120], "parentId": parent})
+        settings["browserVirtualFolders"] = clean_folders
         emo = settings.get("emotionImageEmotions", DEFAULT_SETTINGS["emotionImageEmotions"])
         if not isinstance(emo, list):
             emo = DEFAULT_SETTINGS["emotionImageEmotions"]
@@ -2616,6 +2642,7 @@ class Api:
             "browserDescription": project.get("browserDescription") or workspace.get("browserDescription") or "",
             "browserDescriptionSourceHash": project.get("browserDescriptionSourceHash") or workspace.get("browserDescriptionSourceHash") or "",
             "tags": project.get("tags") or workspace.get("tags") or self._extract_tags_from_output(output, project.get("template") or self.template),
+            "virtualFolderId": str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or ""),
             "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
             "emotionManifest": project.get("emotionManifest") or workspace.get("emotionManifest") or "",
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
@@ -3014,6 +3041,191 @@ class Api:
         new_lines = lines[:start] + replacement + lines[end:]
         return "\n".join(new_lines).strip()
 
+
+    def _all_character_projects(self):
+        projects = []
+        if not EXPORT_DIR.exists():
+            return projects
+        for folder in sorted([p for p in EXPORT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
+            project_path = folder / "latest_ccf_project.json"
+            if not project_path.exists():
+                candidates = sorted(folder.glob("*_ccf_project.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                project_path = candidates[0] if candidates else None
+            if project_path and Path(project_path).exists():
+                projects.append(Path(project_path))
+        return projects
+
+    def _normalise_tag_key(self, tag):
+        return re.sub(r"\s+", " ", str(tag or "").strip()).lower()
+
+    def _collect_library_tag_stats(self):
+        stats = {}
+        projects = []
+        for project_path in self._all_character_projects():
+            try:
+                payload = json.loads(project_path.read_text(encoding="utf-8"))
+                project = payload.get("project", payload) if isinstance(payload, dict) else {}
+                if not isinstance(project, dict):
+                    continue
+                tags = project.get("tags") if isinstance(project.get("tags"), list) else []
+                if not tags:
+                    tags = self._extract_tags_from_output(project.get("output") or "", project.get("template") or self.template)
+                clean_tags = []
+                seen_for_card = set()
+                for raw in tags:
+                    tag = str(raw or "").strip().strip(",")
+                    key = self._normalise_tag_key(tag)
+                    if not key or key in seen_for_card:
+                        continue
+                    seen_for_card.add(key)
+                    clean_tags.append(tag)
+                    entry = stats.setdefault(key, {"tag": tag, "count": 0})
+                    entry["count"] += 1
+                    # Keep the nicest-looking capitalization from the first occurrence.
+                    if not entry.get("tag") or entry.get("tag") == key:
+                        entry["tag"] = tag
+                projects.append({"path": str(project_path), "name": project.get("name") or project_path.parent.name, "tags": clean_tags})
+            except Exception as e:
+                self._log_event("collect_library_tag_stats_error", {"project": str(project_path), "error": str(e)})
+        return stats, projects
+
+    def ai_suggest_tag_cleanup(self, settings=None):
+        """Ask the configured text model for near-duplicate tag merge suggestions."""
+        try:
+            local_settings = self._normalise_settings({**self.settings, **(settings or {})})
+            validation = self._validate_text_api_settings(local_settings)
+            if not validation.get("ok"):
+                return {"ok": False, "error": validation.get("error") or "AI settings are incomplete."}
+            stats, projects = self._collect_library_tag_stats()
+            tags = sorted(stats.values(), key=lambda x: (-int(x.get("count") or 0), str(x.get("tag") or "").lower()))
+            if len(tags) < 2:
+                return {"ok": True, "suggestions": [], "message": "Not enough tags to compare."}
+            tag_lines = [f"- {item['tag']} ({item['count']} cards)" for item in tags[:700]]
+            prompt = "\n".join([
+                "You are helping clean tags for a fictional character card library.",
+                "Find tags that are very close in meaning and could be merged or renamed.",
+                "Only suggest true duplicates, spelling/capitalization variants, plural/singular variants, hyphen/space variants, or very close synonyms.",
+                "Do not merge opposite meanings or broad/narrow tags unless they are genuinely redundant.",
+                "For each suggestion, choose the cleanest canonical tag as merge_to.",
+                "Return strict JSON only with this shape:",
+                '{"suggestions":[{"from":"tag to merge/rename","to":"canonical tag","reason":"short reason"}]}',
+                "Existing tags with card counts:",
+                "\n".join(tag_lines),
+            ])
+            model = (local_settings.get("aiSuggestionModel") or local_settings.get("model") or "").strip()
+            raw = self._chat_once(prompt, local_settings, model, "ai_tag_cleanup")
+            parsed = self._loads_model_json(raw)
+            raw_suggestions = parsed.get("suggestions") if isinstance(parsed, dict) else []
+            if not isinstance(raw_suggestions, list):
+                raw_suggestions = []
+            known = {self._normalise_tag_key(v.get("tag")): v.get("tag") for v in tags}
+            suggestions = []
+            seen = set()
+            for item in raw_suggestions[:200]:
+                if not isinstance(item, dict):
+                    continue
+                from_tag = str(item.get("from") or item.get("old") or item.get("source") or "").strip()
+                to_tag = str(item.get("to") or item.get("merge_to") or item.get("target") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                from_key = self._normalise_tag_key(from_tag)
+                to_key = self._normalise_tag_key(to_tag)
+                if not from_key or not to_key or from_key == to_key:
+                    continue
+                if from_key not in known:
+                    continue
+                canonical_to = known.get(to_key, to_tag)
+                pair = (from_key, self._normalise_tag_key(canonical_to))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                suggestions.append({
+                    "from": known.get(from_key, from_tag),
+                    "to": canonical_to,
+                    "fromCount": int(stats.get(from_key, {}).get("count") or 0),
+                    "toCount": int(stats.get(self._normalise_tag_key(canonical_to), {}).get("count") or 0),
+                    "reason": reason[:240],
+                })
+            return {"ok": True, "suggestions": suggestions, "tagCount": len(tags), "cardCount": len(projects), "raw": raw[:2000]}
+        except Exception as e:
+            self._log_event("ai_tag_cleanup_failed", {"error": str(e)})
+            return {"ok": False, "error": f"AI tag cleanup failed: {e}"}
+
+    def rename_tags_across_library(self, rename_map):
+        """Destructively rename real tags across saved character projects/cards."""
+        try:
+            if not isinstance(rename_map, dict) or not rename_map:
+                return {"ok": False, "error": "No tag rename map was provided."}
+            clean_map = {}
+            for old, new in rename_map.items():
+                old_key = self._normalise_tag_key(old)
+                new_tag = str(new or "").strip().strip(",")
+                if old_key and new_tag and old_key != self._normalise_tag_key(new_tag):
+                    clean_map[old_key] = new_tag[:120]
+            if not clean_map:
+                return {"ok": False, "error": "No valid tag renames were provided."}
+            updated = 0
+            touched = []
+            for project_path in self._all_character_projects():
+                try:
+                    payload = json.loads(project_path.read_text(encoding="utf-8"))
+                    project = payload.get("project", payload) if isinstance(payload, dict) else {}
+                    if not isinstance(project, dict):
+                        continue
+                    tags = project.get("tags") if isinstance(project.get("tags"), list) else []
+                    if not tags:
+                        tags = self._extract_tags_from_output(project.get("output") or "", project.get("template") or self.template)
+                    new_tags = []
+                    seen = set()
+                    changed = False
+                    for tag in tags:
+                        original = str(tag or "").strip().strip(",")
+                        if not original:
+                            continue
+                        replacement = clean_map.get(self._normalise_tag_key(original), original)
+                        if replacement != original:
+                            changed = True
+                        key = self._normalise_tag_key(replacement)
+                        if key and key not in seen:
+                            seen.add(key)
+                            new_tags.append(replacement)
+                    if changed:
+                        res = self.update_character_project_tags(str(project_path), new_tags)
+                        if res.get("ok"):
+                            updated += 1
+                            touched.append(str(project_path))
+                except Exception as e:
+                    self._log_event("rename_tags_project_failed", {"project": str(project_path), "error": str(e)})
+            return {"ok": True, "updated": updated, "projects": touched, "renameMap": clean_map}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not rename tags: {e}"}
+
+    def regenerate_browser_description_for_project(self, project_path, settings=None):
+        """Use AI to refresh the Character Browser scenario/character overview for one saved project."""
+        try:
+            path = Path(project_path)
+            if not path.exists():
+                return {"ok": False, "error": "Character project not found."}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            output = project.get("output") or ""
+            concept = project.get("concept") or ""
+            if not output.strip() and not concept.strip():
+                return {"ok": False, "error": "This project has no card text to summarize."}
+            desc = self._generate_browser_description(output, concept, settings or project.get("settings") or self.settings)
+            project["browserDescription"] = desc
+            project["browserDescriptionSourceHash"] = self._browser_description_source_hash(output, concept)
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            workspace["browserDescription"] = desc
+            project["workspace"] = workspace
+            project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            return {"ok": True, "browserDescription": desc, "projectPath": str(path)}
+        except Exception as e:
+            self._log_event("regenerate_browser_description_failed", {"project": str(project_path), "error": str(e)})
+            return {"ok": False, "error": f"Could not regenerate browser description: {e}"}
+
     def update_character_project_tags(self, project_path, tags):
         try:
             path = Path(project_path)
@@ -3119,6 +3331,7 @@ class Api:
             latest_card = Path("")
 
         tags = self._extract_tags_from_output(output, template)
+        virtual_folder_id = str(workspace.get("virtualFolderId") or previous_project.get("virtualFolderId") or "").strip()
         project = {
             "format": "character-card-forge-project",
             "version": (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown",
@@ -3134,6 +3347,7 @@ class Api:
                 "browserDescription": browser_description,
                 "browserDescriptionSourceHash": browser_source_hash,
                 "tags": tags,
+                "virtualFolderId": virtual_folder_id,
                 "projectPath": str(latest_project),
                 "exportedPath": str(latest_card) if str(latest_card) else "",
                 "frontend": "front_porch",
@@ -3187,6 +3401,7 @@ class Api:
                     "thumbnail": self._image_data_url(thumb_source or image_path),
                     "browserDescription": browser_description,
                     "tags": tags,
+                    "virtualFolderId": str(project.get("virtualFolderId") or ""),
                     "outputPreview": (project.get("output") or "")[:500],
                     "hasEmotionImages": any(folder.glob("*.png")) and any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
                 })
@@ -3222,6 +3437,93 @@ class Api:
         if not loaded.get("ok"):
             return loaded
         return self.create_emotion_zip(loaded.get("output") or "")
+
+
+    def save_browser_virtual_folders(self, folders):
+        """Persist virtual folder definitions in settings. They are browser-only and never move files."""
+        try:
+            clean = []
+            seen = set()
+            for item in folders or []:
+                if not isinstance(item, dict):
+                    continue
+                fid = str(item.get("id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                parent = str(item.get("parentId") or "").strip()
+                if not fid or not name or fid in seen:
+                    continue
+                seen.add(fid)
+                clean.append({"id": fid, "name": name, "parentId": parent})
+            self.settings["browserVirtualFolders"] = clean
+            self.save_settings(self.settings)
+            return {"ok": True, "folders": clean}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not save virtual folders: {e}"}
+
+    def _project_path_inside_exports(self, project_path):
+        path = Path(project_path).resolve()
+        export_root = EXPORT_DIR.resolve()
+        try:
+            path.relative_to(export_root)
+        except Exception:
+            raise ValueError("Project path is outside the exports folder.")
+        if not path.exists() or not path.is_file():
+            raise ValueError("Character project not found.")
+        return path
+
+    def move_character_projects_to_folder(self, project_paths, folder_id=""):
+        """Assign projects to a virtual folder. Does not move files on disk."""
+        updated = 0
+        touched = []
+        try:
+            folder_id = str(folder_id or "").strip()
+            for raw in project_paths or []:
+                try:
+                    path = self._project_path_inside_exports(raw)
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    project = payload.get("project", payload) if isinstance(payload, dict) else {}
+                    if not isinstance(project, dict):
+                        continue
+                    project["virtualFolderId"] = folder_id
+                    workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+                    workspace["virtualFolderId"] = folder_id
+                    project["workspace"] = workspace
+                    project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                    updated += 1
+                    touched.append(str(path))
+                except Exception as e:
+                    self._log_event("move_character_project_folder_failed", {"project": str(raw), "error": str(e)})
+            return {"ok": True, "updated": updated, "projects": touched, "folderId": folder_id}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not move selected characters: {e}"}
+
+    def delete_character_project_directories(self, project_paths):
+        """Delete local Character Card Forge export directories only. Front Porch DB entries are intentionally untouched."""
+        deleted = 0
+        failed = []
+        try:
+            folders = []
+            for raw in project_paths or []:
+                try:
+                    path = self._project_path_inside_exports(raw)
+                    folder = path.parent.resolve()
+                    folder.relative_to(EXPORT_DIR.resolve())
+                    if folder == EXPORT_DIR.resolve():
+                        raise ValueError("Refusing to delete exports root.")
+                    if folder not in folders:
+                        folders.append(folder)
+                except Exception as e:
+                    failed.append({"project": str(raw), "error": str(e)})
+            for folder in folders:
+                try:
+                    shutil.rmtree(folder)
+                    deleted += 1
+                except Exception as e:
+                    failed.append({"folder": str(folder), "error": str(e)})
+            return {"ok": True, "deleted": deleted, "failed": failed}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not delete character directories: {e}"}
 
     def copy_to_clipboard(self, text):
         try:
@@ -3552,6 +3854,69 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def fetch_sd_models(self, settings=None):
+        """Fetch available Stable Diffusion checkpoints from SD Forge / Automatic1111."""
+        merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        base = (merged_settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).rstrip("/")
+        models_url = base + "/sdapi/v1/sd-models"
+        options_url = base + "/sdapi/v1/options"
+        try:
+            req = urllib.request.Request(models_url, method="GET")
+            with self._urlopen_with_retries(req, merged_settings, timeout=120, label="Stable Diffusion model list") as resp:
+                models_data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            return {"ok": False, "error": f"Stable Diffusion HTTP {e.code}: {body[:1000]}"}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not fetch Stable Diffusion models: {e}"}
+
+        current_model = ""
+        try:
+            req = urllib.request.Request(options_url, method="GET")
+            with self._urlopen_with_retries(req, merged_settings, timeout=120, label="Stable Diffusion options") as resp:
+                options_data = json.loads(resp.read().decode("utf-8"))
+            current_model = str(options_data.get("sd_model_checkpoint") or "").strip()
+        except Exception:
+            current_model = ""
+
+        models = []
+        seen = set()
+        if isinstance(models_data, list):
+            for item in models_data:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                model_name = str(item.get("model_name") or "").strip()
+                sha = str(item.get("sha256") or item.get("hash") or "").strip()
+                value = title or model_name
+                if not value:
+                    continue
+                key = value.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                display_name = title or model_name
+                if model_name and title and model_name.lower() != title.lower():
+                    display_name = f"{title} ({model_name})"
+                models.append({
+                    "value": value,
+                    "title": title,
+                    "modelName": model_name,
+                    "sha": sha,
+                    "displayName": display_name,
+                    "current": bool(current_model and value == current_model),
+                })
+
+        selected = str(merged_settings.get("sdModel") or "").strip()
+        return {"ok": True, "models": models, "currentModel": current_model, "selectedModel": selected}
+
+    def _apply_sd_model_to_payload(self, payload, merged_settings):
+        selected_model = str(merged_settings.get("sdModel") or "").strip()
+        if selected_model:
+            payload["override_settings"] = {"sd_model_checkpoint": selected_model}
+            payload["override_settings_restore_afterwards"] = True
+        return payload
+
     def generate_sd_images(self, output, settings=None):
         """Generate four 1024x1024 candidate card images from Stable Diffusion Prompt.
 
@@ -3581,6 +3946,7 @@ class Api:
         sampler = (merged_settings.get("sdSampler") or "").strip()
         if sampler:
             payload["sampler_name"] = sampler
+        payload = self._apply_sd_model_to_payload(payload, merged_settings)
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
         req.add_header("Content-Type", "application/json")
         try:
@@ -3811,6 +4177,7 @@ class Api:
         sampler = (merged_settings.get("sdSampler") or "").strip()
         if sampler:
             payload["sampler_name"] = sampler
+        payload = self._apply_sd_model_to_payload(payload, merged_settings)
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
         req.add_header("Content-Type", "application/json")
         try:

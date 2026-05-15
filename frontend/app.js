@@ -18,6 +18,15 @@ let browserSearchTerm = "";
 let browserIncludeTags = new Set();
 let browserExcludeTags = new Set();
 let browserFilterPanelOpen = false;
+let browserTagSortMode = "alpha";
+let browserTagMerges = {};
+let aiTagCleanupSuggestions = [];
+let browserSelectedProjects = new Set();
+let browserVirtualFolders = [];
+let browserCurrentFolderId = "__all__";
+let browserFolderScope = "global";
+let sdModelCatalog = [];
+let sdCurrentServerModel = "";
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -256,6 +265,7 @@ function hydrateSettings() {
   const apiRetryCount = $('#apiRetryCount'); if (apiRetryCount) apiRetryCount.value = settings.apiRetryCount ?? 2;
   const frontPorchDataFolder = $('#frontPorchDataFolder'); if (frontPorchDataFolder) frontPorchDataFolder.value = settings.frontPorchDataFolder || '';
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
+  renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
   $('#sdSteps').value = settings.sdSteps ?? 28;
   $('#sdCfgScale').value = settings.sdCfgScale ?? 7;
   $('#sdSampler').value = settings.sdSampler || 'Euler a';
@@ -267,7 +277,10 @@ function hydrateSettings() {
   $('#exportFormat').value = exportFormat;
   $('#cardImagePath').value = settings.cardImagePath || '';
   $('#altCount').value = settings.alternateFirstMessages ?? 2;
+  browserTagMerges = cleanBrowserTagMerges(settings.browserTagMerges || {});
+  browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
 }
+
 
 function applyLoadedState(state) {
   if (state.settings) {
@@ -345,6 +358,63 @@ function renderEmotionOptions() {
 
 
 
+function renderSdModelSelect(models = [], selectedValue = '', currentModel = '') {
+  const select = $('#sdModel');
+  if (!select) return;
+  const previous = String(selectedValue || select.value || settings?.sdModel || '').trim();
+  const current = String(currentModel || '').trim();
+  sdCurrentServerModel = current;
+  sdModelCatalog = Array.isArray(models) ? models.slice() : [];
+  select.innerHTML = '';
+
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = current ? `Use current/default server model (${current})` : 'Use current/default server model';
+  select.appendChild(defaultOpt);
+
+  const seen = new Set(['']);
+  sdModelCatalog.forEach(item => {
+    const value = String(item?.value || item?.title || item?.modelName || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    const opt = document.createElement('option');
+    opt.value = value;
+    let label = String(item?.displayName || item?.title || item?.modelName || value).trim() || value;
+    if (current && value === current) label += ' [current]';
+    opt.textContent = label;
+    select.appendChild(opt);
+  });
+
+  if (previous && !seen.has(previous)) {
+    const opt = document.createElement('option');
+    opt.value = previous;
+    opt.textContent = `${previous} [saved/custom]`;
+    select.appendChild(opt);
+  }
+  select.value = previous;
+}
+
+async function fetchStableDiffusionModels() {
+  const localSettings = collectSettings();
+  if (!String(localSettings.sdBaseUrl || '').trim()) {
+    setStatus('Enter an SD Forge / Automatic1111 Base URL first.', 'error');
+    return;
+  }
+  try {
+    setBusy('FETCHING SD MODELS — querying SD Forge / Automatic1111…');
+    setStatus('Fetching Stable Diffusion models…', '');
+    const res = await window.pywebview.api.fetch_sd_models(localSettings);
+    if (!res.ok) throw new Error(res.error || 'Could not fetch Stable Diffusion models.');
+    renderSdModelSelect(res.models || [], res.selectedModel || localSettings.sdModel || '', res.currentModel || '');
+    const count = Array.isArray(res.models) ? res.models.length : 0;
+    setStatus(`Fetched ${count} Stable Diffusion model${count === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    setStatus(String(e?.message || e), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 function cleanModelName(value) {
   value = String(value || '').trim();
   if (!value) return '';
@@ -384,6 +454,7 @@ function collectSettings() {
     apiRetryCount: Number(($('#apiRetryCount') ? $('#apiRetryCount').value : 2) || 2),
     frontPorchDataFolder: ($('#frontPorchDataFolder') ? $('#frontPorchDataFolder').value.trim() : ''),
     sdBaseUrl: $('#sdBaseUrl').value.trim() || 'http://127.0.0.1:7860',
+    sdModel: ($('#sdModel') ? $('#sdModel').value.trim() : ''),
     sdSteps: Number($('#sdSteps').value || 28),
     sdCfgScale: Number($('#sdCfgScale').value || 7),
     sdSampler: $('#sdSampler').value.trim() || 'Euler a',
@@ -398,6 +469,8 @@ function collectSettings() {
     alternateFirstMessages: Number($('#altCount').value || 0),
     alternateFirstMessageStyles: $$(`[data-alt-style-index]`).map(el => el.value),
     emotionImageEmotions: $$('#emotionOptions input:checked').map(el => el.value),
+    browserTagMerges: browserTagMerges || {},
+    browserVirtualFolders: browserVirtualFolders || [],
   };
 }
 
@@ -894,6 +967,7 @@ function bindActions() {
     alert('Settings saved.');
   });
   $('#scanFrontPorchBtn')?.addEventListener('click', scanFrontPorchFolder);
+  $('#fetchSdModelsBtn')?.addEventListener('click', fetchStableDiffusionModels);
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
   $('#cardMode').addEventListener('change', () => { settings = collectSettings(); if ($('#cardMode').value === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); } updateCardModeHint(); updateAvailability(); });
   $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
@@ -920,10 +994,24 @@ function bindActions() {
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#generateBtn').addEventListener('click', generateCard);
   $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
+  $('#browserMultiDeleteBtn')?.addEventListener('click', deleteSelectedCharacterDirectories);
+  $('#browserMultiExportPngBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_png'));
+  $('#browserMultiExportJsonBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_json'));
+  $('#browserMultiFrontPorchBtn')?.addEventListener('click', exportSelectedCharactersToFrontPorchBatch);
+  $('#browserCreateFolderBtn')?.addEventListener('click', createBrowserVirtualFolder);
+  $('#browserMoveToFolderBtn')?.addEventListener('click', moveSelectedCharactersToFolder);
+  $('#browserFolderSelect')?.addEventListener('change', (e) => { browserCurrentFolderId = e.target.value || '__all__'; renderCharacterBrowser(); });
+  $('#browserFolderScope')?.addEventListener('change', (e) => { browserFolderScope = e.target.value || 'global'; renderCharacterBrowser(); });
   $('#browserSortMode')?.addEventListener('change', (e) => { browserSortMode = e.target.value || 'date_desc'; renderCharacterBrowser(); });
   $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; renderCharacterBrowser(); });
   $('#browserFilterBtn')?.addEventListener('click', () => { browserFilterPanelOpen = !browserFilterPanelOpen; renderBrowserFilterPanel(); });
   $('#browserClearFiltersBtn')?.addEventListener('click', () => { browserIncludeTags.clear(); browserExcludeTags.clear(); renderCharacterBrowser(); });
+  $('#browserTagSortMode')?.addEventListener('change', (e) => { browserTagSortMode = e.target.value || 'alpha'; renderBrowserFilterPanel(); });
+  $('#tagMergeAddBtn')?.addEventListener('click', addBrowserTagMerge);
+  $('#aiTagCleanupBtn')?.addEventListener('click', runAiTagCleanup);
+  $('#aiTagMergeAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('merge'));
+  $('#aiTagRenameAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('rename'));
+  $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserLoadBtn')?.addEventListener('click', loadSelectedCharacterWorkspace);
   $('#browserExportPngBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_png'));
   $('#browserExportJsonBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_json'));
@@ -2395,6 +2483,7 @@ async function refreshCharacterBrowser(showStatus=true) {
     if (selectedCharacterProjectPath && !characterBrowserCards.some(c => c.projectPath === selectedCharacterProjectPath)) {
       selectedCharacterProjectPath = '';
     }
+    browserSelectedProjects = new Set([...browserSelectedProjects].filter(path => characterBrowserCards.some(c => c.projectPath === path)));
     renderCharacterBrowser();
     renderSelectedCharacterTags(characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath));
     if (showStatus) setStatus(`Character Browser refreshed: ${characterBrowserCards.length} character(s).`, 'ok');
@@ -2403,44 +2492,340 @@ async function refreshCharacterBrowser(showStatus=true) {
   }
 }
 
+
+function normaliseFolderId(value) {
+  return String(value || '').trim();
+}
+
+function browserFolderChildren(parentId) {
+  const key = normaliseFolderId(parentId);
+  return (browserVirtualFolders || []).filter(f => normaliseFolderId(f.parentId) === key);
+}
+
+function browserFolderDescendantIds(folderId) {
+  const out = new Set();
+  const walk = (id) => {
+    browserFolderChildren(id).forEach(child => {
+      const cid = normaliseFolderId(child.id);
+      if (cid && !out.has(cid)) {
+        out.add(cid);
+        walk(cid);
+      }
+    });
+  };
+  walk(folderId);
+  return out;
+}
+
+function browserCardFolderId(card) {
+  return normaliseFolderId(card?.virtualFolderId || '');
+}
+
+function browserCardMatchesFolderScope(card) {
+  if (browserFolderScope === 'global' || browserCurrentFolderId === '__all__') return true;
+  const current = normaliseFolderId(browserCurrentFolderId);
+  const cardFolder = browserCardFolderId(card);
+  if (browserFolderScope === 'current') return cardFolder === current;
+  if (browserFolderScope === 'current_subfolders') {
+    if (cardFolder === current) return true;
+    return browserFolderDescendantIds(current).has(cardFolder);
+  }
+  return true;
+}
+
+function browserScopeCards() {
+  return characterBrowserCards.filter(browserCardMatchesFolderScope);
+}
+
+function browserFolderLabel(folderId) {
+  if (!folderId) return 'Unfiled';
+  const folder = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === normaliseFolderId(folderId));
+  return folder ? folder.name : 'Unknown Folder';
+}
+
+function browserFolderPathLabel(folderId) {
+  const parts = [];
+  let current = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === normaliseFolderId(folderId));
+  const guard = new Set();
+  while (current && !guard.has(current.id)) {
+    guard.add(current.id);
+    parts.unshift(current.name);
+    current = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === normaliseFolderId(current.parentId));
+  }
+  return parts.join(' / ') || 'Unfiled';
+}
+
+function renderBrowserFolderControls() {
+  const folderSelect = $('#browserFolderSelect');
+  const moveSelect = $('#browserMoveFolderSelect');
+  const scopeSelect = $('#browserFolderScope');
+  const options = ['<option value="__all__">All folders</option>', '<option value="">Unfiled</option>']
+    .concat((browserVirtualFolders || [])
+      .slice()
+      .sort((a,b) => browserFolderPathLabel(a.id).localeCompare(browserFolderPathLabel(b.id), undefined, { sensitivity: 'base' }))
+      .map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(browserFolderPathLabel(f.id))}</option>`));
+  if (folderSelect) {
+    folderSelect.innerHTML = options.join('');
+    if (![...folderSelect.options].some(o => o.value === browserCurrentFolderId)) browserCurrentFolderId = '__all__';
+    folderSelect.value = browserCurrentFolderId;
+  }
+  if (moveSelect) {
+    const moveOptions = ['<option value="">Unfiled</option>'].concat((browserVirtualFolders || [])
+      .slice()
+      .sort((a,b) => browserFolderPathLabel(a.id).localeCompare(browserFolderPathLabel(b.id), undefined, { sensitivity: 'base' }))
+      .map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(browserFolderPathLabel(f.id))}</option>`));
+    moveSelect.innerHTML = moveOptions.join('');
+  }
+  if (scopeSelect) scopeSelect.value = browserFolderScope;
+}
+
+function selectedBrowserProjectPaths() {
+  if (browserSelectedProjects.size) return [...browserSelectedProjects];
+  return selectedCharacterProjectPath ? [selectedCharacterProjectPath] : [];
+}
+
+function updateBrowserMultiActionState() {
+  const count = selectedBrowserProjectPaths().length;
+  const el = $('#browserSelectedCount');
+  if (el) el.textContent = count ? `${count} selected` : 'No multi-select';
+}
+
+async function saveBrowserVirtualFolders() {
+  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [] };
+  try {
+    await window.pywebview.api.save_settings(settings);
+    if (window.pywebview.api.save_browser_virtual_folders) await window.pywebview.api.save_browser_virtual_folders(browserVirtualFolders || []);
+  } catch (err) {
+    setStatus(`Could not save virtual folders: ${err.message || err}`, 'error');
+  }
+}
+
+async function createBrowserVirtualFolder() {
+  const name = prompt('New virtual folder name:');
+  const clean = String(name || '').trim();
+  if (!clean) return;
+  const parentId = (browserCurrentFolderId && browserCurrentFolderId !== '__all__') ? browserCurrentFolderId : '';
+  const folder = { id: `vf_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: clean, parentId };
+  browserVirtualFolders.push(folder);
+  await saveBrowserVirtualFolders();
+  browserCurrentFolderId = folder.id;
+  renderCharacterBrowser();
+  setStatus(`Created virtual folder: ${clean}`, 'ok');
+}
+
+async function moveSelectedCharactersToFolder() {
+  const paths = selectedBrowserProjectPaths();
+  if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  const folderId = $('#browserMoveFolderSelect')?.value || '';
+  setBusy('MOVING SELECTED CHARACTERS…');
+  try {
+    const res = await window.pywebview.api.move_character_projects_to_folder(paths, folderId);
+    if (!res.ok) throw new Error(res.error || 'Move failed.');
+    await refreshCharacterBrowser(false);
+    setStatus(`Moved ${res.updated || 0} character(s) to ${browserFolderLabel(folderId)}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function deleteSelectedCharacterDirectories() {
+  const paths = selectedBrowserProjectPaths();
+  if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  const ok = confirm(`Delete ${paths.length} local Character Card Forge director${paths.length === 1 ? 'y' : 'ies'}?\n\nThis only removes the local saved/export folder. It does not touch Front Porch AI database entries.`);
+  if (!ok) return;
+  setBusy('DELETING LOCAL CHARACTER DIRECTORIES…');
+  try {
+    const res = await window.pywebview.api.delete_character_project_directories(paths);
+    if (!res.ok) throw new Error(res.error || 'Delete failed.');
+    browserSelectedProjects.clear();
+    selectedCharacterProjectPath = '';
+    await refreshCharacterBrowser(false);
+    setStatus(`Deleted ${res.deleted || 0} local character director${res.deleted === 1 ? 'y' : 'ies'}. Front Porch was not touched.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function exportSelectedCharactersBatch(format) {
+  const paths = selectedBrowserProjectPaths();
+  if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  setBusy('BATCH EXPORTING SELECTED CHARACTERS…');
+  let ok = 0;
+  let failed = 0;
+  for (const path of paths) {
+    try {
+      const res = await window.pywebview.api.export_character_from_project(path, format);
+      if (res.ok) ok += 1;
+      else failed += 1;
+    } catch (_) { failed += 1; }
+  }
+  setBusy('');
+  await refreshCharacterBrowser(false);
+  setStatus(`Batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
+}
+
+async function exportSelectedCharactersToFrontPorchBatch() {
+  const paths = selectedBrowserProjectPaths();
+  if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  settings = collectSettings();
+  if (!settings.frontPorchDataFolder) { setStatus('Set Front Porch Data Folder in AI Settings first.', 'error'); return; }
+  const okConfirm = confirm(`Export ${paths.length} selected character(s) to Front Porch AI?\n\nA database backup is created by the exporter. Close Front Porch before exporting if possible.`);
+  if (!okConfirm) return;
+  setBusy('BATCH EXPORTING TO FRONT PORCH AI…');
+  let ok = 0;
+  let failed = 0;
+  try { await window.pywebview.api.save_settings(settings); } catch (_) {}
+  for (const path of paths) {
+    try {
+      const res = await window.pywebview.api.export_front_porch_from_project(path);
+      if (res.ok) ok += 1;
+      else failed += 1;
+    } catch (_) { failed += 1; }
+  }
+  setBusy('');
+  setStatus(`Front Porch batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
+}
+
 function normaliseBrowserTag(tag) {
   return String(tag || '').trim();
+}
+
+function browserTagKey(tag) {
+  return normaliseBrowserTag(tag).toLowerCase();
+}
+
+function cleanBrowserTagMerges(map) {
+  const cleaned = {};
+  Object.entries(map || {}).forEach(([from, to]) => {
+    const key = browserTagKey(from);
+    const display = normaliseBrowserTag(to);
+    if (!key || !display || key === display.toLowerCase()) return;
+    cleaned[key] = display;
+  });
+  return cleaned;
 }
 
 function cardTags(card) {
   return Array.isArray(card?.tags) ? card.tags.map(normaliseBrowserTag).filter(Boolean) : [];
 }
 
+function effectiveBrowserTag(tag) {
+  const original = normaliseBrowserTag(tag);
+  const key = browserTagKey(original);
+  return normaliseBrowserTag(browserTagMerges[key] || original);
+}
+
+function isMergedBrowserTag(tag) {
+  const key = browserTagKey(tag);
+  return !!(key && browserTagMerges[key] && browserTagMerges[key].toLowerCase() !== key);
+}
+
+function cardEffectiveTags(card) {
+  const tags = new Map();
+  cardTags(card).forEach(tag => {
+    const display = effectiveBrowserTag(tag);
+    const key = browserTagKey(display);
+    if (key && !tags.has(key)) tags.set(key, display);
+  });
+  return [...tags.values()];
+}
+
+function cardEffectiveTagKeys(card) {
+  return cardEffectiveTags(card).map(browserTagKey);
+}
+
 function allBrowserTags() {
   const tags = new Map();
-  characterBrowserCards.forEach(card => {
-    cardTags(card).forEach(tag => {
-      const key = tag.toLowerCase();
+  browserScopeCards().forEach(card => {
+    cardEffectiveTags(card).forEach(tag => {
+      const key = browserTagKey(tag);
       if (!tags.has(key)) tags.set(key, tag);
     });
   });
   return [...tags.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
 }
 
-function browserCardMatches(card) {
+function allOriginalBrowserTags() {
+  const tags = new Map();
+  characterBrowserCards.forEach(card => {
+    cardTags(card).forEach(tag => {
+      const key = browserTagKey(tag);
+      if (key && !tags.has(key)) tags.set(key, tag);
+    });
+  });
+  return [...tags.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+function browserCardMatchesSearch(card) {
   const search = browserSearchTerm.trim().toLowerCase();
-  const tags = cardTags(card);
-  const lowerTags = tags.map(t => t.toLowerCase());
-  for (const tag of browserIncludeTags) {
-    if (!lowerTags.includes(tag.toLowerCase())) return false;
-  }
-  for (const tag of browserExcludeTags) {
-    if (lowerTags.includes(tag.toLowerCase())) return false;
-  }
   if (!search) return true;
+  const tags = cardTags(card);
+  const effectiveTags = cardEffectiveTags(card);
   const haystack = [
     card.name,
     card.browserDescription,
     card.outputPreview,
     card.folder,
     ...tags,
+    ...effectiveTags,
   ].join(' ').toLowerCase();
   return haystack.includes(search);
+}
+
+function browserCardMatchesTagFilters(card) {
+  const lowerTags = cardEffectiveTagKeys(card);
+  for (const tag of browserIncludeTags) {
+    if (!lowerTags.includes(tag.toLowerCase())) return false;
+  }
+  for (const tag of browserExcludeTags) {
+    if (lowerTags.includes(tag.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function visibleBrowserTagStats() {
+  const stats = new Map();
+
+  // Faceted tag list: once filters/search are active, only show tags that exist
+  // on cards still matching the current result set. Count once per card.
+  browserScopeCards()
+    .filter(card => browserCardMatchesTagFilters(card) && browserCardMatchesSearch(card))
+    .forEach(card => {
+      cardEffectiveTags(card).forEach(tag => {
+        const key = browserTagKey(tag);
+        const existing = stats.get(key) || { tag, count: 0 };
+        existing.count += 1;
+        stats.set(key, existing);
+      });
+    });
+
+  // Keep active filters visible even if the current result set would hide them.
+  for (const key of [...browserIncludeTags, ...browserExcludeTags]) {
+    if (!stats.has(key)) {
+      const canonical = allBrowserTags().find(tag => browserTagKey(tag) === key) || key;
+      stats.set(key, { tag: canonical, count: 0 });
+    }
+  }
+
+  const values = [...stats.values()];
+  if (browserTagSortMode === 'usage') {
+    values.sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }));
+  } else {
+    values.sort((a, b) => a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }));
+  }
+  return values;
+}
+
+function visibleBrowserTags() {
+  return visibleBrowserTagStats().map(item => item.tag);
+}
+
+function browserCardMatches(card) {
+  return browserCardMatchesTagFilters(card) && browserCardMatchesSearch(card);
 }
 
 function browserUpdatedTime(card) {
@@ -2449,7 +2834,7 @@ function browserUpdatedTime(card) {
 }
 
 function getVisibleBrowserCards() {
-  const cards = characterBrowserCards.filter(browserCardMatches);
+  const cards = browserScopeCards().filter(browserCardMatches);
   const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
   const byDate = (a, b) => browserUpdatedTime(b) - browserUpdatedTime(a);
   if (browserSortMode === 'alpha_asc') cards.sort(byName);
@@ -2463,7 +2848,7 @@ function renderBrowserFilterPanel() {
   const panel = $('#browserFilterPanel');
   if (!panel) return;
   panel.classList.toggle('hidden', !browserFilterPanelOpen);
-  const tags = allBrowserTags();
+  const tagStats = visibleBrowserTagStats();
   const count = browserIncludeTags.size + browserExcludeTags.size;
   const filterBtn = $('#browserFilterBtn');
   if (filterBtn) filterBtn.textContent = count ? `Filter Tags (${count})` : 'Filter Tags';
@@ -2475,19 +2860,21 @@ function renderBrowserFilterPanel() {
   }
   const wrap = $('#browserTagFilterList');
   if (!wrap) return;
-  if (!tags.length) {
-    wrap.innerHTML = '<div class="empty small">No tags found in saved characters yet.</div>';
-    return;
+  if (!tagStats.length) {
+    wrap.innerHTML = '<div class="empty small">No tags are available for the current search/filter.</div>';
+  } else {
+    wrap.innerHTML = tagStats.map(({ tag, count }) => {
+      const key = browserTagKey(tag);
+      const state = browserIncludeTags.has(key) ? 'include' : browserExcludeTags.has(key) ? 'exclude' : 'neutral';
+      const prefix = state === 'include' ? '+' : state === 'exclude' ? '−' : '';
+      return `<button type="button" class="tag-filter-chip ${state}" data-tag="${escapeAttr(tag)}">${prefix}${escapeHtml(tag)} <span class="tag-count">(${count})</span></button>`;
+    }).join('');
   }
-  wrap.innerHTML = tags.map(tag => {
-    const key = tag.toLowerCase();
-    const state = browserIncludeTags.has(key) ? 'include' : browserExcludeTags.has(key) ? 'exclude' : 'neutral';
-    const prefix = state === 'include' ? '+' : state === 'exclude' ? '−' : '';
-    return `<button type="button" class="tag-filter-chip ${state}" data-tag="${escapeAttr(tag)}">${prefix}${escapeHtml(tag)}</button>`;
-  }).join('');
+  renderTagMergePanel();
+  renderAiTagSuggestions();
   $$('.tag-filter-chip', wrap).forEach(btn => {
     btn.addEventListener('click', () => {
-      const key = normaliseBrowserTag(btn.dataset.tag).toLowerCase();
+      const key = browserTagKey(btn.dataset.tag);
       if (!key) return;
       if (!browserIncludeTags.has(key) && !browserExcludeTags.has(key)) {
         browserIncludeTags.add(key);
@@ -2502,8 +2889,161 @@ function renderBrowserFilterPanel() {
   });
 }
 
+function renderTagMergePanel() {
+  const originalSelect = $('#tagMergeOriginal');
+  const aliasInput = $('#tagMergeAlias');
+  const list = $('#tagMergeList');
+  if (!originalSelect || !aliasInput || !list) return;
+  const originalTags = allOriginalBrowserTags();
+  const current = originalSelect.value;
+  originalSelect.innerHTML = '<option value="">Choose original tag…</option>' + originalTags.map(tag => `<option value="${escapeAttr(tag)}">${escapeHtml(tag)}</option>`).join('');
+  if (current && originalTags.some(t => browserTagKey(t) === browserTagKey(current))) originalSelect.value = current;
+  const entries = Object.entries(browserTagMerges || {}).sort((a, b) => a[0].localeCompare(b[0]));
+  if (!entries.length) {
+    list.innerHTML = '<div class="empty small">No tag merges yet. Real character tags are untouched.</div>';
+  } else {
+    const originalLookup = new Map(allOriginalBrowserTags().map(t => [browserTagKey(t), t]));
+    list.innerHTML = entries.map(([fromKey, to]) => {
+      const from = originalLookup.get(fromKey) || fromKey;
+      return `<div class="tag-merge-row"><span><b>${escapeHtml(from)}</b> → <span class="merged-tag-label">${escapeHtml(to)}</span></span><button type="button" class="remove-tag-merge" data-tag="${escapeAttr(fromKey)}">Remove</button></div>`;
+    }).join('');
+  }
+  $$('.remove-tag-merge', list).forEach(btn => {
+    btn.addEventListener('click', async () => {
+      delete browserTagMerges[btn.dataset.tag];
+      await saveBrowserTagMerges();
+      renderCharacterBrowser();
+      renderSelectedCharacterTags(getSelectedBrowserCard());
+    });
+  });
+}
+
+async function saveBrowserTagMerges() {
+  browserTagMerges = cleanBrowserTagMerges(browserTagMerges);
+  settings = { ...(settings || {}), browserTagMerges };
+  try {
+    await window.pywebview.api.save_settings(settings);
+  } catch (err) {
+    setStatus(`Could not save tag merges: ${err.message || err}`, 'error');
+  }
+}
+
+async function addBrowserTagMerge() {
+  const original = normaliseBrowserTag($('#tagMergeOriginal')?.value || '');
+  const alias = normaliseBrowserTag($('#tagMergeAlias')?.value || '');
+  const key = browserTagKey(original);
+  if (!key || !alias) { setStatus('Choose an original tag and enter the display tag to merge into.', 'error'); return; }
+  if (key === alias.toLowerCase()) { setStatus('The merged display tag must be different from the original tag.', 'error'); return; }
+  browserTagMerges[key] = alias;
+  await saveBrowserTagMerges();
+  const aliasInput = $('#tagMergeAlias');
+  if (aliasInput) aliasInput.value = '';
+  renderCharacterBrowser();
+  renderSelectedCharacterTags(getSelectedBrowserCard());
+  setStatus(`Merged ${original} into display tag ${alias}. Original character tags were not changed.`, 'ok');
+}
+
+function aiSuggestionKey(item) {
+  return `${browserTagKey(item?.from)}=>${browserTagKey(item?.to)}`;
+}
+
+function renderAiTagSuggestions() {
+  const list = $('#aiTagSuggestionList');
+  if (!list) return;
+  if (!aiTagCleanupSuggestions.length) {
+    list.innerHTML = '<div class="empty small">No AI suggestions yet.</div>';
+    return;
+  }
+  list.innerHTML = aiTagCleanupSuggestions.map((item, idx) => `
+    <div class="tag-merge-row ai-tag-suggestion" data-index="${idx}">
+      <span><b>${escapeHtml(item.from)}</b> <span class="tag-count">(${Number(item.fromCount || 0)})</span> → <span class="merged-tag-label">${escapeHtml(item.to)}</span> <span class="tag-count">(${Number(item.toCount || 0)})</span><br><small>${escapeHtml(item.reason || 'Near-duplicate tag.')}</small></span>
+      <span class="tag-suggestion-actions">
+        <button type="button" class="ai-tag-merge-one" data-index="${idx}">Merge Only</button>
+        <button type="button" class="ai-tag-rename-one danger" data-index="${idx}">Rename</button>
+      </span>
+    </div>`).join('');
+  $$('.ai-tag-merge-one', list).forEach(btn => btn.addEventListener('click', () => applyAiTagSuggestion(Number(btn.dataset.index), 'merge')));
+  $$('.ai-tag-rename-one', list).forEach(btn => btn.addEventListener('click', () => applyAiTagSuggestion(Number(btn.dataset.index), 'rename')));
+}
+
+async function runAiTagCleanup() {
+  setBusy('AI TAG CLEANUP — SCANNING LIBRARY TAGS…');
+  try {
+    const res = await window.pywebview.api.ai_suggest_tag_cleanup(settings || {});
+    if (!res.ok) throw new Error(res.error || 'AI tag cleanup failed.');
+    aiTagCleanupSuggestions = res.suggestions || [];
+    renderAiTagSuggestions();
+    const msg = aiTagCleanupSuggestions.length
+      ? `AI found ${aiTagCleanupSuggestions.length} possible tag merge(s) from ${res.tagCount || 0} tag(s).`
+      : `AI found no obvious redundant tags among ${res.tagCount || 0} tag(s).`;
+    setStatus(msg, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function applyAiTagSuggestion(index, mode) {
+  const item = aiTagCleanupSuggestions[index];
+  if (!item) return;
+  await applyAiTagSuggestions(mode, [item]);
+  aiTagCleanupSuggestions = aiTagCleanupSuggestions.filter((x, i) => i !== index);
+  renderAiTagSuggestions();
+}
+
+async function applyAiTagSuggestions(mode, items=null) {
+  const suggestions = (items || aiTagCleanupSuggestions || []).filter(x => normaliseBrowserTag(x?.from) && normaliseBrowserTag(x?.to));
+  if (!suggestions.length) { setStatus('No AI tag suggestions to apply.', 'error'); return; }
+  if (mode === 'merge') {
+    suggestions.forEach(item => { browserTagMerges[browserTagKey(item.from)] = normaliseBrowserTag(item.to); });
+    await saveBrowserTagMerges();
+    renderCharacterBrowser();
+    renderSelectedCharacterTags(getSelectedBrowserCard());
+    setStatus(`Applied ${suggestions.length} display-only tag merge(s). Real character tags were not changed.`, 'ok');
+    return;
+  }
+  if (mode === 'rename') {
+    const renameMap = {};
+    suggestions.forEach(item => { renameMap[normaliseBrowserTag(item.from)] = normaliseBrowserTag(item.to); });
+    setBusy('RENAMING TAGS IN CHARACTER PROJECTS…');
+    try {
+      const res = await window.pywebview.api.rename_tags_across_library(renameMap);
+      if (!res.ok) throw new Error(res.error || 'Could not rename tags.');
+      // Remove display-only aliases that are now real renamed tags.
+      suggestions.forEach(item => { delete browserTagMerges[browserTagKey(item.from)]; });
+      await saveBrowserTagMerges();
+      await refreshCharacterBrowser(false);
+      setStatus(`Renamed tags in ${res.updated || 0} character project(s).`, 'ok');
+    } catch (err) {
+      setStatus(err.message || String(err), 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+}
+
+async function regenerateSelectedBrowserDescription() {
+  if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
+  setBusy('AI DESCRIPTION — READING CHARACTER CARD…');
+  try {
+    const res = await window.pywebview.api.regenerate_browser_description_for_project(selectedCharacterProjectPath, settings || {});
+    if (!res.ok) throw new Error(res.error || 'Could not regenerate description.');
+    const card = getSelectedBrowserCard();
+    if (card) card.browserDescription = res.browserDescription || card.browserDescription || '';
+    const preview = $('#browserPreview');
+    if (preview) preview.value = res.browserDescription || '';
+    await refreshCharacterBrowser(false);
+    setStatus('AI browser description updated.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 function cycleBrowserTagFilter(tag, preferInclude=true) {
-  const key = normaliseBrowserTag(tag).toLowerCase();
+  const key = browserTagKey(tag);
   if (!key) return;
   if (preferInclude) {
     if (browserExcludeTags.has(key)) browserExcludeTags.delete(key);
@@ -2628,11 +3168,13 @@ function renderBrowserLetterStrip(cards) {
 function renderCharacterBrowser() {
   const grid = $('#characterGrid');
   if (!grid) return;
+  renderBrowserFolderControls();
   renderBrowserFilterPanel();
   const visibleCards = getVisibleBrowserCards();
   renderBrowserLetterStrip(visibleCards);
   const countEl = $('#browserResultCount');
-  if (countEl) countEl.textContent = `${visibleCards.length} / ${characterBrowserCards.length} character${characterBrowserCards.length === 1 ? '' : 's'}`;
+  const scopedTotal = browserScopeCards().length;
+  if (countEl) countEl.textContent = `${visibleCards.length} / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
   if (!characterBrowserCards.length) {
     grid.innerHTML = '<div class="empty">No saved characters yet. Generate a card first.</div>';
     return;
@@ -2641,19 +3183,33 @@ function renderCharacterBrowser() {
     grid.innerHTML = '<div class="empty">No characters match the current search/filter.</div>';
     return;
   }
+  updateBrowserMultiActionState();
   grid.innerHTML = visibleCards.map(card => {
     const name = card.name || 'Unnamed';
     const ch = String(name).trim().charAt(0).toUpperCase();
     const letter = /^[A-Z]$/.test(ch) ? ch : '#';
+    const multiSelected = browserSelectedProjects.has(card.projectPath);
     return `
-    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
+    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
+      <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
-      <div class="character-tile-tags">${cardTags(card).slice(0, 5).map(t => `<button type="button" class="character-tag-chip" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`).join('')}</div>
+      <div class="character-tile-tags">${cardEffectiveTags(card).slice(0, 5).map(t => `<button type="button" class="character-tag-chip ${isMergedBrowserTag(t) ? 'merged-display' : ''}" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`).join('')}</div>
+      <div class="character-tile-folder">${escapeHtml(browserFolderPathLabel(card.virtualFolderId || ''))}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
     </div>
   `}).join('');
+  $$('.browser-card-checkbox', grid).forEach(box => {
+    box.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const path = box.dataset.project;
+      if (!path) return;
+      if (box.checked) browserSelectedProjects.add(path);
+      else browserSelectedProjects.delete(path);
+      renderCharacterBrowser();
+    });
+  });
   $$('.character-card-tile', grid).forEach(tile => {
     tile.addEventListener('click', () => selectCharacterBrowserCard(tile.dataset.project));
     tile.addEventListener('dblclick', () => { selectCharacterBrowserCard(tile.dataset.project); loadSelectedCharacterWorkspace(); });
@@ -2676,7 +3232,13 @@ function renderSelectedCharacterTags(card) {
   if (!wrap) return;
   const tags = cardTags(card);
   const chips = tags.length
-    ? tags.map(tag => `<button type="button" class="selected-tag clickable" data-tag="${escapeAttr(tag)}" title="Filter by ${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join('')
+    ? tags.map(tag => {
+        const effective = effectiveBrowserTag(tag);
+        const merged = browserTagKey(effective) !== browserTagKey(tag);
+        const realChip = `<button type="button" class="selected-tag clickable real-tag" data-tag="${escapeAttr(effective)}" title="Filter by ${escapeAttr(effective)}">${escapeHtml(tag)}</button>`;
+        const mergeChip = merged ? `<button type="button" class="selected-tag clickable merged-display" data-tag="${escapeAttr(effective)}" title="Merged display tag. Filter by ${escapeAttr(effective)}">→ ${escapeHtml(effective)}</button>` : '';
+        return `<span class="selected-tag-pair">${realChip}${mergeChip}</span>`;
+      }).join('')
     : '<div class="empty small">No tags saved for this character.</div>';
   wrap.innerHTML = `
     <div class="selected-tag-row">${chips}</div>
@@ -2693,7 +3255,7 @@ function selectCharacterBrowserCard(projectPath) {
   selectedCharacterProjectPath = projectPath || '';
   const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
   $$('.character-card-tile').forEach(el => el.classList.toggle('selected', el.dataset.project === selectedCharacterProjectPath));
-  $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${card.folder}` : 'Select a character card.';
+  $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${browserFolderPathLabel(card.virtualFolderId || '')} — ${card.folder}` : 'Select a character card.';
   $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
   renderSelectedCharacterTags(card);
 }

@@ -250,12 +250,12 @@
           <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label><label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label><label>Model<input id="model" placeholder="model-name" /></label><label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label><label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label><label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
           <label>Vision API Base URL<input id="visionApiBaseUrl" placeholder="Leave blank to use text API base URL" /></label><label>Vision API Key<input id="visionApiKey" type="password" placeholder="Leave blank to use text API key" /></label><label>Vision Model<input id="visionModel" placeholder="vision-model-name" /></label>
           <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label><label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="1000000" step="1024" value="200000" /></label><label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label><label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label><label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label>
-          <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Data Folder<input id="frontPorchDataFolder" placeholder="Folder from Front Porch → Settings" /></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Front Porch Folder</button></div>
+          <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Data Folder<input id="frontPorchDataFolder" placeholder="Folder from Front Porch → Settings" /></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Front Porch Folder</button></div>
         </div>
       </section>
 
       <section id="browser" class="tab">
-        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Click a card to restore the full workspace: concept, builders, Q&A, output, image, emotion prompts, and settings.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button">Refresh</button><button id="browserExportPngBtn" type="button" class="primary">Export PNG</button><button id="browserExportJsonBtn" type="button">Export JSON</button><button id="browserEmotionZipBtn" type="button">Emotion ZIP</button><button id="browserFrontPorchExportBtn" type="button" class="primary">Export to Front Porch AI</button></div></div>
+        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Click a card to restore the full workspace. Multi-select can delete local saved directories, batch export, or move cards into virtual folders.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button">Refresh</button><button id="browserExportPngBtn" type="button" class="primary">Export PNG</button><button id="browserExportJsonBtn" type="button">Export JSON</button><button id="browserEmotionZipBtn" type="button">Emotion ZIP</button><button id="browserFrontPorchExportBtn" type="button" class="primary">Export to Front Porch AI</button></div></div>
         <div class="browser-toolbar card">
           <label>Sort
             <select id="browserSortMode">
@@ -268,20 +268,67 @@
           <label>Live Search
             <input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." />
           </label>
+          <label>Folder
+            <select id="browserFolderSelect"><option value="__all__">All folders</option></select>
+          </label>
+          <label>Search Scope
+            <select id="browserFolderScope">
+              <option value="global">Global</option>
+              <option value="current">Current folder only</option>
+              <option value="current_subfolders">Current folder + subfolders</option>
+            </select>
+          </label>
           <div class="browser-toolbar-actions">
             <button id="browserFilterBtn" type="button">Filter Tags</button>
             <button id="browserClearFiltersBtn" type="button">Clear Filters</button>
+            <button id="browserCreateFolderBtn" type="button">New Virtual Folder</button>
             <span id="browserResultCount" class="browser-result-count">0 characters</span>
           </div>
         </div>
         <div id="browserFilterPanel" class="browser-filter-panel card hidden">
-          <div id="browserFilterSummary" class="browser-filter-summary">Click a tag once to include it, twice to exclude it, and a third time to clear it.</div>
+          <div class="browser-filter-header">
+            <div id="browserFilterSummary" class="browser-filter-summary">Click a tag once to include it, twice to exclude it, and a third time to clear it.</div>
+            <label class="browser-tag-sort">Tag Sort
+              <select id="browserTagSortMode">
+                <option value="alpha">Alphabetical</option>
+                <option value="usage">Most used</option>
+              </select>
+            </label>
+          </div>
           <div id="browserTagFilterList" class="tag-filter-list"></div>
+          <details class="tag-merge-panel">
+            <summary>Merge Tags (display only)</summary>
+            <p>Merge a noisy original tag into a cleaner display tag in the browser. This does not edit the real tags saved on characters.</p>
+            <div class="tag-merge-controls">
+              <select id="tagMergeOriginal"><option value="">Choose original tag…</option></select>
+              <input id="tagMergeAlias" type="text" placeholder="Display as tag…" />
+              <button id="tagMergeAddBtn" type="button">Add Merge</button>
+            </div>
+            <div id="tagMergeList" class="tag-merge-list"></div>
+          </details>
+          <details class="tag-merge-panel ai-tag-panel">
+            <summary>AI Tag Cleanup</summary>
+            <p>Scan the real tags with your AI model and suggest near-duplicate tags. Merge Only changes the browser display layer. Rename changes the real tags saved inside character projects/cards.</p>
+            <div class="tag-merge-controls">
+              <button id="aiTagCleanupBtn" type="button">Scan Tags with AI</button>
+              <button id="aiTagMergeAllBtn" type="button">Merge All Suggestions</button>
+              <button id="aiTagRenameAllBtn" type="button" class="danger">Rename All Suggestions</button>
+            </div>
+            <div id="aiTagSuggestionList" class="tag-merge-list"><div class="empty small">No AI suggestions yet.</div></div>
+          </details>
+        </div>
+        <div class="browser-bulk-toolbar card">
+          <span id="browserSelectedCount" class="browser-result-count">No multi-select</span>
+          <select id="browserMoveFolderSelect"><option value="">Unfiled</option></select>
+          <button id="browserMoveToFolderBtn" type="button">Move Selected</button>
+          <button id="browserMultiExportPngBtn" type="button">Export Selected PNG</button><button id="browserMultiExportJsonBtn" type="button">Export Selected JSON</button>
+          <button id="browserMultiFrontPorchBtn" type="button" class="primary">Export Selected to Front Porch</button>
+          <button id="browserMultiDeleteBtn" type="button" class="danger">Delete Local Directories</button>
         </div>
         <div id="browserLetterStrip" class="browser-letter-strip hidden"></div>
         <div class="browser-layout">
           <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export.</p></div></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
-          <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea><div class="selected-tags-title">Tags</div><div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><div class="selected-character-actions"><button id="browserAiDescriptionBtn" type="button">AI Description</button><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea><div class="selected-tags-title">Tags</div><div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div></div>
         </div>
       </section>
 

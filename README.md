@@ -85,7 +85,7 @@ The Character Browser shows autosaved character projects from `exports/`.
 
 - Sort by newest, oldest, A-Z, or Z-A.
 - Use live search to search character names, browser summaries, output previews, folders, and tags.
-- Use **Filter Tags** to include or exclude as many tags as you want. Click a tag once to include it, twice to exclude it, and a third time to clear it.
+- Use **Filter Tags** to include or exclude as many tags as you want. Click a tag once to include it, twice to exclude it, and a third time to clear it. The tag list is context-aware: once filters/search are active, it only shows tags that still exist on the matching characters, while keeping active filters visible so they can be removed.
 - Search still respects the active tag filter.
 - When sorting alphabetically and the library has more than 50 characters, an A-Z jump strip appears above the grid.
 - Selecting a character shows its browser summary and all saved tags under the description box.
@@ -168,6 +168,22 @@ macOS:
 ./setup.command
 ```
 
+
+## Character Browser Tag Tools
+
+The Character Browser includes a faceted tag filter for larger libraries:
+
+- Sort tag chips alphabetically or by most-used.
+- Each tag chip shows a count in brackets for how many currently matching characters use that displayed tag.
+- Include or exclude multiple tags at once.
+- Live search still respects active include/exclude filters.
+- Tag merges are display-only aliases: merge a noisy original tag into a cleaner browser tag without editing the real tags saved on the character.
+- **AI Tag Cleanup** can suggest merge/rename candidates for near-duplicate tags. Use Merge Only for display aliases, or Rename to update the real saved card tags.
+- Selected characters show both the original real tag and any merged display tag, with merged display tags highlighted separately.
+- **AI Description** refreshes the selected character summary so the browser describes the scenario and character dynamic instead of only physical metadata.
+
+Example: merge `blonde-girl`, `blonde female`, and `yellow hair` into `blonde`. The browser tag list becomes cleaner, while each character keeps its original tags until you explicitly edit them.
+
 ## Troubleshooting
 
 If the app does not start on Windows, run `start.bat` from Command Prompt so the error stays visible.
@@ -182,9 +198,36 @@ If Front Porch emotion images show as entries but not images, re-export the char
 
 Only redistribute this package if you have the right to share all included files. Do not include private API keys, personal settings, private character exports, or generated images you do not want to publish.
 
+## v0.9.7 AI tag cleanup and AI browser descriptions
+
+- Added **AI Tag Cleanup** in the Character Browser tag filter panel.
+- The app scans existing real tags with the configured AI model and suggests close duplicates or redundant variants.
+- Suggestions can be applied as **Merge Only**, which keeps real character tags unchanged and only changes browser display aliases.
+- Suggestions can also be applied as **Rename**, which updates the real tags inside saved character projects, `latest_output.md`, and the latest Card V2 PNG.
+- Added **AI Description** for the selected character. This reads the saved card and generates a short Character Browser description about the scenario, character overview, and RP hook.
+- Metadata/fallback descriptions are still used when no AI-generated browser description exists.
+
+## v0.9.6 Context-aware tag filtering
+
+- The Character Browser tag filter list now behaves like faceted search.
+- Including a tag narrows the available tag list to tags found on characters that match the included tag.
+- Excluding a tag also narrows the available tag list to tags found on the remaining characters.
+- Active include/exclude tags stay visible even when their source cards are hidden, so they can always be cleared.
+
 ## v0.9.4 Character Browser tag editing
 
 - Selected characters now show clickable tags. Clicking a tag applies it as an include filter in the Character Browser.
 - Character tiles also have clickable tag chips for quick filtering.
 - The selected-character panel now includes **Edit Tags**, allowing tags to be added, removed, and saved without loading the full workspace.
 - Saving tags updates the saved project metadata, the generated output's `Tags` section, `latest_output.md`, and the latest Card V2 PNG.
+
+## v0.9.8 Character Browser QoL
+
+- Added local-only delete for saved Character Card Forge directories from Character Browser. This does not touch Front Porch AI database entries.
+- Added multi-select in Character Browser. Selected cards can be deleted locally, batch-exported as PNG, batch-exported to Front Porch AI, or moved together.
+- Added virtual folders. These are browser-only organization folders and do not move the real files on disk.
+- Added folder-aware search/filter scopes:
+  - Global: search and filter all cards.
+  - Current folder: search and filter only the selected virtual folder.
+  - Current folder + subfolders: include the selected folder and its children.
+- The smart tag filter list now respects the active folder scope, so hidden/shown tags are based on the cards currently in scope.

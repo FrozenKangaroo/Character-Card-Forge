@@ -24,5 +24,12 @@
   "exportFormat": "chara_v2_png",
   "settingsSchemaVersion": "0.9.0",
   "aiSuggestionModel": "",
-  "frontPorchDataFolder": ""
+  "frontPorchDataFolder": "",
+  "browserTagMerges": {},
+  "browserVirtualFolders": [],
+  "sdBaseUrl": "http://127.0.0.1:7860",
+  "sdModel": "",
+  "sdSteps": 28,
+  "sdCfgScale": 7,
+  "sdSampler": "Euler a"
 }
