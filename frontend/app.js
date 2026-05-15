@@ -13,6 +13,11 @@ let lastQnaAnswers = "";
 let currentBrowserDescription = "";
 let selectedCharacterProjectPath = "";
 let characterBrowserCards = [];
+let browserSortMode = "date_desc";
+let browserSearchTerm = "";
+let browserIncludeTags = new Set();
+let browserExcludeTags = new Set();
+let browserFilterPanelOpen = false;
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -915,6 +920,10 @@ function bindActions() {
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#generateBtn').addEventListener('click', generateCard);
   $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
+  $('#browserSortMode')?.addEventListener('change', (e) => { browserSortMode = e.target.value || 'date_desc'; renderCharacterBrowser(); });
+  $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; renderCharacterBrowser(); });
+  $('#browserFilterBtn')?.addEventListener('click', () => { browserFilterPanelOpen = !browserFilterPanelOpen; renderBrowserFilterPanel(); });
+  $('#browserClearFiltersBtn')?.addEventListener('click', () => { browserIncludeTags.clear(); browserExcludeTags.clear(); renderCharacterBrowser(); });
   $('#browserLoadBtn')?.addEventListener('click', loadSelectedCharacterWorkspace);
   $('#browserExportPngBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_png'));
   $('#browserExportJsonBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_json'));
@@ -2383,28 +2392,171 @@ async function refreshCharacterBrowser(showStatus=true) {
     const res = await window.pywebview.api.list_character_library();
     if (!res.ok) throw new Error(res.error || 'Could not load character browser.');
     characterBrowserCards = res.cards || [];
+    if (selectedCharacterProjectPath && !characterBrowserCards.some(c => c.projectPath === selectedCharacterProjectPath)) {
+      selectedCharacterProjectPath = '';
+    }
     renderCharacterBrowser();
+    renderSelectedCharacterTags(characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath));
     if (showStatus) setStatus(`Character Browser refreshed: ${characterBrowserCards.length} character(s).`, 'ok');
   } catch (err) {
     if (showStatus) setStatus(err.message || String(err), 'error');
   }
 }
 
+function normaliseBrowserTag(tag) {
+  return String(tag || '').trim();
+}
+
+function cardTags(card) {
+  return Array.isArray(card?.tags) ? card.tags.map(normaliseBrowserTag).filter(Boolean) : [];
+}
+
+function allBrowserTags() {
+  const tags = new Map();
+  characterBrowserCards.forEach(card => {
+    cardTags(card).forEach(tag => {
+      const key = tag.toLowerCase();
+      if (!tags.has(key)) tags.set(key, tag);
+    });
+  });
+  return [...tags.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+function browserCardMatches(card) {
+  const search = browserSearchTerm.trim().toLowerCase();
+  const tags = cardTags(card);
+  const lowerTags = tags.map(t => t.toLowerCase());
+  for (const tag of browserIncludeTags) {
+    if (!lowerTags.includes(tag.toLowerCase())) return false;
+  }
+  for (const tag of browserExcludeTags) {
+    if (lowerTags.includes(tag.toLowerCase())) return false;
+  }
+  if (!search) return true;
+  const haystack = [
+    card.name,
+    card.browserDescription,
+    card.outputPreview,
+    card.folder,
+    ...tags,
+  ].join(' ').toLowerCase();
+  return haystack.includes(search);
+}
+
+function browserUpdatedTime(card) {
+  const parsed = Date.parse(card?.updated || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getVisibleBrowserCards() {
+  const cards = characterBrowserCards.filter(browserCardMatches);
+  const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
+  const byDate = (a, b) => browserUpdatedTime(b) - browserUpdatedTime(a);
+  if (browserSortMode === 'alpha_asc') cards.sort(byName);
+  else if (browserSortMode === 'alpha_desc') cards.sort((a, b) => byName(b, a));
+  else if (browserSortMode === 'date_asc') cards.sort((a, b) => browserUpdatedTime(a) - browserUpdatedTime(b));
+  else cards.sort(byDate);
+  return cards;
+}
+
+function renderBrowserFilterPanel() {
+  const panel = $('#browserFilterPanel');
+  if (!panel) return;
+  panel.classList.toggle('hidden', !browserFilterPanelOpen);
+  const tags = allBrowserTags();
+  const count = browserIncludeTags.size + browserExcludeTags.size;
+  const filterBtn = $('#browserFilterBtn');
+  if (filterBtn) filterBtn.textContent = count ? `Filter Tags (${count})` : 'Filter Tags';
+  const summary = $('#browserFilterSummary');
+  if (summary) {
+    const inc = [...browserIncludeTags].sort((a,b) => a.localeCompare(b)).map(t => `+${t}`);
+    const exc = [...browserExcludeTags].sort((a,b) => a.localeCompare(b)).map(t => `-${t}`);
+    summary.textContent = [...inc, ...exc].join('   ') || 'Click a tag once to include it, twice to exclude it, and a third time to clear it.';
+  }
+  const wrap = $('#browserTagFilterList');
+  if (!wrap) return;
+  if (!tags.length) {
+    wrap.innerHTML = '<div class="empty small">No tags found in saved characters yet.</div>';
+    return;
+  }
+  wrap.innerHTML = tags.map(tag => {
+    const key = tag.toLowerCase();
+    const state = browserIncludeTags.has(key) ? 'include' : browserExcludeTags.has(key) ? 'exclude' : 'neutral';
+    const prefix = state === 'include' ? '+' : state === 'exclude' ? '−' : '';
+    return `<button type="button" class="tag-filter-chip ${state}" data-tag="${escapeAttr(tag)}">${prefix}${escapeHtml(tag)}</button>`;
+  }).join('');
+  $$('.tag-filter-chip', wrap).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = normaliseBrowserTag(btn.dataset.tag).toLowerCase();
+      if (!key) return;
+      if (!browserIncludeTags.has(key) && !browserExcludeTags.has(key)) {
+        browserIncludeTags.add(key);
+      } else if (browserIncludeTags.has(key)) {
+        browserIncludeTags.delete(key);
+        browserExcludeTags.add(key);
+      } else {
+        browserExcludeTags.delete(key);
+      }
+      renderCharacterBrowser();
+    });
+  });
+}
+
+function renderBrowserLetterStrip(cards) {
+  const strip = $('#browserLetterStrip');
+  if (!strip) return;
+  const isAlpha = browserSortMode === 'alpha_asc' || browserSortMode === 'alpha_desc';
+  if (!isAlpha || characterBrowserCards.length <= 50 || !cards.length) {
+    strip.classList.add('hidden');
+    strip.innerHTML = '';
+    return;
+  }
+  const letters = [];
+  const seen = new Set();
+  cards.forEach(card => {
+    const ch = String(card.name || '#').trim().charAt(0).toUpperCase();
+    const letter = /^[A-Z]$/.test(ch) ? ch : '#';
+    if (!seen.has(letter)) { seen.add(letter); letters.push(letter); }
+  });
+  strip.classList.remove('hidden');
+  strip.innerHTML = letters.map(letter => `<button type="button" class="letter-jump" data-letter="${escapeAttr(letter)}">${escapeHtml(letter)}</button>`).join('');
+  $$('.letter-jump', strip).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = $(`.character-card-tile[data-letter="${btn.dataset.letter}"]`, $('#characterGrid'));
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+}
+
 function renderCharacterBrowser() {
   const grid = $('#characterGrid');
   if (!grid) return;
+  renderBrowserFilterPanel();
+  const visibleCards = getVisibleBrowserCards();
+  renderBrowserLetterStrip(visibleCards);
+  const countEl = $('#browserResultCount');
+  if (countEl) countEl.textContent = `${visibleCards.length} / ${characterBrowserCards.length} character${characterBrowserCards.length === 1 ? '' : 's'}`;
   if (!characterBrowserCards.length) {
     grid.innerHTML = '<div class="empty">No saved characters yet. Generate a card first.</div>';
     return;
   }
-  grid.innerHTML = characterBrowserCards.map(card => `
-    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''}" data-project="${escapeAttr(card.projectPath)}">
-      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(card.name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
-      <div class="character-tile-name">${escapeHtml(card.name || 'Unnamed')}</div>
+  if (!visibleCards.length) {
+    grid.innerHTML = '<div class="empty">No characters match the current search/filter.</div>';
+    return;
+  }
+  grid.innerHTML = visibleCards.map(card => {
+    const name = card.name || 'Unnamed';
+    const ch = String(name).trim().charAt(0).toUpperCase();
+    const letter = /^[A-Z]$/.test(ch) ? ch : '#';
+    return `
+    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
+      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
+      <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
+      <div class="character-tile-tags">${cardTags(card).slice(0, 5).map(t => `<span>${escapeHtml(t)}</span>`).join('')}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
     </div>
-  `).join('');
+  `}).join('');
   $$('.character-card-tile', grid).forEach(tile => {
     tile.addEventListener('click', () => selectCharacterBrowserCard(tile.dataset.project));
     tile.addEventListener('dblclick', () => { selectCharacterBrowserCard(tile.dataset.project); loadSelectedCharacterWorkspace(); });
@@ -2416,12 +2568,24 @@ function renderCharacterBrowser() {
   });
 }
 
+function renderSelectedCharacterTags(card) {
+  const wrap = $('#browserSelectedTags');
+  if (!wrap) return;
+  const tags = cardTags(card);
+  if (!tags.length) {
+    wrap.innerHTML = '<div class="empty small">No tags saved for this character.</div>';
+    return;
+  }
+  wrap.innerHTML = tags.map(tag => `<span class="selected-tag">${escapeHtml(tag)}</span>`).join('');
+}
+
 function selectCharacterBrowserCard(projectPath) {
   selectedCharacterProjectPath = projectPath || '';
   const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
   $$('.character-card-tile').forEach(el => el.classList.toggle('selected', el.dataset.project === selectedCharacterProjectPath));
   $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${card.folder}` : 'Select a character card.';
   $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
+  renderSelectedCharacterTags(card);
 }
 
 async function loadSelectedCharacterWorkspace() {

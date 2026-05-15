@@ -3074,6 +3074,14 @@ class Api:
                 browser_description = str(project.get("browserDescription") or "").strip()
                 if not browser_description:
                     browser_description = self._fallback_browser_description(project.get("output") or "", project.get("concept") or "")
+                tags = []
+                try:
+                    parsed_tags = self._parse_sections(project.get("output") or "", project.get("template") or self.template).get("tags", "")
+                    if not parsed_tags:
+                        parsed_tags = self._section(project.get("output") or "", "Tags")
+                    tags = [t.strip() for t in str(parsed_tags or "").replace("\n", ",").split(",") if t.strip()]
+                except Exception:
+                    tags = []
                 cards.append({
                     "name": name,
                     "folder": str(folder),
@@ -3081,6 +3089,7 @@ class Api:
                     "updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(Path(project_path).stat().st_mtime)),
                     "thumbnail": self._image_data_url(thumb_source or image_path),
                     "browserDescription": browser_description,
+                    "tags": tags,
                     "outputPreview": (project.get("output") or "")[:500],
                     "hasEmotionImages": any(folder.glob("*.png")) and any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
                 })

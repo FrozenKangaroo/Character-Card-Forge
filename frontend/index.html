@@ -256,9 +256,32 @@
 
       <section id="browser" class="tab">
         <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Click a card to restore the full workspace: concept, builders, Q&A, output, image, emotion prompts, and settings.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button">Refresh</button><button id="browserExportPngBtn" type="button" class="primary">Export PNG</button><button id="browserExportJsonBtn" type="button">Export JSON</button><button id="browserEmotionZipBtn" type="button">Emotion ZIP</button><button id="browserFrontPorchExportBtn" type="button" class="primary">Export to Front Porch AI</button></div></div>
+        <div class="browser-toolbar card">
+          <label>Sort
+            <select id="browserSortMode">
+              <option value="date_desc">Newest first</option>
+              <option value="date_asc">Oldest first</option>
+              <option value="alpha_asc">Alphabetical A-Z</option>
+              <option value="alpha_desc">Alphabetical Z-A</option>
+            </select>
+          </label>
+          <label>Live Search
+            <input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." />
+          </label>
+          <div class="browser-toolbar-actions">
+            <button id="browserFilterBtn" type="button">Filter Tags</button>
+            <button id="browserClearFiltersBtn" type="button">Clear Filters</button>
+            <span id="browserResultCount" class="browser-result-count">0 characters</span>
+          </div>
+        </div>
+        <div id="browserFilterPanel" class="browser-filter-panel card hidden">
+          <div id="browserFilterSummary" class="browser-filter-summary">Click a tag once to include it, twice to exclude it, and a third time to clear it.</div>
+          <div id="browserTagFilterList" class="tag-filter-list"></div>
+        </div>
+        <div id="browserLetterStrip" class="browser-letter-strip hidden"></div>
         <div class="browser-layout">
           <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export.</p></div></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
-          <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea></div>
+          <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea><div class="selected-tags-title">Tags</div><div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div></div>
         </div>
       </section>
 

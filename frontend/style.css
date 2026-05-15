@@ -386,6 +386,103 @@ button:disabled, input:disabled, select:disabled, textarea:disabled {
   .qa-section-body .qa-question-row { grid-template-columns: 1fr; }
 }
 
+
+.browser-toolbar {
+  display: grid;
+  grid-template-columns: 180px minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.browser-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.browser-result-count {
+  color: var(--muted);
+  font-size: .9rem;
+  white-space: nowrap;
+}
+.browser-filter-panel {
+  margin-bottom: 12px;
+}
+.browser-filter-panel.hidden,
+.browser-letter-strip.hidden { display: none; }
+.browser-filter-summary {
+  color: var(--muted);
+  font-size: .9rem;
+  margin-bottom: 10px;
+}
+.tag-filter-list,
+.selected-tags,
+.character-tile-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tag-filter-chip,
+.selected-tag,
+.character-tile-tags span {
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(255,255,255,.055);
+  color: rgba(226,232,240,.86);
+  font-size: .78rem;
+  line-height: 1.1;
+}
+.tag-filter-chip.include {
+  border-color: rgba(102, 255, 191, .55);
+  background: rgba(102, 255, 191, .12);
+  color: #bfffe4;
+}
+.tag-filter-chip.exclude {
+  border-color: rgba(255, 107, 107, .58);
+  background: rgba(255, 107, 107, .12);
+  color: #ffd4d4;
+}
+.browser-letter-strip {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(17,19,26,.94);
+  backdrop-filter: blur(10px);
+}
+.letter-jump {
+  min-width: 36px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-weight: 800;
+}
+.selected-tags-title {
+  margin: 10px 0 8px;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.selected-tags {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(9,10,15,.36);
+}
+.empty.small { padding: 8px; font-size: .85rem; }
+@media (max-width: 980px) {
+  .browser-toolbar { grid-template-columns: 1fr; }
+  .browser-toolbar-actions { align-items: stretch; }
+}
+
 .browser-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(320px, .7fr);

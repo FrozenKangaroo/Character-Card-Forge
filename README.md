@@ -17,6 +17,8 @@ The app runs locally with Python and PyWebView. Your prompts, templates, generat
 - Optional Stable Diffusion / SD Forge image generation.
 - Optional vision image analysis for reference images.
 - Saved project bundles so a generated card can be reopened and revised later.
+- Character Browser with date/alphabetical sorting, live search, tag include/exclude filters, and tag display.
+- Alphabet jump strip for large alphabetical libraries.
 
 ## Requirements
 
@@ -36,6 +38,25 @@ The app runs locally with Python and PyWebView. Your prompts, templates, generat
 
 After the first setup, you normally only need `start.bat`.
 
+## macOS setup
+
+For normal macOS users:
+
+1. Install Python 3.10 or newer from the official Python website or Homebrew.
+2. Extract this zip somewhere writable, such as `Documents/Character Card Forge`.
+3. Double-click `setup.command`.
+4. Double-click `start.command`.
+
+If macOS blocks the script because it was downloaded from the internet, right-click the file and choose **Open**, or run it from Terminal.
+
+Terminal alternative:
+
+```bash
+chmod +x setup.command start.command
+./setup.command
+./start.command
+```
+
 ## Linux setup
 
 ```bash
@@ -44,7 +65,7 @@ chmod +x setup.sh start.sh
 ./start.sh
 ```
 
-The Linux scripts create a local `.venv` and install the Python dependencies from `requirements.txt`.
+The Linux/macOS scripts create a local `.venv` and install the Python dependencies from `requirements.txt`.
 
 ## First run
 
@@ -56,6 +77,18 @@ Open **AI Settings** and set:
 - Generation mode: use **Lite** for smaller models or smaller context windows.
 
 Then go back to the concept page, enter a character idea, and generate the card.
+
+
+## Character Browser
+
+The Character Browser shows autosaved character projects from `exports/`.
+
+- Sort by newest, oldest, A-Z, or Z-A.
+- Use live search to search character names, browser summaries, output previews, folders, and tags.
+- Use **Filter Tags** to include or exclude as many tags as you want. Click a tag once to include it, twice to exclude it, and a third time to clear it.
+- Search still respects the active tag filter.
+- When sorting alphabetically and the library has more than 50 characters, an A-Z jump strip appears above the grid.
+- Selecting a character shows its browser summary and all saved tags under the description box.
 
 ## Front Porch AI export
 
@@ -103,6 +136,10 @@ data/templates/         Saved custom templates
 exports/                Exported character cards and projects
 setup.sh                Linux setup
 start.sh                Linux start
+setup.command           macOS double-click setup
+start.command           macOS double-click start
+setup-mac.sh            macOS terminal setup alias
+start-mac.sh            macOS terminal start alias
 setup.bat               Windows setup
 start.bat               Windows start
 ```
@@ -123,6 +160,12 @@ Linux:
 
 ```bash
 ./setup.sh
+```
+
+macOS:
+
+```bash
+./setup.command
 ```
 
 ## Troubleshooting
