@@ -417,6 +417,8 @@ button:disabled, input:disabled, select:disabled, textarea:disabled {
 }
 .tag-filter-list,
 .selected-tags,
+.selected-tag-row,
+.editable-tag-list,
 .character-tile-tags {
   display: flex;
   gap: 6px;
@@ -424,7 +426,8 @@ button:disabled, input:disabled, select:disabled, textarea:disabled {
 }
 .tag-filter-chip,
 .selected-tag,
-.character-tile-tags span {
+.editable-tag,
+.character-tag-chip {
   border: 1px solid rgba(255,255,255,.14);
   border-radius: 999px;
   padding: 5px 9px;
@@ -442,6 +445,53 @@ button:disabled, input:disabled, select:disabled, textarea:disabled {
   border-color: rgba(255, 107, 107, .58);
   background: rgba(255, 107, 107, .12);
   color: #ffd4d4;
+}
+
+.selected-tag.clickable,
+.character-tag-chip,
+.editable-tag {
+  cursor: pointer;
+}
+.selected-tag.clickable:hover,
+.character-tag-chip:hover {
+  border-color: rgba(122,162,255,.55);
+  background: rgba(122,162,255,.12);
+  color: #dbe6ff;
+}
+.tag-editor-actions {
+  width: 100%;
+  margin-top: 10px;
+}
+.tag-editor {
+  width: 100%;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.tag-editor.hidden { display: none; }
+.tag-editor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.editable-tag-list {
+  margin-bottom: 8px;
+}
+.editable-tag {
+  border-color: rgba(255, 107, 107, .38);
+}
+.editable-tag:hover {
+  background: rgba(255, 107, 107, .12);
+  color: #ffd4d4;
+}
+.tag-editor-hint {
+  color: var(--muted);
+  font-size: .78rem;
+}
+@media (max-width: 720px) {
+  .tag-editor-row { grid-template-columns: 1fr; }
 }
 .browser-letter-strip {
   position: sticky;

@@ -2615,6 +2615,7 @@ class Api:
             "qnaAnswers": project.get("qnaAnswers") or workspace.get("qnaAnswers") or "",
             "browserDescription": project.get("browserDescription") or workspace.get("browserDescription") or "",
             "browserDescriptionSourceHash": project.get("browserDescriptionSourceHash") or workspace.get("browserDescriptionSourceHash") or "",
+            "tags": project.get("tags") or workspace.get("tags") or self._extract_tags_from_output(output, project.get("template") or self.template),
             "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
             "emotionManifest": project.get("emotionManifest") or workspace.get("emotionManifest") or "",
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
@@ -2961,6 +2962,105 @@ class Api:
             self._log_event('browser_description_generation_failed', {'error': str(e)})
             return fallback
 
+    def _extract_tags_from_output(self, output, template=None):
+        try:
+            parsed_tags = self._parse_sections(output or "", template or self.template).get("tags", "")
+            if not parsed_tags:
+                parsed_tags = self._section(output or "", "Tags")
+            seen = set()
+            tags = []
+            for raw in re.split(r"[,\n]+", str(parsed_tags or "")):
+                tag = raw.strip().lstrip("-•*").strip()
+                if not tag:
+                    continue
+                key = tag.lower()
+                if key not in seen:
+                    seen.add(key)
+                    tags.append(tag)
+            return tags
+        except Exception:
+            return []
+
+    def _replace_tags_section(self, output, tags, template=None):
+        output = output or ""
+        tag_text = ", ".join([str(t).strip() for t in (tags or []) if str(t).strip()])
+        lines = output.splitlines()
+        start = None
+        end = None
+        for i, line in enumerate(lines):
+            try:
+                heading = self._canonical_heading_with_template(line, template or self.template)
+            except Exception:
+                heading = None
+            if heading == "tags":
+                start = i
+                end = len(lines)
+                for j in range(i + 1, len(lines)):
+                    try:
+                        next_heading = self._canonical_heading_with_template(lines[j], template or self.template)
+                    except Exception:
+                        next_heading = None
+                    if next_heading:
+                        end = j
+                        break
+                break
+        if start is None:
+            suffix = f"Tags:\n{tag_text}" if tag_text else "Tags:\n"
+            return (output.rstrip() + "\n\n" + suffix).strip()
+        heading_line = lines[start]
+        replacement = [heading_line]
+        if tag_text:
+            replacement.append(tag_text)
+        new_lines = lines[:start] + replacement + lines[end:]
+        return "\n".join(new_lines).strip()
+
+    def update_character_project_tags(self, project_path, tags):
+        try:
+            path = Path(project_path)
+            if not path.exists():
+                return {"ok": False, "error": "Character project not found."}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            clean_tags = []
+            seen = set()
+            for raw in tags or []:
+                tag = str(raw or "").strip().strip(",")
+                if not tag:
+                    continue
+                key = tag.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                clean_tags.append(tag)
+            template = project.get("template") or self.template
+            output = self._replace_tags_section(project.get("output") or "", clean_tags, template)
+            project["output"] = output
+            project["tags"] = clean_tags
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            workspace["output"] = output
+            workspace["tags"] = clean_tags
+            project["workspace"] = workspace
+            project["saved_at"] = time.strftime("%Y%m%d-%H%M%S")
+            project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            folder = path.parent
+            name = project.get("name") or self._extract_name(output) or folder.name
+            image_path = project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or ""
+            (folder / "latest_output.md").write_text(output, encoding="utf-8")
+            latest_card = folder / f"{self._safe_slug(name)}_latest_cardv2.png"
+            try:
+                card_payload = self._to_chara_card_v2(output, name)
+                self._write_chara_png(latest_card, card_payload, image_path)
+                project["exportedPath"] = str(latest_card)
+            except Exception as e:
+                self._log_event("update_project_tags_card_refresh_failed", {"error": str(e), "project": str(path)})
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            self._log_event("character_project_tags_updated", {"project": str(path), "tags": clean_tags})
+            return {"ok": True, "tags": clean_tags, "output": output, "projectPath": str(path)}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not update tags: {e}"}
+
     def save_character_workspace(self, workspace):
         """Autosave the complete editable workspace into exports/<Character Name>/.
 
@@ -3018,6 +3118,7 @@ class Api:
             self._log_event("autosave_latest_card_failed", {"error": str(e)})
             latest_card = Path("")
 
+        tags = self._extract_tags_from_output(output, template)
         project = {
             "format": "character-card-forge-project",
             "version": (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown",
@@ -3032,6 +3133,7 @@ class Api:
                 "cardImagePath": image_path,
                 "browserDescription": browser_description,
                 "browserDescriptionSourceHash": browser_source_hash,
+                "tags": tags,
                 "projectPath": str(latest_project),
                 "exportedPath": str(latest_card) if str(latest_card) else "",
                 "frontend": "front_porch",
@@ -3074,14 +3176,9 @@ class Api:
                 browser_description = str(project.get("browserDescription") or "").strip()
                 if not browser_description:
                     browser_description = self._fallback_browser_description(project.get("output") or "", project.get("concept") or "")
-                tags = []
-                try:
-                    parsed_tags = self._parse_sections(project.get("output") or "", project.get("template") or self.template).get("tags", "")
-                    if not parsed_tags:
-                        parsed_tags = self._section(project.get("output") or "", "Tags")
-                    tags = [t.strip() for t in str(parsed_tags or "").replace("\n", ",").split(",") if t.strip()]
-                except Exception:
-                    tags = []
+                tags = project.get("tags") if isinstance(project.get("tags"), list) else []
+                if not tags:
+                    tags = self._extract_tags_from_output(project.get("output") or "", project.get("template") or self.template)
                 cards.append({
                     "name": name,
                     "folder": str(folder),

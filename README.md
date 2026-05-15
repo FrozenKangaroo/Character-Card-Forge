@@ -181,3 +181,10 @@ If Front Porch emotion images show as entries but not images, re-export the char
 ## License / redistribution
 
 Only redistribute this package if you have the right to share all included files. Do not include private API keys, personal settings, private character exports, or generated images you do not want to publish.
+
+## v0.9.4 Character Browser tag editing
+
+- Selected characters now show clickable tags. Clicking a tag applies it as an include filter in the Character Browser.
+- Character tiles also have clickable tag chips for quick filtering.
+- The selected-character panel now includes **Edit Tags**, allowing tags to be added, removed, and saved without loading the full workspace.
+- Saving tags updates the saved project metadata, the generated output's `Tags` section, `latest_output.md`, and the latest Card V2 PNG.

@@ -2502,6 +2502,103 @@ function renderBrowserFilterPanel() {
   });
 }
 
+function cycleBrowserTagFilter(tag, preferInclude=true) {
+  const key = normaliseBrowserTag(tag).toLowerCase();
+  if (!key) return;
+  if (preferInclude) {
+    if (browserExcludeTags.has(key)) browserExcludeTags.delete(key);
+    browserIncludeTags.add(key);
+  } else if (!browserIncludeTags.has(key) && !browserExcludeTags.has(key)) {
+    browserIncludeTags.add(key);
+  } else if (browserIncludeTags.has(key)) {
+    browserIncludeTags.delete(key);
+    browserExcludeTags.add(key);
+  } else {
+    browserExcludeTags.delete(key);
+  }
+  renderCharacterBrowser();
+}
+
+function getSelectedBrowserCard() {
+  return characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath) || null;
+}
+
+function tagEditorMarkup(tags) {
+  return `
+    <div id="browserTagEditor" class="tag-editor hidden">
+      <div class="tag-editor-row">
+        <input id="browserTagInput" type="text" placeholder="Add tag..." />
+        <button id="browserAddTagBtn" type="button">Add</button>
+        <button id="browserSaveTagsBtn" type="button" class="primary">Save Tags</button>
+        <button id="browserCancelTagsBtn" type="button">Cancel</button>
+      </div>
+      <div id="browserEditableTagList" class="editable-tag-list">${tags.map(tag => `<button type="button" class="editable-tag" data-tag="${escapeAttr(tag)}" title="Remove tag">${escapeHtml(tag)} ×</button>`).join('')}</div>
+      <div class="tag-editor-hint">Click a character tag to filter. In edit mode, click a tag to remove it.</div>
+    </div>`;
+}
+
+function currentEditorTags() {
+  return $$('.editable-tag', $('#browserEditableTagList')).map(btn => normaliseBrowserTag(btn.dataset.tag)).filter(Boolean);
+}
+
+function addEditorTag(tag) {
+  const wrap = $('#browserEditableTagList');
+  if (!wrap) return;
+  tag = normaliseBrowserTag(tag);
+  if (!tag) return;
+  const exists = currentEditorTags().some(t => t.toLowerCase() === tag.toLowerCase());
+  if (exists) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'editable-tag';
+  btn.dataset.tag = tag;
+  btn.title = 'Remove tag';
+  btn.textContent = `${tag} ×`;
+  btn.addEventListener('click', () => btn.remove());
+  wrap.appendChild(btn);
+}
+
+function wireTagEditor() {
+  $('#browserEditTagsBtn')?.addEventListener('click', () => $('#browserTagEditor')?.classList.toggle('hidden'));
+  $('#browserCancelTagsBtn')?.addEventListener('click', () => renderSelectedCharacterTags(getSelectedBrowserCard()));
+  $('#browserAddTagBtn')?.addEventListener('click', () => {
+    const input = $('#browserTagInput');
+    if (!input) return;
+    addEditorTag(input.value);
+    input.value = '';
+    input.focus();
+  });
+  $('#browserTagInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addEditorTag(e.currentTarget.value.replace(/,$/, ''));
+      e.currentTarget.value = '';
+    }
+  });
+  $$('.editable-tag', $('#browserEditableTagList')).forEach(btn => btn.addEventListener('click', () => btn.remove()));
+  $('#browserSaveTagsBtn')?.addEventListener('click', saveSelectedCharacterTags);
+}
+
+async function saveSelectedCharacterTags() {
+  if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
+  const tags = currentEditorTags();
+  setBusy('SAVING CHARACTER TAGS…');
+  try {
+    const res = await window.pywebview.api.update_character_project_tags(selectedCharacterProjectPath, tags);
+    if (!res.ok) throw new Error(res.error || 'Could not update tags.');
+    const card = getSelectedBrowserCard();
+    if (card) card.tags = res.tags || tags;
+    const output = $('#outputText');
+    if (output && res.output && output.value) output.value = res.output;
+    await refreshCharacterBrowser(false);
+    setStatus('Character tags updated.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 function renderBrowserLetterStrip(cards) {
   const strip = $('#browserLetterStrip');
   if (!strip) return;
@@ -2553,7 +2650,7 @@ function renderCharacterBrowser() {
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
-      <div class="character-tile-tags">${cardTags(card).slice(0, 5).map(t => `<span>${escapeHtml(t)}</span>`).join('')}</div>
+      <div class="character-tile-tags">${cardTags(card).slice(0, 5).map(t => `<button type="button" class="character-tag-chip" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`).join('')}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
     </div>
   `}).join('');
@@ -2566,17 +2663,30 @@ function renderCharacterBrowser() {
       setStatus('Selected. Use Export PNG / Export JSON / Emotion ZIP buttons at the top.', 'ok');
     });
   });
+  $$('.character-tag-chip', grid).forEach(chip => {
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      cycleBrowserTagFilter(chip.dataset.tag, true);
+    });
+  });
 }
 
 function renderSelectedCharacterTags(card) {
   const wrap = $('#browserSelectedTags');
   if (!wrap) return;
   const tags = cardTags(card);
-  if (!tags.length) {
-    wrap.innerHTML = '<div class="empty small">No tags saved for this character.</div>';
-    return;
-  }
-  wrap.innerHTML = tags.map(tag => `<span class="selected-tag">${escapeHtml(tag)}</span>`).join('');
+  const chips = tags.length
+    ? tags.map(tag => `<button type="button" class="selected-tag clickable" data-tag="${escapeAttr(tag)}" title="Filter by ${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join('')
+    : '<div class="empty small">No tags saved for this character.</div>';
+  wrap.innerHTML = `
+    <div class="selected-tag-row">${chips}</div>
+    <div class="tag-editor-actions"><button id="browserEditTagsBtn" type="button">Edit Tags</button></div>
+    ${tagEditorMarkup(tags)}
+  `;
+  $$('.selected-tag.clickable', wrap).forEach(btn => {
+    btn.addEventListener('click', () => cycleBrowserTagFilter(btn.dataset.tag, true));
+  });
+  wireTagEditor();
 }
 
 function selectCharacterBrowserCard(projectPath) {
