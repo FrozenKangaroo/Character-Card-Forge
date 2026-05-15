@@ -1,0 +1,24 @@
+{
+  "time": "2026-05-15 13:08:49",
+  "event": "png_card_metadata_loaded",
+  "payload": {
+    "path": "/mnt/data/ccf_fixpng/test_mai.png",
+    "metadata_key": "chara",
+    "spec": "chara_card_v2",
+    "output_chars": 14498,
+    "embedded_images": 0
+  }
+}
+---
+{
+  "time": "2026-05-15 13:08:49",
+  "event": "png_card_metadata_loaded",
+  "payload": {
+    "path": "/mnt/data/ccf_fixpng/Mai.png",
+    "metadata_key": "sidecar:Mai.extracted.json",
+    "spec": "chara_card_v2",
+    "output_chars": 14498,
+    "embedded_images": 0
+  }
+}
+---

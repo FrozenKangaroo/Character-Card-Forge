@@ -231,3 +231,9 @@ Only redistribute this package if you have the right to share all included files
   - Current folder: search and filter only the selected virtual folder.
   - Current folder + subfolders: include the selected folder and its children.
 - The smart tag filter list now respects the active folder scope, so hidden/shown tags are based on the cards currently in scope.
+
+
+## v0.9.10
+
+- Improved Character Card PNG loading for V2/V3 cards that store metadata in compressed, URL-safe base64, or alternate PNG text chunks.
+- Added fallback loading from sidecar files such as `CharacterName.extracted.json` when a PNG metadata extractor can read the card but the PNG chunk is non-standard.

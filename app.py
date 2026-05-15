@@ -11,6 +11,8 @@ import threading
 import subprocess
 import shutil
 import zipfile
+import zlib
+import gzip
 import sqlite3
 import uuid
 import io
@@ -2676,75 +2678,225 @@ class Api:
     def _decode_card_metadata_value(self, value):
         """Decode PNG card metadata values used by V2/V3 cards.
 
-        V2 usually stores a base64 JSON string in the `chara` PNG text chunk.
-        V3 variants may store plain JSON or base64 JSON under keys like `ccv3`.
+        Character card PNGs in the wild are annoyingly inconsistent:
+        - V2 usually stores base64 JSON in a `chara` text chunk.
+        - Some tools store plain JSON.
+        - Some use URL-safe base64, missing padding, or insert whitespace.
+        - Some compressed text chunks come through as compressed JSON bytes.
+        This decoder accepts all of those before giving up.
         """
         if value is None:
             return None
+        candidates = []
         if isinstance(value, bytes):
-            for enc in ("utf-8", "utf-16"):
+            candidates.append(value)
+            for enc in ("utf-8", "utf-16", "latin-1"):
                 try:
-                    value = value.decode(enc)
-                    break
+                    candidates.append(value.decode(enc))
                 except Exception:
                     pass
-        if not isinstance(value, str):
-            return None
-        s = value.strip().strip("\ufeff")
-        if not s:
-            return None
-        # Plain JSON metadata.
-        if s.startswith("{") or s.startswith("["):
+        elif isinstance(value, str):
+            candidates.append(value)
             try:
-                return json.loads(s)
+                candidates.append(value.encode("latin-1"))
             except Exception:
                 pass
-        # Some tools URL-encode the JSON string.
-        try:
-            from urllib.parse import unquote
-            u = unquote(s)
-            if u != s and (u.strip().startswith("{") or u.strip().startswith("[")):
-                return json.loads(u)
-        except Exception:
-            pass
-        # Base64 JSON metadata, with or without a data: prefix.
-        if "," in s and s.lower().startswith("data:"):
-            s = s.split(",", 1)[1]
-        try:
-            padded = s + ("=" * (-len(s) % 4))
-            raw = base64.b64decode(padded)
-            for enc in ("utf-8", "utf-16"):
+        else:
+            return None
+
+        def try_json_text(text):
+            if not isinstance(text, str):
+                return None
+            text = text.strip().strip("\ufeff")
+            if not text:
+                return None
+            if text.startswith("{") or text.startswith("["):
                 try:
-                    decoded = raw.decode(enc).strip().strip("\ufeff")
-                    if decoded.startswith("{") or decoded.startswith("["):
-                        return json.loads(decoded)
+                    return json.loads(text)
+                except Exception:
+                    return None
+            return None
+
+        def try_json_bytes(raw):
+            if not isinstance(raw, (bytes, bytearray)):
+                return None
+            byte_candidates = [bytes(raw)]
+            for decomp in (zlib.decompress, gzip.decompress):
+                if decomp is None:
+                    continue
+                try:
+                    byte_candidates.append(decomp(bytes(raw)))
                 except Exception:
                     pass
-        except Exception:
-            pass
+            for b in byte_candidates:
+                for enc in ("utf-8", "utf-16", "latin-1"):
+                    try:
+                        parsed = try_json_text(b.decode(enc))
+                        if parsed is not None:
+                            return parsed
+                    except Exception:
+                        pass
+            return None
+
+        # Direct JSON / decoded byte JSON.
+        for candidate in candidates:
+            if isinstance(candidate, str):
+                parsed = try_json_text(candidate)
+                if parsed is not None:
+                    return parsed
+            else:
+                parsed = try_json_bytes(candidate)
+                if parsed is not None:
+                    return parsed
+
+        # URL-encoded JSON.
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            try:
+                from urllib.parse import unquote
+                u = unquote(candidate.strip())
+                if u != candidate:
+                    parsed = try_json_text(u)
+                    if parsed is not None:
+                        return parsed
+            except Exception:
+                pass
+
+        # Base64 JSON metadata, with or without data: prefix. Try normal and URL-safe alphabets.
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            text = candidate.strip().strip("\ufeff")
+            if not text:
+                continue
+            if "," in text and text.lower().startswith("data:"):
+                text = text.split(",", 1)[1]
+            # Some encoders wrap base64 or accidentally include whitespace.
+            compact = re.sub(r"\s+", "", text)
+            # Strip common JS/Python repr wrappers if a tool saved the string oddly.
+            compact = compact.strip('"\'')
+            variants = [compact, compact.replace("-", "+").replace("_", "/")]
+            for item in variants:
+                if not item:
+                    continue
+                padded = item + ("=" * (-len(item) % 4))
+                for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+                    try:
+                        raw = decoder(padded)
+                    except Exception:
+                        continue
+                    parsed = try_json_bytes(raw)
+                    if parsed is not None:
+                        return parsed
         return None
+
+    def _extract_png_text_chunks_raw(self, path):
+        """Read PNG tEXt/zTXt/iTXt chunks manually.
+
+        Pillow usually exposes these as Image.info, but some character cards use
+        compressed or unusual text chunks that are safer to scan directly.
+        """
+        chunks = {}
+        try:
+            raw = Path(path).read_bytes()
+        except Exception:
+            return chunks
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            return chunks
+        pos = 8
+        while pos + 12 <= len(raw):
+            try:
+                length = int.from_bytes(raw[pos:pos+4], "big")
+                ctype = raw[pos+4:pos+8]
+                data = raw[pos+8:pos+8+length]
+                pos = pos + 12 + length
+            except Exception:
+                break
+            if ctype == b"IEND":
+                break
+            try:
+                if ctype == b"tEXt" and b"\x00" in data:
+                    key, text = data.split(b"\x00", 1)
+                    chunks[key.decode("latin-1", errors="replace")] = text.decode("latin-1", errors="replace")
+                elif ctype == b"zTXt" and b"\x00" in data:
+                    key, rest = data.split(b"\x00", 1)
+                    if rest:
+                        method = rest[0]
+                        compressed = rest[1:]
+                        if method == 0:
+                            text = zlib.decompress(compressed).decode("utf-8", errors="replace")
+                            chunks[key.decode("latin-1", errors="replace")] = text
+                elif ctype == b"iTXt" and b"\x00" in data:
+                    # keyword\0 compression_flag compression_method language\0 translated_keyword\0 text
+                    key, rest = data.split(b"\x00", 1)
+                    if len(rest) >= 2:
+                        comp_flag = rest[0]
+                        comp_method = rest[1]
+                        rest = rest[2:]
+                        parts = rest.split(b"\x00", 2)
+                        if len(parts) == 3:
+                            _language, _translated, text_bytes = parts
+                            if comp_flag == 1 and comp_method == 0:
+                                text_bytes = zlib.decompress(text_bytes)
+                            chunks[key.decode("latin-1", errors="replace")] = text_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+        return chunks
 
     def _extract_card_payload_from_png(self, path):
         """Return decoded Character Card V2/V3 payload from a PNG."""
-        img = Image.open(path)
-        info = dict(getattr(img, "info", {}) or {})
+        info = {}
+        try:
+            img = Image.open(path)
+            info.update(dict(getattr(img, "info", {}) or {}))
+        except Exception:
+            pass
+        raw_chunks = self._extract_png_text_chunks_raw(path)
+        # Raw chunk scan wins only for missing keys so Pillow-decoded Unicode is kept when available.
+        for key, value in raw_chunks.items():
+            info.setdefault(key, value)
+
         preferred_keys = [
-            "chara", "ccv3", "cc_v3", "character_card", "character-card-v3",
-            "card", "metadata", "tavern_card", "sillytavern", "sillytavern_card"
+            "chara", "ccv2", "cc_v2", "chara_card_v2", "character_card_v2",
+            "ccv3", "cc_v3", "chara_card_v3", "character-card-v3",
+            "character_card", "character-card", "card", "metadata",
+            "tavern_card", "sillytavern", "sillytavern_card", "sillytavern_chara_card_v2"
         ]
-        # Prefer known card metadata chunks first.
-        for key in preferred_keys:
-            if key in info:
-                payload = self._decode_card_metadata_value(info.get(key))
+        lower_map = {str(k).lower(): k for k in info.keys()}
+        # Prefer known card metadata chunks first, case-insensitively.
+        for wanted in preferred_keys:
+            actual = lower_map.get(wanted.lower())
+            if actual is not None:
+                payload = self._decode_card_metadata_value(info.get(actual))
                 if isinstance(payload, dict):
-                    return payload, key
+                    return payload, str(actual)
+
         # Then scan all text chunks for a recognizable card payload.
         for key, value in info.items():
             payload = self._decode_card_metadata_value(value)
             if isinstance(payload, dict):
                 spec = str(payload.get("spec") or payload.get("spec_version") or "").lower()
                 if payload.get("data") or "chara_card" in spec or payload.get("name"):
-                    return payload, key
+                    return payload, str(key)
+
+        # Final fallback: some bad encoders put raw JSON/base64 into an arbitrary chunk.
+        # Avoid scanning huge image data; only look at ASCII-ish windows around known tokens.
+        try:
+            raw = Path(path).read_bytes()
+            for token in (b'chara_card_v2', b'chara_card_v3', b'"first_mes"', b'"mes_example"'):
+                idx = raw.find(token)
+                if idx == -1:
+                    continue
+                start = max(0, raw.rfind(b'{', 0, idx))
+                end = raw.find(b'}', idx)
+                if start != -1 and end != -1:
+                    snippet = raw[start:end+1]
+                    payload = self._decode_card_metadata_value(snippet)
+                    if isinstance(payload, dict):
+                        return payload, "raw_png_scan"
+        except Exception:
+            pass
         return None, ""
 
     def _normalise_loaded_card_payload(self, payload):
@@ -2776,7 +2928,20 @@ class Api:
                 payload, meta_key = self._extract_card_payload_from_png(path)
                 payload = self._normalise_loaded_card_payload(payload)
                 if not isinstance(payload, dict):
-                    return {"ok": False, "error": "This PNG does not contain readable Character Card V2/V3 metadata. Checked common PNG text chunks including chara and ccv3."}
+                    # Sidecar fallback for tools that can extract the metadata even when
+                    # the source PNG used a non-standard chunk encoding.
+                    for candidate in [path.with_suffix(".extracted.json"), path.with_suffix(".json"), path.parent / f"{path.stem}.metadata.json"]:
+                        try:
+                            if candidate.exists():
+                                sidecar_payload = json.loads(candidate.read_text(encoding="utf-8"))
+                                payload = self._normalise_loaded_card_payload(sidecar_payload)
+                                if isinstance(payload, dict):
+                                    meta_key = f"sidecar:{candidate.name}"
+                                    break
+                        except Exception:
+                            pass
+                if not isinstance(payload, dict):
+                    return {"ok": False, "error": "This PNG does not contain readable Character Card V2/V3 metadata. Checked common PNG text chunks including chara/ccv2/ccv3, compressed text chunks, and sidecar extracted JSON."}
                 spec = str(payload.get("spec") or "")
                 raw = payload.get("data", {}).get("extensions", {}).get("raw_card", "") if isinstance(payload, dict) else ""
                 output = raw or self._build_raw_card_from_chara_v2(payload)
