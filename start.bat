@@ -1,6 +1,9 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set PYTHONDONTWRITEBYTECODE=1
+for /d /r %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d"
+del /s /q *.pyc >nul 2>nul
 
 if not exist ".venv\Scripts\python.exe" (
     echo No virtual environment found. Running setup first...

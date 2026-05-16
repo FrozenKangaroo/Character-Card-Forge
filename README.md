@@ -185,14 +185,12 @@ $env:CCF_DATA_DIR="D:\Character Card Forge Data"; .\start.bat
 Character Card Forge is safe to package as an AppImage or similar read-only bundle. At startup it now:
 
 - treats the app/program directory as read-only
-- never uses the AppImage `APPDIR` mount as the writable data folder
-- reads bundled assets from the PyInstaller extraction directory (`sys._MEIPASS`) when frozen
 - creates writable folders in the user data location
 - copies bundled default settings/templates into user data only if they do not already exist
 - writes SQLite cache, generated images, imports, logs, templates, and exports outside the AppImage mount
 - disables Python bytecode writes beside `app.py`
 
-This avoids errors caused by trying to create `data/`, `exports/`, `__pycache__/`, or generated image folders inside a read-only AppImage directory. If you still see a path like `/tmp/.mount_.../_internal/data/templates` in an error, rebuild the AppImage from this version so the bundled `app.py` contains the writable-user-data path fix.
+This avoids errors caused by trying to create `data/`, `exports/`, `__pycache__/`, or generated image folders inside a read-only AppImage directory.
 
 ## Updating
 
@@ -381,3 +379,34 @@ Character Browser now uses `data/character_library.sqlite3` as a cached index. T
 ## v0.9.25 note
 
 - Stable Diffusion prompt generation now deduplicates and caps negative prompt tags before saving or sending prompts to SD Forge / Automatic1111. This prevents runaway repeated negative prompts when a text model loops on cleanup tags.
+
+
+## AppImage / packaged writable data
+
+Character Card Forge treats bundled app files as read-only. In AppImage/PyInstaller builds, user data is written outside the mounted app folder. The app refuses to use `sys._MEIPASS`, `_internal`, `/tmp/.mount_*`, or the app bundle folder as the data root unless `CCF_ALLOW_BUNDLE_DATA_DIR=1` is explicitly set.
+
+Default writable data locations:
+
+- Linux: `~/Documents/Character Card Forge/`, falling back to `~/.local/share/Character Card Forge/`
+- macOS: `~/Library/Application Support/Character Card Forge/`
+- Windows: `%APPDATA%\Character Card Forge\`
+
+You can override the writable data location with `CCF_DATA_DIR` or `CHARACTER_CARD_FORGE_DATA_DIR`.
+
+
+## v0.9.30 packaging note
+
+If you build an AppImage or PyInstaller bundle, delete old build artifacts before rebuilding:
+
+```bash
+rm -rf build dist __pycache__
+find . -type d -name __pycache__ -prune -exec rm -rf {} +
+find . -type f -name "*.pyc" -delete
+```
+
+The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode can cause an AppImage to keep running old startup path code even when `app.py` has been fixed.
+
+
+### v0.9.35
+
+- AppImage/frozen builds now force the classic PyWebView file picker for all backend file buttons and drop-zone clicks. This avoids invisible kdialog/zenity launches inside packaged builds. Normal source runs can still use host-native pickers.

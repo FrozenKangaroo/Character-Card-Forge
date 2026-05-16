@@ -30,83 +30,154 @@ from PIL.PngImagePlugin import PngInfo
 
 APP_NAME = "Character Card Forge"
 
+# -----------------------------------------------------------------------------
+# Path handling
+# -----------------------------------------------------------------------------
+# AppImage/PyInstaller bundles are mounted read-only. Treat BUNDLE_ROOT/APP_DIR
+# as resource roots only, and put every user-created file in a per-user writable
+# data folder.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    BUNDLE_ROOT = Path(sys._MEIPASS).resolve()
+else:
+    BUNDLE_ROOT = Path(__file__).resolve().parent
 
-def _app_bundle_dir():
-    """Return the read-only directory that contains bundled application files.
-
-    AppImage exposes APPDIR as the mounted squashfs root. That location is
-    intentionally read-only at runtime, so it must only be used for reading
-    bundled assets and never as the user data location. PyInstaller exposes
-    the actual unpacked bundle directory via sys._MEIPASS when frozen.
-    """
-    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
-        return Path(sys._MEIPASS).resolve()
-    return Path(__file__).resolve().parent
-
-
-APP_DIR = _app_bundle_dir()
-BUNDLED_DATA_DIR = APP_DIR / "data"
+# APP_DIR remains available for bundled read-only assets such as VERSION.
+APP_DIR = BUNDLE_ROOT
+BUNDLED_DATA_DIR = BUNDLE_ROOT / "data"
 
 
 def _safe_mkdir(path):
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
+    """Create a directory only when it is safe/writable.
+
+    Never raise during startup for AppImage/PyInstaller read-only mounts. This
+    prevents a bad path from crashing before the app can fall back to user data.
+    """
+    path = Path(path).expanduser().resolve()
+    path_str = str(path)
+    if ".mount_" in path_str or "squashfs-root" in path_str or "_internal" in path.parts:
+        return path
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     return path
 
 
-def _platform_app_data_root():
-    """Return a writable per-user data folder that works from AppImage/.app/.exe bundles.
+def _path_is_writable_dir(path):
+    try:
+        path = _safe_mkdir(path)
+        path_str = str(path)
+        if ".mount_" in path_str or "squashfs-root" in path_str or "_internal" in path.parts:
+            return False
+        probe = path / f".ccf_write_test_{os.getpid()}_{uuid.uuid4().hex}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
 
-    AppImage contents are mounted read-only, so generated files must never be
-    written beside app.py. CCF_DATA_DIR can override this for portable installs.
-    """
-    override = os.environ.get("CCF_DATA_DIR") or os.environ.get("CHARACTER_CARD_FORGE_DATA_DIR")
-    if override:
-        return Path(override).expanduser().resolve()
-    home = Path.home()
+
+def _real_home_dir():
+    try:
+        return Path.home().expanduser().resolve()
+    except Exception:
+        return Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or "/tmp").expanduser().resolve()
+
+
+def _get_writable_user_root():
+    """Return a user-writable data root outside the application bundle."""
+    # Explicit override, but ignore unsafe AppImage/internal mount overrides.
+    for env_name in ("CCF_DATA_DIR", "CHARACTER_CARD_FORGE_DATA_DIR"):
+        value = os.environ.get(env_name)
+        if value:
+            candidate = Path(value).expanduser().resolve()
+            candidate_str = str(candidate)
+            if ".mount_" not in candidate_str and "squashfs-root" not in candidate_str and "_internal" not in candidate.parts:
+                if _path_is_writable_dir(candidate):
+                    return candidate
+
     system = platform.system().lower()
-    # Put user-visible saved cards somewhere easy to find. This mirrors apps
-    # like Front Porch that keep their data in a Documents subfolder.
-    docs = home / "Documents"
-    if docs.exists() or system in {"windows", "darwin"}:
-        return docs / APP_NAME
-    if system == "darwin":
-        return home / "Library" / "Application Support" / APP_NAME
+    home = _real_home_dir()
+    candidates = []
+
     if system == "windows":
-        base = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
-        return Path(base) / APP_NAME
-    base = os.environ.get("XDG_DATA_HOME")
-    return (Path(base).expanduser() if base else home / ".local" / "share") / APP_NAME
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / APP_NAME)
+        candidates.extend([
+            home / "AppData" / "Roaming" / APP_NAME,
+            home / "Documents" / APP_NAME,
+        ])
+    elif system == "darwin":
+        candidates.extend([
+            home / "Library" / "Application Support" / APP_NAME,
+            home / "Documents" / APP_NAME,
+        ])
+    else:
+        docs = home / "Documents"
+        if docs.exists():
+            candidates.append(docs / APP_NAME)
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            candidates.append(Path(xdg).expanduser() / APP_NAME)
+        candidates.extend([
+            home / ".local" / "share" / APP_NAME,
+            Path("/tmp") / APP_NAME,
+        ])
+
+    for candidate in candidates:
+        candidate = Path(candidate).expanduser().resolve()
+        candidate_str = str(candidate)
+        if ".mount_" in candidate_str or "squashfs-root" in candidate_str or "_internal" in candidate.parts:
+            continue
+        if _path_is_writable_dir(candidate):
+            return candidate
+
+    return _safe_mkdir(Path("/tmp") / APP_NAME)
 
 
-USER_DATA_ROOT = _platform_app_data_root()
+USER_DATA_ROOT = _get_writable_user_root()
 DATA_DIR = USER_DATA_ROOT / "data"
 EXPORT_DIR = USER_DATA_ROOT / "exports"
+
 SETTINGS_FILE = DATA_DIR / "settings.json"
 TEMPLATE_FILE = DATA_DIR / "template.json"
 TEMPLATES_DIR = DATA_DIR / "templates"
 LOG_FILE = DATA_DIR / "debug.log"
 LIBRARY_DB_FILE = DATA_DIR / "character_library.sqlite3"
-for _dir in (USER_DATA_ROOT, DATA_DIR, TEMPLATES_DIR, EXPORT_DIR):
-    _safe_mkdir(_dir)
-CARD_IMAGES_DIR = _safe_mkdir(DATA_DIR / "card_images")
-GENERATED_IMAGES_DIR = _safe_mkdir(CARD_IMAGES_DIR / "generated")
-VISION_IMAGES_DIR = _safe_mkdir(DATA_DIR / "vision_images")
-CONCEPT_ATTACHMENTS_DIR = _safe_mkdir(DATA_DIR / "concept_attachments")
-IMPORT_UPLOADS_DIR = _safe_mkdir(DATA_DIR / "import_uploads")
-# Character workspace/library lives beside exports so every character keeps card, project, images, emotion prompts, and zips together.
+
+CARD_IMAGES_DIR = DATA_DIR / "card_images"
+GENERATED_IMAGES_DIR = CARD_IMAGES_DIR / "generated"
+VISION_IMAGES_DIR = DATA_DIR / "vision_images"
+CONCEPT_ATTACHMENTS_DIR = DATA_DIR / "concept_attachments"
+IMPORT_UPLOADS_DIR = DATA_DIR / "import_uploads"
 CHARACTER_LIBRARY_DIR = EXPORT_DIR
+
+for _dir in (
+    USER_DATA_ROOT,
+    DATA_DIR,
+    TEMPLATES_DIR,
+    EXPORT_DIR,
+    CARD_IMAGES_DIR,
+    GENERATED_IMAGES_DIR,
+    VISION_IMAGES_DIR,
+    CONCEPT_ATTACHMENTS_DIR,
+    IMPORT_UPLOADS_DIR,
+):
+    _safe_mkdir(_dir)
 
 
 def _seed_user_data_from_bundle():
-    """Copy bundled defaults/templates into the writable user data folder once."""
+    """Copy bundled defaults/templates into writable user data once."""
     try:
         if BUNDLED_DATA_DIR.exists():
+            _safe_mkdir(DATA_DIR)
             for name in ("settings.json", "template.json"):
                 src = BUNDLED_DATA_DIR / name
                 dst = DATA_DIR / name
                 if src.exists() and not dst.exists():
                     shutil.copy2(src, dst)
+
             src_templates = BUNDLED_DATA_DIR / "templates"
             if src_templates.exists():
                 _safe_mkdir(TEMPLATES_DIR)
@@ -115,7 +186,8 @@ def _seed_user_data_from_bundle():
                     if not dst.exists():
                         shutil.copy2(src, dst)
     except Exception:
-        # Seeding is a convenience only; DEFAULT_SETTINGS/DEFAULT_TEMPLATE still work.
+        # Bundled defaults are convenience only. DEFAULT_SETTINGS and
+        # DEFAULT_TEMPLATE still let the app start if seeding fails.
         pass
 
 
@@ -271,8 +343,7 @@ DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and
                'title': 'State Tracking',
                'enabled': False,
                'category': 'front_porch',
-               'description': 'Optional Front Porch realism/state values. Disabled by default for '
-                              'compact cards.',
+               'description': 'Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon.',
                'fields': [{'id': 'emotion',
                            'label': 'Starting Emotion',
                            'enabled': True,
@@ -342,7 +413,7 @@ class Api:
 
     def _load_json(self, path, default):
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(path.parent)
         if path.exists():
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
@@ -353,7 +424,7 @@ class Api:
 
     def _save_json(self, path, data):
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(path.parent)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _library_connect(self):
@@ -363,7 +434,7 @@ class Api:
 
     def _init_library_db(self):
         """Create the browser library database and migrate old settings-based folders/assignments."""
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(DATA_DIR)
         with self._library_connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
@@ -798,7 +869,7 @@ class Api:
                 "event": event,
                 "payload": payload or {},
             }
-            LOG_FILE.parent.mkdir(exist_ok=True)
+            _safe_mkdir(LOG_FILE.parent)
             with LOG_FILE.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False, indent=2) + "\n---\n")
             # Keep the debug log useful but bounded. This prevents giant repair logs
@@ -2557,48 +2628,69 @@ class Api:
             safe += inferred_suffix
         return safe
 
-    def _run_modern_file_dialog(self, title="Open", kind="any", multiple=False):
-        """Prefer KDE/portal-style native dialogs over PyWebView's old Qt dialog."""
-        filters = {
-            "image": "Images (*.png *.jpg *.jpeg *.webp)",
-            "saved": "Character Cards / Projects (*.json *.png *.md *.txt)",
-            "attachment": "Documents (*.txt *.srt *.vtt *.md *.pdf)",
-            "any": "All Files (*)",
-        }
-        start_dir = str(Path.home())
-        # KDE Plasma: this gives the modern KDE file picker instead of the embedded Qt/WebView one.
-        if shutil.which("kdialog"):
-            cmd = ["kdialog", "--title", title]
-            if multiple:
-                cmd += ["--multiple", "--separate-output"]
-            cmd += ["--getopenfilename", start_dir, filters.get(kind, filters["any"])]
-            try:
-                proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if proc.returncode != 0:
-                    return []
-                return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            except Exception as e:
-                self._log_event("modern_file_dialog_kdialog_error", {"error": str(e), "cmd": cmd})
-        # GNOME/GTK fallback.
-        if shutil.which("zenity"):
-            zfilters = {
-                "image": "Images | *.png *.jpg *.jpeg *.webp",
-                "saved": "Character Cards / Projects | *.json *.png *.md *.txt",
-                "attachment": "Documents | *.txt *.srt *.vtt *.md *.pdf",
-                "any": "All Files | *",
-            }
-            cmd = ["zenity", "--file-selection", "--title", title]
-            if multiple:
-                cmd += ["--multiple", "--separator=\n"]
-            cmd += [f"--file-filter={zfilters.get(kind, zfilters['any'])}"]
-            try:
-                proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if proc.returncode != 0:
-                    return []
-                return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            except Exception as e:
-                self._log_event("modern_file_dialog_zenity_error", {"error": str(e), "cmd": cmd})
-        # Last resort. This is the old-looking dialog, but only used if kdialog/zenity are unavailable.
+    def _dialog_subprocess_env(self):
+        """Return a host-ish environment for external file pickers.
+
+        AppImages set APPDIR/APPIMAGE and sometimes LD_LIBRARY_PATH values that
+        can confuse host desktop tools.  The picker itself is outside the app, so
+        run it with those bundle-specific variables stripped.
+        """
+        env = dict(os.environ)
+        for key in ("APPDIR", "APPIMAGE", "ARGV0", "PYINSTALLER_RESET_ENVIRONMENT"):
+            env.pop(key, None)
+        # LD_LIBRARY_PATH from AppImage/PyInstaller can make kdialog/zenity load
+        # bundled libraries instead of system ones. Restore the original value if
+        # AppImage preserved it, otherwise remove it for external GUI tools.
+        orig_ld = env.get("LD_LIBRARY_PATH_ORIG")
+        if orig_ld is not None:
+            env["LD_LIBRARY_PATH"] = orig_ld
+        elif "APPIMAGE" in os.environ or getattr(sys, "frozen", False):
+            env.pop("LD_LIBRARY_PATH", None)
+        return env
+
+    def _run_dialog_command(self, cmd, label):
+        try:
+            self._log_event("modern_file_dialog_try", {"label": label, "cmd": cmd})
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self._dialog_subprocess_env(),
+                timeout=120,
+                check=False,
+            )
+            if proc.returncode != 0:
+                # Return code 1 is usually user cancel.  Anything else is still
+                # non-fatal; continue to the next picker/fallback instead of
+                # silently making the button look broken.
+                self._log_event("modern_file_dialog_nonzero", {
+                    "label": label,
+                    "returncode": proc.returncode,
+                    "stderr": (proc.stderr or "")[:1000],
+                })
+                return None
+            paths = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            return paths
+        except subprocess.TimeoutExpired:
+            self._log_event("modern_file_dialog_timeout", {"label": label, "cmd": cmd})
+            return None
+        except Exception as e:
+            self._log_event("modern_file_dialog_error", {"label": label, "error": str(e), "cmd": cmd})
+            return None
+
+    def _is_packaged_appimage(self):
+        return bool(getattr(sys, "frozen", False) or os.environ.get("APPIMAGE") or os.environ.get("APPDIR"))
+
+    def _run_pywebview_file_dialog(self, title="Open", kind="any", multiple=False):
+        """Use PyWebView's built-in/classic picker.
+
+        Inside AppImage/PyInstaller builds, external host pickers such as kdialog
+        and zenity can fail invisibly or never attach to the app window. The
+        classic PyWebView picker is less pretty, but it is the reliable one in
+        packaged builds, so every packaged file button/drop-zone uses it.
+        """
+        self._log_event("file_dialog_pywebview", {"title": title, "kind": kind, "multiple": bool(multiple)})
         window = webview.windows[0] if webview.windows else None
         if not window:
             return []
@@ -2606,8 +2698,54 @@ class Api:
         if not result:
             return []
         if isinstance(result, (list, tuple)):
-            return [str(x) for x in result]
-        return [str(result)]
+            return [str(x) for x in result if str(x).strip()]
+        return [str(result)] if str(result).strip() else []
+
+    def _run_modern_file_dialog(self, title="Open", kind="any", multiple=False):
+        """Prefer host native dialogs in source runs, but force PyWebView in AppImage.
+
+        The normal source app can keep using kdialog/zenity. Packaged AppImage
+        builds go straight to PyWebView because that is the picker path known to
+        appear reliably on the user's machine.
+        """
+        if self._is_packaged_appimage():
+            return self._run_pywebview_file_dialog(title, kind, multiple)
+
+        filters = {
+            "image": "Images (*.png *.jpg *.jpeg *.webp)",
+            "saved": "Character Cards / Projects (*.json *.png *.md *.txt)",
+            "card": "Character Cards / Projects (*.json *.png *.md *.txt)",
+            "attachment": "Documents (*.txt *.srt *.vtt *.md *.pdf)",
+            "any": "All Files (*)",
+        }
+        start_dir = str(Path.home())
+        if shutil.which("kdialog"):
+            cmd = ["kdialog", "--title", title]
+            if multiple:
+                cmd += ["--multiple", "--separate-output"]
+            cmd += ["--getopenfilename", start_dir, filters.get(kind, filters["any"])]
+            paths = self._run_dialog_command(cmd, "kdialog")
+            if paths:
+                return paths
+        if shutil.which("zenity"):
+            zfilters = {
+                "image": "Images | *.png *.jpg *.jpeg *.webp",
+                "saved": "Character Cards / Projects | *.json *.png *.md *.txt",
+                "card": "Character Cards / Projects | *.json *.png *.md *.txt",
+                "attachment": "Documents | *.txt *.srt *.vtt *.md *.pdf",
+                "any": "All Files | *",
+            }
+            cmd = ["zenity", "--file-selection", "--title", title]
+            if multiple:
+                cmd += ["--multiple", "--separator=\n"]
+            cmd += [f"--file-filter={zfilters.get(kind, zfilters['any'])}"]
+            paths = self._run_dialog_command(cmd, "zenity")
+            if paths:
+                expanded = []
+                for item in paths:
+                    expanded.extend([x.strip() for x in str(item).split("|") if x.strip()])
+                return expanded or paths
+        return self._run_pywebview_file_dialog(title, kind, multiple)
 
     def _copy_image_from_path(self, src_path, kind="card"):
         src = Path(str(src_path or ""))
@@ -3637,7 +3775,7 @@ class Api:
     def _write_project_bundle(self, export_folder, safe_name, stamp, output, concept, template, settings, image_path, exported_path, frontend, export_format):
         payload = {
             "format": "character-card-forge-project",
-            "version": (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown",
+            "version": ((APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown"),
             "saved_at": stamp,
             "project": {
                 "name": safe_name,
@@ -4169,7 +4307,7 @@ class Api:
         virtual_folder_id = str(workspace.get("virtualFolderId") or previous_project.get("virtualFolderId") or "").strip()
         project = {
             "format": "character-card-forge-project",
-            "version": (APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown",
+            "version": ((APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown"),
             "saved_at": stamp,
             "project": {
                 "name": safe_name,
@@ -4473,17 +4611,10 @@ class Api:
 
     def select_vision_image(self):
         try:
-            window = webview.windows[0] if webview.windows else None
-            if not window:
-                return {"ok": False, "error": "No active window."}
-            # Avoid Qt file filter errors by using an unfiltered picker.
-            result = window.create_file_dialog(
-                webview.OPEN_DIALOG,
-                allow_multiple=False
-            )
-            if not result:
+            paths = self._run_modern_file_dialog("Select Vision Image", "image", False)
+            if not paths:
                 return {"ok": False, "cancelled": True}
-            path = str(result[0] if isinstance(result, (list, tuple)) else result)
+            path = str(paths[0])
             if Path(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
                 return {"ok": False, "error": "Please select a PNG, JPG, JPEG, or WebP image."}
             return {"ok": True, "path": path}
@@ -4881,17 +5012,10 @@ class Api:
 
     def select_card_image(self):
         try:
-            window = webview.windows[0] if webview.windows else None
-            if not window:
-                return {"ok": False, "error": "No active window."}
-            # Avoid Qt file filter errors by using an unfiltered picker.
-            result = window.create_file_dialog(
-                webview.OPEN_DIALOG,
-                allow_multiple=False
-            )
-            if not result:
+            paths = self._run_modern_file_dialog("Select Card Image", "image", False)
+            if not paths:
                 return {"ok": False, "cancelled": True}
-            path = str(result[0] if isinstance(result, (list, tuple)) else result)
+            path = str(paths[0])
             if Path(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
                 return {"ok": False, "error": "Please select a PNG, JPG, JPEG, or WebP image."}
             return {"ok": True, "path": path}
@@ -5164,7 +5288,7 @@ class Api:
     def _character_export_dir(self, name):
         safe = self._safe_slug(name)
         folder = EXPORT_DIR / safe
-        folder.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(folder)
         return folder
 
     def _extract_emotion_images_dir(self, name):
@@ -5537,7 +5661,7 @@ class Api:
         lorebook = data.get("character_book") or {"entries": []}
         tags = data.get("tags") or []
         alt = data.get("alternate_greetings") or []
-        fp = (((data.get("extensions") or {}).get("front_porch") or {}).get("realism_engine") or {})
+        fp = self._normalise_front_porch_realism_engine((((data.get("extensions") or {}).get("front_porch") or {}).get("realism_engine") or {}))
         desc = data.get("description", "") or ""
         personality = data.get("personality", "") or ""
         scenario = data.get("scenario", "") or ""
@@ -5578,7 +5702,7 @@ class Api:
                 int(fp.get("short_term_bond") or 0), int(fp.get("long_term_bond") or 0),
                 1 if fp.get("enabled", True) else 0,
                 str(fp.get("character_emotion") or ""), str(fp.get("emotion_intensity") or ""),
-                str(fp.get("time_of_day") or "morning"), int(fp.get("day_count") or 1),
+                self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon"), int(fp.get("day_count") or 1),
                 1 if fp.get("nsfw_cooldown_enabled", True) else 0,
                 1 if fp.get("passage_of_time_enabled", True) else 0,
                 int(fp.get("trust_level") or 0),
@@ -5891,6 +6015,55 @@ class Api:
         except Exception:
             return default
 
+    def _clamp_int_value(self, value, default=0, minimum=None, maximum=None):
+        parsed = self._parse_int_value(value, default)
+        if minimum is not None and parsed < minimum:
+            parsed = minimum
+        if maximum is not None and parsed > maximum:
+            parsed = maximum
+        return parsed
+
+    def _normalize_front_porch_time_of_day(self, value):
+        raw = str(value or "").strip().lower()
+        raw = re.sub(r"[\s_-]+", " ", raw)
+        # Front Porch does not support Late Afternoon. Treat it as Afternoon.
+        if raw in {"late afternoon", "late-afternoon", "late_afternoon"}:
+            return "afternoon"
+        aliases = {
+            "early morning": "morning",
+            "late morning": "morning",
+            "midday": "noon",
+            "mid day": "noon",
+            "middle of day": "noon",
+            "early afternoon": "afternoon",
+            "early evening": "evening",
+            "late evening": "evening",
+            "midnight": "night",
+            "late night": "night",
+            "overnight": "night",
+        }
+        raw = aliases.get(raw, raw)
+        valid = {"morning", "noon", "afternoon", "evening", "night"}
+        if raw not in valid:
+            return "afternoon"
+        return raw
+
+    def _normalise_front_porch_realism_engine(self, fp):
+        fp = dict(fp or {}) if isinstance(fp, dict) else {}
+        fp["short_term_bond"] = self._clamp_int_value(fp.get("short_term_bond"), 0, -300, 300)
+        fp["long_term_bond"] = self._clamp_int_value(fp.get("long_term_bond"), 0, -300, 300)
+        fp["trust_level"] = self._clamp_int_value(fp.get("trust_level"), 0, -100, 100)
+        fp["day_count"] = max(1, self._parse_int_value(fp.get("day_count"), 1))
+        fp["time_of_day"] = self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon")
+        fp["character_emotion"] = str(fp.get("character_emotion") or "Neutral").strip() or "Neutral"
+        fp["emotion_intensity"] = str(fp.get("emotion_intensity") or "moderate").strip().lower() or "moderate"
+        fp["enabled"] = bool(fp.get("enabled", True))
+        fp["nsfw_cooldown_enabled"] = bool(fp.get("nsfw_cooldown_enabled", True))
+        fp["passage_of_time_enabled"] = bool(fp.get("passage_of_time_enabled", True))
+        fp["chaos_mode_enabled"] = bool(fp.get("chaos_mode_enabled", True))
+        fp["current_task"] = str(fp.get("current_task") or "Interact with {{user}} in character.").strip()
+        return fp
+
     def _parse_state_tracking_map(self, value):
         state = {}
         for raw_line in self._clean_section_text(value).splitlines():
@@ -5906,22 +6079,25 @@ class Api:
 
     def _front_porch_realism_engine(self, state_tracking):
         state = self._parse_state_tracking_map(state_tracking)
-        time_of_day = (state.get("time_of_day") or "afternoon").strip().lower()
-        emotion_intensity = (state.get("emotion_intensity") or "moderate").strip().lower()
-        return {
+        # Front Porch newer ranges:
+        # - Short-Term Bond: -300 to 300
+        # - Long-Term Bond: -300 to 300
+        # - Trust Level: -100 to 100
+        # Time of Day must be one of the valid Front Porch values; Late Afternoon is normalized to Afternoon.
+        return self._normalise_front_porch_realism_engine({
             "enabled": True,
-            "short_term_bond": self._parse_int_value(state.get("short_term_bond"), 0),
-            "long_term_bond": self._parse_int_value(state.get("long_term_bond"), 0),
-            "trust_level": self._parse_int_value(state.get("trust_level"), 0),
-            "day_count": self._parse_int_value(state.get("day_number"), 1),
-            "time_of_day": time_of_day,
+            "short_term_bond": state.get("short_term_bond"),
+            "long_term_bond": state.get("long_term_bond"),
+            "trust_level": state.get("trust_level"),
+            "day_count": state.get("day_number") or state.get("day_count"),
+            "time_of_day": state.get("time_of_day") or "afternoon",
             "character_emotion": state.get("character_emotion") or "Neutral",
-            "emotion_intensity": emotion_intensity,
+            "emotion_intensity": state.get("emotion_intensity") or "moderate",
             "nsfw_cooldown_enabled": True,
             "passage_of_time_enabled": True,
             "chaos_mode_enabled": True,
             "current_task": state.get("current_task") or "Interact with {{user}} in character.",
-        }
+        })
 
     def _normalize_example_dialogues_for_front_porch(self, value):
         """Front Porch AI expects one <START> marker for the mes_example field.

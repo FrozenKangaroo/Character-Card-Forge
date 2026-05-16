@@ -139,7 +139,7 @@
       "title": "State Tracking",
       "enabled": false,
       "category": "front_porch",
-      "description": "Optional Front Porch realism/state values. Disabled by default for compact cards.",
+      "description": "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. If Late Afternoon appears, it will export as Afternoon.",
       "fields": [
         {
           "id": "emotion",
@@ -152,6 +152,30 @@
           "label": "Current Objective",
           "enabled": true,
           "hint": "Immediate goal."
+        },
+        {
+          "id": "short_term_bond",
+          "label": "Short-Term Bond",
+          "enabled": true,
+          "hint": "Front Porch range: -300 to 300."
+        },
+        {
+          "id": "long_term_bond",
+          "label": "Long-Term Bond",
+          "enabled": true,
+          "hint": "Front Porch range: -300 to 300."
+        },
+        {
+          "id": "trust_level",
+          "label": "Trust Level",
+          "enabled": true,
+          "hint": "Front Porch range: -100 to 100."
+        },
+        {
+          "id": "time_of_day",
+          "label": "Time of Day",
+          "enabled": true,
+          "hint": "Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon."
         }
       ]
     },

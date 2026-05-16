@@ -1,6 +1,9 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set PYTHONDONTWRITEBYTECODE=1
+for /d /r %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d"
+del /s /q *.pyc >nul 2>nul
 
 echo Character Card Forge - Windows setup
 

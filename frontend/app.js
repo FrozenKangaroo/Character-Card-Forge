@@ -299,11 +299,34 @@ function bindDropZone(id, options) {
     if (!files.length) return;
     await options.onFiles(files);
   });
-  zone.addEventListener('click', () => {
+  zone.addEventListener('click', async () => {
     if (isBlocked()) return;
-    if (input) input.click();
-    else if (options.onClick) options.onClick();
+    try {
+      // Prefer backend/native picker callbacks when supplied. In AppImage builds
+      // browser-backed file inputs can fail to show, while the backend can fall
+      // back through host dialogs and PyWebView safely.
+      if (options.onClick) await options.onClick();
+      else if (input) input.click();
+    } catch (err) {
+      setStatus(err?.message || String(err), 'error');
+    }
   });
+}
+
+function openBrowserFileInput(inputId, label = 'file') {
+  const input = $('#' + inputId);
+  if (!input) {
+    setStatus(`File input missing for ${label}.`, 'error');
+    return false;
+  }
+  try {
+    input.value = '';
+    input.click();
+    return true;
+  } catch (err) {
+    setStatus(`Could not open ${label} picker: ${err?.message || err}`, 'error');
+    return false;
+  }
 }
 
 function updateAvailability() {
@@ -1149,7 +1172,7 @@ function bindActions() {
   $$('.builder-card select, .builder-card input, .builder-card textarea').forEach(el => el.addEventListener('input', () => { updateBuilderConditionalOptions(); updateCustomConditionalOptions(); captureCurrentMultiBuilderState(); }));
   $$('.multi-builder-character-select').forEach(el => el.addEventListener('change', () => switchMultiBuilderCharacter(el.value)));
   $$('.multi-builder-character-label').forEach(el => el.addEventListener('input', () => { if (!isMultiBuilderMode()) return; $$('.multi-builder-character-label').forEach(other => { if (other !== el) other.value = el.value; }); multiBuilderStates[multiBuilderSelectedIndex] = { ...(multiBuilderStates[multiBuilderSelectedIndex] || {}), ...readBuilderDomState(), multiCharacterName: el.value || '' }; updateMultiBuilderSelectors(false); }));
-  $('#selectVisionImageBtn').addEventListener('click', selectVisionImage);
+  $('#selectVisionImageBtn').addEventListener('click', () => openBrowserFileInput('visionFileInput', 'vision image'));
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
@@ -1190,17 +1213,17 @@ function bindActions() {
   $('#analyzeVisionToBuildersBtn')?.addEventListener('click', analyzeSelectedImageToBuilders);
   $('#transferToBuildersBtn')?.addEventListener('click', transferConceptToBuilders);
   $('#transferToBuildersMainBtn')?.addEventListener('click', transferConceptToBuilders);
-  $('#loadCardToBuildersMainBtn')?.addEventListener('click', loadCardToBuildersNative);
-  $('#loadCardToBuildersModeBtn')?.addEventListener('click', loadCardToBuildersNative);
-  $('#loadCardToConceptMainBtn')?.addEventListener('click', loadCardToMainConceptNative);
-  $('#loadCardToConceptModeBtn')?.addEventListener('click', loadCardToMainConceptNative);
+  $('#loadCardToBuildersMainBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
+  $('#loadCardToBuildersModeBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
+  $('#loadCardToConceptMainBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
+  $('#loadCardToConceptModeBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
   $('#reviseBtn').addEventListener('click', reviseCard);
-  $('#loadSavedBtn').addEventListener('click', loadSavedCardOrProject);
+  $('#loadSavedBtn').addEventListener('click', () => openBrowserFileInput('savedFileInput', 'saved card/project'));
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
   $('#clearLogBtn').addEventListener('click', clearDebugLog);
   $('#copyBtn').addEventListener('click', copyOutput);
   $('#exportBtn').addEventListener('click', exportCard);
-  $('#selectImageBtn').addEventListener('click', selectCardImage);
+  $('#selectImageBtn').addEventListener('click', () => openBrowserFileInput('cardImageFileInput', 'card image'));
   $('#generateImagesBtn').addEventListener('click', generateSdImages);
   $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
   $('#generateSdPromptFromOutputBtn')?.addEventListener('click', generateSdPromptFromLoadedOutput);
@@ -1210,7 +1233,7 @@ function bindActions() {
   $('#clearEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = false); });
   $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
-  $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
+  $('#attachConceptFilesBtn').addEventListener('click', () => openBrowserFileInput('conceptAttachmentInput', 'attachment'));
   $('#clearConceptAttachmentsBtn').addEventListener('click', clearConceptAttachments);
   // Hidden file inputs remain as an emergency browser fallback, but normal flow uses KDE/Zenity native dialogs from the backend.
   $('#conceptAttachmentInput').addEventListener('change', handleConceptAttachmentFiles);
@@ -1218,14 +1241,15 @@ function bindActions() {
   $('#cardImageFileInput').addEventListener('change', handleCardImageFileSelected);
   $('#savedFileInput').addEventListener('change', handleSavedFileSelected);
   $('#builderCardFileInput')?.addEventListener('change', handleBuilderCardFileSelected);
+  $('#conceptCardFileInput')?.addEventListener('change', handleConceptCardFileSelected);
 
   bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles });
   bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles });
-  bindDropZone('savedFileDropZone', { onClick: loadSavedCardOrProject, onFiles: importSavedFiles });
+  bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles });
   bindDropZone('builderCardDropZoneMain', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
   bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
-  bindDropZone('conceptCardDropZoneMain', { inputId: null, onClick: loadCardToMainConceptNative, onFiles: importCardToMainConceptFiles });
-  bindDropZone('conceptCardDropZoneMode', { inputId: null, onClick: loadCardToMainConceptNative, onFiles: importCardToMainConceptFiles });
+  bindDropZone('conceptCardDropZoneMain', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles });
+  bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles });
   bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles });
   enhanceBuilderAiButtons();
   populateBuilderPresets();
@@ -4412,6 +4436,13 @@ async function handleBuilderCardFileSelected(event) {
   event.target.value = '';
   if (!file) return;
   await importBuilderCardFiles([file]);
+}
+
+async function handleConceptCardFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  await importCardToMainConceptFiles([file]);
 }
 
 async function handleSavedFileSelected(event) {

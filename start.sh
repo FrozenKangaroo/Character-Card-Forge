@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+export PYTHONDONTWRITEBYTECODE=1
+find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+find . -type f -name "*.pyc" -delete 2>/dev/null || true
 if [ ! -d .venv ]; then
   echo "No .venv found. Running setup first..."
   ./setup.sh
