@@ -17,7 +17,7 @@
         <button class="nav" data-tab="browser">Character Browser</button>
         <button class="nav" data-tab="output">Output / Editor</button>
       </nav>
-      <div class="hint-card"><strong>Tip</strong><p>Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div>
+      <div class="hint-card" id="tipBox"><div class="tip-head"><strong>Tip</strong><button id="nextTipBtn" type="button" class="tip-next" title="Show another tip">↻</button></div><p id="tipText">Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div>
     </aside>
 
     <main>
@@ -35,13 +35,29 @@
           <button class="subtab" data-subtab="concept-mode">Mode and Style</button>
         </div>
         <div id="concept-main" class="subtab-panel active" data-subtab-panel="concept">
-          <textarea id="conceptText" class="concept" placeholder="Example: A confident gyaru university student who works part-time at a train museum and teases {{user}} about knowing less than her..."></textarea>
-          <div class="card wide mini-card"><div class="card-title"><div><h3>Transfer Concept to Builders</h3><p>Use the full text model to read Main Concept + Character Description and fill Character, Personality, and Scene Builder fields. Builder fields take priority during generation.</p></div><div class="actions"><button id="transferToBuildersMainBtn" type="button" class="primary">Transfer to Builders</button></div></div></div>
-          <div class="card wide mini-card"><div class="card-title"><div><h3>Load Card into Builders</h3><p>Import an existing Character Card V2/V3 PNG/JSON or text card and use the full text model to fill Character, Personality, and Scene Builder fields for editing. Unmatched info is moved into Main Concept.</p></div><div class="actions"><button id="loadCardToBuildersMainBtn" type="button">Load Card to Builders</button><button id="loadCardToConceptMainBtn" type="button">Load Card to Main Concept</button><button id="analyzeImageToBuildersMainBtn" type="button">Analyze Image → Builders</button></div></div><div id="builderCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to fill the Builders, or click to browse</div><div id="conceptCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to load only into Main Concept</div></div>
-          <div class="card wide concept-attachments-card">
-            <div class="card-title"><div><h3>Concept Attachments</h3><p>Attach scripts, subtitles, transcripts, notes, or PDFs. Their extracted text is appended to the concept sent to the text model.</p></div><div class="actions"><button id="attachConceptFilesBtn" type="button">Attach Files</button><button id="clearConceptAttachmentsBtn" type="button" class="danger-ghost">Clear Attachments</button></div></div>
-            <div id="conceptAttachmentDropZone" class="drop-zone">Drop concept files here or click to browse</div>
-            <div id="conceptAttachmentsList" class="attachment-list empty">No concept attachments yet.</div>
+          <div class="concept-dashboard">
+            <div class="concept-primary-panel card">
+              <div class="card-title"><div><h3>Main Concept</h3><p>Write the core idea here. Attachments and import tools now sit beside it so you do not have to scroll past the whole loader arc.</p></div></div>
+              <textarea id="conceptText" class="concept" placeholder="Example: A confident gyaru university student who works part-time at a train museum and teases {{user}} about knowing less than her..."></textarea>
+            </div>
+            <aside class="concept-side-panel">
+              <div class="card wide concept-attachments-card priority-card">
+                <div class="card-title"><div><h3>Concept Attachments</h3><p>Attach scripts, subtitles, transcripts, notes, or PDFs. Their extracted text is appended to the concept sent to the text model.</p></div><div class="actions"><button id="attachConceptFilesBtn" type="button">Attach Files</button><button id="clearConceptAttachmentsBtn" type="button" class="danger-ghost">Clear</button></div></div>
+                <div id="conceptAttachmentDropZone" class="drop-zone">Drop concept files here or click to browse</div>
+                <div id="conceptAttachmentsList" class="attachment-list empty">No concept attachments yet.</div>
+              </div>
+              <details class="card wide compact-details" open>
+                <summary>Transfer Concept to Builders</summary>
+                <p>Use the full text model to read Main Concept + Character Description and fill Character, Personality, and Scene Builder fields. Builder fields take priority during generation.</p>
+                <div class="actions"><button id="transferToBuildersMainBtn" type="button" class="primary">Transfer to Builders</button></div>
+              </details>
+              <details class="card wide compact-details">
+                <summary>Load Existing Card / Image</summary>
+                <p>Import a V2/V3 PNG/JSON/TXT card into Builders, load it into Main Concept, or analyze an image directly into Builders.</p>
+                <div class="actions"><button id="loadCardToBuildersMainBtn" type="button">Load Card to Builders</button><button id="loadCardToConceptMainBtn" type="button">Load Card to Main Concept</button><button id="analyzeImageToBuildersMainBtn" type="button">Analyze Image → Builders</button></div>
+                <div id="builderCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to fill the Builders, or click to browse</div><div id="conceptCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to load only into Main Concept</div>
+              </details>
+            </aside>
           </div>
         </div>
         <div id="concept-description" class="subtab-panel" data-subtab-panel="concept">
@@ -256,36 +272,44 @@
 
       <section id="browser" class="tab">
         <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Click a card to restore the full workspace. Multi-select can delete local saved directories, batch export, or move cards into virtual folders.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button">Refresh</button><button id="browserExportPngBtn" type="button" class="primary">Export PNG</button><button id="browserExportJsonBtn" type="button">Export JSON</button><button id="browserEmotionZipBtn" type="button">Emotion ZIP</button><button id="browserFrontPorchExportBtn" type="button" class="primary">Export to Front Porch AI</button></div></div>
-        <div class="browser-toolbar card">
-          <label>Sort
-            <select id="browserSortMode">
-              <option value="date_desc">Newest first</option>
-              <option value="date_asc">Oldest first</option>
-              <option value="alpha_asc">Alphabetical A-Z</option>
-              <option value="alpha_desc">Alphabetical Z-A</option>
-            </select>
-          </label>
-          <label>Live Search
-            <input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." />
-          </label>
-          <label>Folder
-            <select id="browserFolderSelect"><option value="__all__">All folders</option></select>
-          </label>
-          <label>Search/Tag Scope
-            <select id="browserFolderScope">
-              <option value="global">Global</option>
-              <option value="current">Current folder only</option>
-              <option value="current_subfolders">Current folder + subfolders</option>
-            </select>
-          </label>
-          <div class="browser-toolbar-actions">
-            <button id="browserFilterBtn" type="button">Filter Tags</button>
-            <button id="browserClearFiltersBtn" type="button">Clear Filters</button>
-            <button id="browserCreateFolderBtn" type="button">New Virtual Folder</button>
-            <button id="browserRenameFolderBtn" type="button">Rename Current Folder</button>
-            <button id="browserDeleteFolderBtn" type="button" class="danger-ghost">Delete Current Folder</button>
+        <div class="browser-command-card card">
+          <div class="browser-command-primary">
+            <label class="browser-search-field">Live Search
+              <input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." />
+            </label>
+            <label>Sort
+              <select id="browserSortMode">
+                <option value="date_desc">Newest first</option>
+                <option value="date_asc">Oldest first</option>
+                <option value="alpha_asc">Alphabetical A-Z</option>
+                <option value="alpha_desc">Alphabetical Z-A</option>
+              </select>
+            </label>
+            <label>Folder
+              <select id="browserFolderSelect"><option value="__all__">All folders</option></select>
+            </label>
+            <label class="inline-check browser-show-subfolders-top"><input id="browserShowSubfolders" type="checkbox" /> Show subfolders</label>
             <span id="browserResultCount" class="browser-result-count">0 characters</span>
           </div>
+          <details class="browser-advanced-options">
+            <summary>Browser options, filters, and folder tools</summary>
+            <div class="browser-toolbar browser-toolbar-compact">
+              <label>Search/Tag Scope
+                <select id="browserFolderScope">
+                  <option value="global">Global</option>
+                  <option value="current">Current folder only</option>
+                  <option value="current_subfolders">Current folder + subfolders</option>
+                </select>
+              </label>
+              <div class="browser-toolbar-actions">
+                <button id="browserFilterBtn" type="button">Filter Tags</button>
+                <button id="browserClearFiltersBtn" type="button">Clear Filters</button>
+                <button id="browserCreateFolderBtn" type="button">New Virtual Folder</button>
+                <button id="browserRenameFolderBtn" type="button">Rename Current Folder</button>
+                <button id="browserDeleteFolderBtn" type="button" class="danger-ghost">Delete Current Folder</button>
+              </div>
+            </div>
+          </details>
         </div>
         <div id="browserFilterPanel" class="browser-filter-panel card hidden">
           <div class="browser-filter-header">
@@ -319,17 +343,19 @@
             <div id="aiTagSuggestionList" class="tag-merge-list"><div class="empty small">No AI suggestions yet.</div></div>
           </details>
         </div>
-        <div class="browser-bulk-toolbar card">
-          <span id="browserSelectedCount" class="browser-result-count">No multi-select</span>
-          <select id="browserMoveFolderSelect"><option value="">Unfiled</option></select>
-          <button id="browserMoveToFolderBtn" type="button">Move Selected</button>
-          <button id="browserMultiExportPngBtn" type="button">Export Selected PNG</button><button id="browserMultiExportJsonBtn" type="button">Export Selected JSON</button>
-          <button id="browserMultiFrontPorchBtn" type="button" class="primary">Export Selected to Front Porch</button>
-          <button id="browserMultiDeleteBtn" type="button" class="danger" title="Deletes the physical saved/export folders from this app only. Virtual folders and Front Porch entries are not deleted.">Delete Physical Saved Card Folders</button>
-        </div>
+        <details class="browser-bulk-toolbar card">
+          <summary><span id="browserSelectedCount" class="browser-result-count">No multi-select</span> — Multi-select actions</summary>
+          <div class="browser-bulk-actions">
+            <select id="browserMoveFolderSelect"><option value="">Unfiled</option></select>
+            <button id="browserMoveToFolderBtn" type="button">Move Selected</button>
+            <button id="browserMultiExportPngBtn" type="button">Export Selected PNG</button><button id="browserMultiExportJsonBtn" type="button">Export Selected JSON</button>
+            <button id="browserMultiFrontPorchBtn" type="button" class="primary">Export Selected to Front Porch</button>
+            <button id="browserMultiDeleteBtn" type="button" class="danger" title="Deletes the physical saved/export folders from this app only. Virtual folders and Front Porch entries are not deleted.">Delete Physical Saved Card Folders</button>
+          </div>
+        </details>
         <div id="browserLetterStrip" class="browser-letter-strip hidden"></div>
         <div class="browser-layout">
-          <div class="card wide"><div class="card-title"><div><h3>Saved Characters <label class="show-subfolders-inline"><input id="browserShowSubfolders" type="checkbox" /> Show subfolders</label></h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export. Virtual folders appear first in this grid.</p></div></div><div id="browserBreadcrumb" class="browser-breadcrumb"></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export. Virtual folders appear first in this grid.</p></div></div><div id="browserBreadcrumb" class="browser-breadcrumb"></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
           <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><div class="selected-character-actions"><button id="browserAiDescriptionBtn" type="button">AI Description</button><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div></div><div id="browserDescriptionSource" class="description-source-badge hidden"></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea><div class="selected-tags-title">Tags</div><div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div></div>
         </div>
       </section>

@@ -270,6 +270,16 @@ Only redistribute this package if you have the right to share all included files
 - Virtual folder assignments are now cached separately from scanned project files, so browser organization wins over disk layout.
 - Moving characters to Root / Unfiled now clears the cached virtual-folder assignment.
 
+
+## v0.9.17 UI cleanup
+
+- Reworked the Main Concept page into a two-column dashboard so Concept Attachments are visible without scrolling past card-import tools.
+- Moved existing-card/image import tools into compact collapsible panels. No features were removed.
+- Reworked Character Browser controls into a cleaner command bar with primary search/sort/folder controls visible first and advanced options tucked into a collapsible panel.
+- Multi-select actions now live in a collapsible action panel that opens automatically when cards are selected.
+- Improved smaller-window responsiveness for Concept, Character Browser, settings grids, card grids, and side panels.
+- Added a rotating Tip Box for new users with useful workflow tips.
+
 ## Character Browser database
 
 From v0.9.15, the Character Browser uses a local SQLite database at `data/character_library.sqlite3` for virtual folder membership. The app still scans the physical `exports/` directory to discover saved character projects, but folder assignments are now stored in SQLite and are no longer guessed from the physical folder layout. This fixes moved cards reappearing in Root / Unfiled after refresh.

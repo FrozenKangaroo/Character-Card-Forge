@@ -35,6 +35,31 @@ const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
 const uid = () => Math.random().toString(36).slice(2, 10);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
+const NEW_USER_TIPS = [
+  'Start with Main Concept, then use Transfer to Builders when you want the structured fields filled for you.',
+  'Use Lite or Compact Lite when your text model has a small context window. It keeps the card focused instead of trying to write a whole visual novel.',
+  'Concept Attachments are best for scripts, transcripts, subtitles, and notes you want the AI to learn from before generating.',
+  'Character Browser uses SQLite caching, so refreshing should stay quick unless saved card files actually changed.',
+  'Virtual folders only organize the browser. They do not move your physical saved card folders on disk.',
+  'Use AI Description in Character Browser when the card description is only physical appearance and you want a useful scenario summary.',
+  'Tag filters are faceted: active filters shrink the tag list to tags that still exist in the current result set.',
+  'Merge Tags is display-only unless you choose a rename action. It is safe for cleaning up noisy tag lists.',
+  'Fetch SD Models in AI Settings before image generation if you switch between anime, Pony, or realistic checkpoints.',
+  'The Output / Editor tab autosaves after edits, so the browser cache and latest card stay in sync.',
+];
+
+function showRandomTip(forceDifferent = false) {
+  const tipText = $('#tipText');
+  if (!tipText || !NEW_USER_TIPS.length) return;
+  const current = tipText.textContent || '';
+  let next = NEW_USER_TIPS[Math.floor(Math.random() * NEW_USER_TIPS.length)];
+  if (forceDifferent && NEW_USER_TIPS.length > 1) {
+    let guard = 0;
+    while (next === current && guard++ < 8) next = NEW_USER_TIPS[Math.floor(Math.random() * NEW_USER_TIPS.length)];
+  }
+  tipText.textContent = next;
+}
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -243,6 +268,7 @@ async function init() {
   renderTemplate();
   renderQaQuestions();
   renderConceptAttachments();
+  showRandomTip();
   bindActions();
   updateAvailability();
   startDebugLogAutoRefresh();
@@ -946,6 +972,7 @@ function saveTemplateDebounced() {
 
 function bindActions() {
   $('#newCardBtn').addEventListener('click', newCard);
+  $('#nextTipBtn')?.addEventListener('click', () => showRandomTip(true));
   $('#newCardOutputBtn').addEventListener('click', newCard);
   $('#loadTemplateBtn').addEventListener('click', loadSelectedTemplate);
   $('#saveTemplateAsBtn').addEventListener('click', saveTemplateAs);
@@ -2678,6 +2705,8 @@ function updateBrowserMultiActionState() {
   const count = selectedBrowserProjectPaths().length;
   const el = $('#browserSelectedCount');
   if (el) el.textContent = count ? `${count} selected` : 'No multi-select';
+  const bulk = $('.browser-bulk-toolbar');
+  if (bulk && count) bulk.open = true;
 }
 
 async function saveBrowserVirtualFolders() {
