@@ -29,7 +29,22 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 APP_NAME = "Character Card Forge"
-APP_DIR = Path(__file__).resolve().parent
+
+
+def _app_bundle_dir():
+    """Return the read-only directory that contains bundled application files.
+
+    AppImage exposes APPDIR as the mounted squashfs root. That location is
+    intentionally read-only at runtime, so it must only be used for reading
+    bundled assets and never as the user data location. PyInstaller exposes
+    the actual unpacked bundle directory via sys._MEIPASS when frozen.
+    """
+    if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS).resolve()
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = _app_bundle_dir()
 BUNDLED_DATA_DIR = APP_DIR / "data"
 
 

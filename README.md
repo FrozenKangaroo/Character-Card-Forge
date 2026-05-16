@@ -185,12 +185,14 @@ $env:CCF_DATA_DIR="D:\Character Card Forge Data"; .\start.bat
 Character Card Forge is safe to package as an AppImage or similar read-only bundle. At startup it now:
 
 - treats the app/program directory as read-only
+- never uses the AppImage `APPDIR` mount as the writable data folder
+- reads bundled assets from the PyInstaller extraction directory (`sys._MEIPASS`) when frozen
 - creates writable folders in the user data location
 - copies bundled default settings/templates into user data only if they do not already exist
 - writes SQLite cache, generated images, imports, logs, templates, and exports outside the AppImage mount
 - disables Python bytecode writes beside `app.py`
 
-This avoids errors caused by trying to create `data/`, `exports/`, `__pycache__/`, or generated image folders inside a read-only AppImage directory.
+This avoids errors caused by trying to create `data/`, `exports/`, `__pycache__/`, or generated image folders inside a read-only AppImage directory. If you still see a path like `/tmp/.mount_.../_internal/data/templates` in an error, rebuild the AppImage from this version so the bundled `app.py` contains the writable-user-data path fix.
 
 ## Updating
 
