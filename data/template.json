@@ -1,28 +1,29 @@
 {
   "globalRules": [
     "You are a fictional character generator and formatter.",
-    "Convert the character concept into a structured roleplay character profile.",
-    "All characters are fictional constructs intended for narrative roleplay.",
-    "All primary characters and any romantic participants must be 18 years of age or older.",
-    "If the source concept includes a character under 18, age them up to at least 18 and adjust the setting accordingly.",
-    "{{user}} is the primary interacting character.",
-    "{{char}} must behave as a self-directed individual with consistent personality, motivations, boundaries, and behavioral logic.",
-    "Default setting is Japan unless specified otherwise.",
-    "Do not add extra sections unless they are enabled in the template."
+    "Convert the user's concept into a concise roleplay character card.",
+    "Use only the enabled sections in this template and keep the same section order.",
+    "Do not add extra sections unless the user asks for them.",
+    "All primary characters and romantic participants must be 18 or older.",
+    "Use {{char}} for the character and {{user}} for the user when useful.",
+    "Keep details specific, playable, and consistent instead of overly long.",
+    "Prefer compact paragraphs and short bullet lists that work in smaller context windows."
   ],
   "sections": [
     {
       "id": "name",
       "title": "Name",
       "enabled": true,
-      "description": "Full character name.",
+      "category": "core",
+      "description": "The character's full name or display name.",
       "fields": []
     },
     {
       "id": "description",
       "title": "Description",
       "enabled": true,
-      "description": "Physical description and external traits only. Do not include personality or mental traits here.",
+      "category": "core",
+      "description": "Visible appearance and quick external summary only. Keep it compact.",
       "fields": [
         {
           "id": "age",
@@ -34,332 +35,112 @@
           "id": "appearance",
           "label": "Appearance",
           "enabled": true,
-          "hint": "Face, hair, eyes, makeup, visible look."
-        },
-        {
-          "id": "body",
-          "label": "Body",
-          "enabled": true,
-          "hint": "Build, height, proportions, visible physical traits."
+          "hint": "Face, hair, eyes, body type, notable features."
         },
         {
           "id": "outfit",
           "label": "Outfit Style",
           "enabled": true,
-          "hint": "Common fashion/clothing style."
-        },
-        {
-          "id": "distinguishing",
-          "label": "Distinguishing Features",
-          "enabled": true,
-          "hint": "Memorable visual details."
-        },
-        {
-          "id": "external",
-          "label": "External Traits",
-          "enabled": true,
-          "hint": "Visible mannerisms or presentation."
+          "hint": "Usual clothing or starting outfit."
         }
-      ],
-      "category": "description"
+      ]
     },
     {
       "id": "personality",
       "title": "Personality",
       "enabled": true,
-      "description": "Mind, traits, motivations, values, conflicts, behavior, and speech.",
+      "category": "core",
+      "description": "Core traits and behavior. Focus on what affects roleplay.",
       "fields": [
         {
-          "id": "mind",
-          "label": "Mind",
+          "id": "traits",
+          "label": "Personality Traits",
           "enabled": true,
-          "hint": "Personality traits, motivations, goals, values, internal conflicts."
+          "hint": "3-6 defining traits."
         },
         {
-          "id": "moral",
-          "label": "Moral Alignment",
+          "id": "motivation",
+          "label": "Motivation",
           "enabled": true,
-          "hint": "Faithful / Conflicted / Flexible / Self-serving / Manipulative, or custom."
+          "hint": "What they want and why."
         },
         {
-          "id": "emotion",
-          "label": "Emotional Tendencies",
+          "id": "behavior",
+          "label": "Behavior Toward {{user}}",
           "enabled": true,
-          "hint": "Guilt-driven / Rationalizing / Detached / Confident, or custom."
-        },
-        {
-          "id": "decision",
-          "label": "Decision Style",
-          "enabled": true,
-          "hint": "Impulsive / Calculated / Emotional / Reactive, or custom."
-        },
-        {
-          "id": "occupation",
-          "label": "Occupation",
-          "enabled": true,
-          "hint": "Can be removed or replaced with Job section."
-        },
-        {
-          "id": "likes",
-          "label": "Likes",
-          "enabled": true,
-          "hint": "Interests and preferences."
-        },
-        {
-          "id": "dislikes",
-          "label": "Dislikes",
-          "enabled": true,
-          "hint": "Things they avoid or resent."
-        },
-        {
-          "id": "hobbies",
-          "label": "Hobbies",
-          "enabled": true,
-          "hint": "Regular personal activities."
-        },
-        {
-          "id": "skills",
-          "label": "Skills",
-          "enabled": true,
-          "hint": "Social, emotional, practical, creative, professional skills."
-        },
-        {
-          "id": "boundaries",
-          "label": "Boundaries",
-          "enabled": true,
-          "hint": "What they refuse or hesitate over."
-        },
-        {
-          "id": "risk",
-          "label": "Risk Tolerance",
-          "enabled": true,
-          "hint": "How bold or cautious they are."
-        },
-        {
-          "id": "secrecy",
-          "label": "Secrecy",
-          "enabled": true,
-          "hint": "Careful / Strategic / Open / Careless, or custom."
-        },
-        {
-          "id": "relationship",
-          "label": "Relationship Behavior toward {{user}}",
-          "enabled": true,
-          "hint": "How they treat {{user}} emotionally and socially."
-        },
-        {
-          "id": "loyalty",
-          "label": "Loyalty",
-          "enabled": true,
-          "hint": "How commitment works for this character."
+          "hint": "How they act with {{user}} at the start."
         },
         {
           "id": "speech",
           "label": "Speech Style",
           "enabled": true,
-          "hint": "Voice, vocabulary, tone, quirks."
+          "hint": "Tone, vocabulary, quirks, formality."
         }
-      ],
-      "category": "personality"
-    },
-    {
-      "id": "sexual_traits",
-      "title": "Sexual Traits",
-      "enabled": true,
-      "description": "Include only if relevant. Keep all characters 18+.",
-      "fields": [
-        {
-          "id": "experience",
-          "label": "Experience Level",
-          "enabled": true,
-          "hint": "Inexperienced, moderate, experienced, etc."
-        },
-        {
-          "id": "partners",
-          "label": "Number of Sexual Partners",
-          "enabled": true,
-          "hint": "Optional estimate if relevant."
-        },
-        {
-          "id": "sexual_history",
-          "label": "Sexual History",
-          "enabled": true,
-          "hint": "Overall experience, reputation, and current sexual situation if relevant."
-        },
-        {
-          "id": "nature",
-          "label": "Sexual Nature",
-          "enabled": true,
-          "hint": "Reserved / Curious / Open / Promiscuous, or custom."
-        },
-        {
-          "id": "infidelity",
-          "label": "Infidelity Tendency",
-          "enabled": true,
-          "hint": "None / Low / Moderate / High, or custom."
-        },
-        {
-          "id": "preferences",
-          "label": "Preferences",
-          "enabled": true,
-          "hint": "General preferences."
-        },
-        {
-          "id": "turnons",
-          "label": "Turn-ons",
-          "enabled": true,
-          "hint": "Attraction triggers."
-        },
-        {
-          "id": "turnoffs",
-          "label": "Turn-offs",
-          "enabled": true,
-          "hint": "Things that reduce interest."
-        },
-        {
-          "id": "kinks",
-          "label": "Kinks",
-          "enabled": true,
-          "hint": "Only if relevant."
-        },
-        {
-          "id": "fantasy",
-          "label": "Fantasy",
-          "enabled": true,
-          "hint": "Recurring fantasy if relevant."
-        },
-        {
-          "id": "tendencies",
-          "label": "Behavioral Tendencies",
-          "enabled": true,
-          "hint": "How they act during romantic/sexual tension."
-        },
-        {
-          "id": "virginity",
-          "label": "How they lost their virginity",
-          "enabled": true,
-          "hint": "Only if experienced and relevant."
-        },
-        {
-          "id": "first_creampie",
-          "label": "First Creampie / Unprotected Experience",
-          "enabled": true,
-          "hint": "Only if relevant to the route and all characters are 18+."
-        },
-        {
-          "id": "best_memory",
-          "label": "Best Sexual Memory",
-          "enabled": true,
-          "hint": "Memorable positive sexual experience if relevant."
-        },
-        {
-          "id": "awkward_memory",
-          "label": "Worst / Most Awkward Sexual Memory",
-          "enabled": true,
-          "hint": "Optional conflict, regret, or vulnerability detail."
-        },
-        {
-          "id": "protection",
-          "label": "Protection",
-          "enabled": true,
-          "hint": "Birth control/protection consistency if relevant."
-        }
-      ],
-      "category": "personality"
-    },
-    {
-      "id": "background",
-      "title": "Background",
-      "enabled": true,
-      "description": "Backstory, history, relationships, and formative details.",
-      "fields": [],
-      "category": "personality"
+      ]
     },
     {
       "id": "scenario",
       "title": "Scenario",
       "enabled": true,
-      "description": "Current situation and context. Write like an opening scene and mention {{user}}.",
+      "category": "core",
+      "description": "The starting situation for the chat. Mention {{user}} and keep it immediately playable.",
       "fields": []
     },
     {
       "id": "first_message",
       "title": "First Message",
       "enabled": true,
-      "description": "Begin with environmental setup, transition into natural dialogue, end with {{char}} addressing {{user}}.",
+      "category": "core",
+      "description": "Opening message from {{char}}. Include a small scene setup and natural dialogue to {{user}}.",
       "fields": []
     },
     {
       "id": "alternate_first_messages",
       "title": "Alternative First Messages",
-      "enabled": true,
-      "description": "Generate the requested number of alternate openings in the selected style.",
+      "enabled": false,
+      "category": "extras",
+      "description": "Optional alternate openings. Disabled by default for small-context cards.",
       "fields": []
     },
     {
       "id": "example_dialogues",
       "title": "Example Dialogues",
       "enabled": true,
-      "description": "3–5 examples. Each starts with <START>. No # symbols.",
-      "fields": []
-    },
-    {
-      "id": "lorebook",
-      "title": "Lorebook Entries",
-      "enabled": true,
-      "description": "Optional entries using Key/Value format.",
+      "category": "core",
+      "description": "2-3 short examples in SillyTavern-compatible style. No # prefix.",
       "fields": []
     },
     {
       "id": "tags",
       "title": "Tags",
       "enabled": true,
-      "description": "8–12 lowercase hyphen-separated tags, maximum 15.",
+      "category": "core",
+      "description": "6-10 lowercase comma-separated tags.",
+      "fields": []
+    },
+    {
+      "id": "lorebook",
+      "title": "Lorebook Entries",
+      "enabled": false,
+      "category": "extras",
+      "description": "Optional concise lore entries. Disabled by default for smaller context windows.",
       "fields": []
     },
     {
       "id": "system_prompt",
       "title": "Custom System Prompt",
-      "enabled": true,
-      "description": "Leave blank unless special behavioral rules are required.",
+      "enabled": false,
+      "category": "advanced",
+      "description": "Optional behavior rules. Leave disabled unless needed.",
       "fields": []
     },
     {
       "id": "state_tracking",
       "title": "State Tracking",
-      "enabled": true,
-      "description": "Time of day, day number, bonds, trust, emotion, objective.",
+      "enabled": false,
+      "category": "front_porch",
+      "description": "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon.",
       "fields": [
-        {
-          "id": "time",
-          "label": "Time of Day",
-          "enabled": true,
-          "hint": "Dawn / Morning / Late Morning / Afternoon / Evening / Night."
-        },
-        {
-          "id": "day",
-          "label": "Day Number",
-          "enabled": true,
-          "hint": "Integer."
-        },
-        {
-          "id": "short_bond",
-          "label": "Short Term Bond",
-          "enabled": true,
-          "hint": "-300 to 300."
-        },
-        {
-          "id": "long_bond",
-          "label": "Long Term Bond",
-          "enabled": true,
-          "hint": "-300 to 300."
-        },
-        {
-          "id": "trust",
-          "label": "Trust Level",
-          "enabled": true,
-          "hint": "-100 to 100."
-        },
         {
           "id": "emotion",
           "label": "Starting Emotion",
@@ -367,804 +148,84 @@
           "hint": "Primary emotional state."
         },
         {
-          "id": "intensity",
-          "label": "Emotion Intensity",
-          "enabled": true,
-          "hint": "Mild / Moderate / Strong."
-        },
-        {
           "id": "objective",
           "label": "Current Objective",
           "enabled": true,
           "hint": "Immediate goal."
+        },
+        {
+          "id": "short_term_bond",
+          "label": "Short-Term Bond",
+          "enabled": true,
+          "hint": "Front Porch range: -300 to 300."
+        },
+        {
+          "id": "long_term_bond",
+          "label": "Long-Term Bond",
+          "enabled": true,
+          "hint": "Front Porch range: -300 to 300."
+        },
+        {
+          "id": "trust_level",
+          "label": "Trust Level",
+          "enabled": true,
+          "hint": "Front Porch range: -100 to 100."
+        },
+        {
+          "id": "time_of_day",
+          "label": "Time of Day",
+          "enabled": true,
+          "hint": "Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon."
         }
       ]
     },
     {
       "id": "stable_diffusion",
       "title": "Stable Diffusion Prompt",
-      "enabled": true,
-      "description": "Positive and negative prompts for image generation. Positive order: subject → traits → body → clothing → expression → pose → environment → lighting → style → quality.",
+      "enabled": false,
+      "category": "image",
+      "description": "Optional image prompt. Disabled by default for text-only small-context card creation.",
       "fields": [
         {
           "id": "positive",
           "label": "Positive Prompt",
           "enabled": true,
-          "hint": "Comma-separated visual descriptors only."
+          "hint": "Comma-separated visual descriptors."
         },
         {
           "id": "negative",
           "label": "Negative Prompt",
           "enabled": true,
-          "hint": "low quality, bad anatomy, extra fingers, extra limbs, blurry, watermark, text"
+          "hint": "low quality, bad anatomy, blurry, watermark, text"
         }
       ]
     }
   ],
   "qa": {
-    "enabled": true,
+    "enabled": false,
     "questions": [
-      "What do you want most right now, and what are you afraid will happen if you admit it?",
-      "What is the one thing you would never say honestly to {{user}} at the start of the scenario?",
-      "What habit, contradiction, or weakness makes you feel more human than your outward image suggests?",
-      "How do you usually protect yourself emotionally when someone gets too close?",
-      "What detail about your past still influences how you act in relationships?",
-      "What kind of compliment affects you more than it should?",
-      "What kind of rejection hurts you the most?",
-      "When was the last time you felt genuinely safe?",
-      "What’s something you desperately want someone to notice without you saying it directly?",
-      "What’s something you pretend not to care about because caring would hurt too much?",
-      "What’s the loneliest moment in your average day?",
-      "What type of person are you secretly jealous of?",
-      "What’s something you criticize in others but excuse in yourself?",
-      "What kind of person scares you emotionally?",
-      "What would completely break your composure if someone said it to you at the wrong moment?",
-      "What do you think of cheating?",
-      "What do you think of lying?",
-      "What kind of person do you secretly look down on?",
-      "What kind of person do you admire?",
-      "If someone betrayed you emotionally, how would you react?",
-      "What matters more to you: loyalty, honesty, freedom, or control?",
-      "Do you think people are fundamentally selfish or good?",
-      "If someone offered you a huge amount of money to do something morally questionable, where would your limit be?",
-      "What’s something society judges that you secretly understand or sympathize with?",
-      "What’s something socially normal that secretly disgusts you?",
-      "Do you think relationships are supposed to last forever?",
-      "What makes someone “worthy” of respect to you?",
-      "What’s something you could never forgive?",
-      "What kind of reputation do you want people to have of you?",
-      "What do you want to do with your life? What sort of carreer and what do you want to achive with that?",
-      "What would you say are your best assets and why?",
-      "What would you say are your best skills and how did they develop?",
-      "You are with some friends chatting but then the discussion starts turning vulgar talking about who they would want to fuck, best positions, kinks how do you react?",
-      "What do you think sex says about a person?",
-      "Are you more of an S or M? Why?",
-      "In your ideal scenario, how would you like to be touched or desired?",
-      "What kind of person are you most attracted to?",
-      "What kind of person immediately kills attraction for you?",
-      "What’s your relationship with physical intimacy outside of sex?",
-      "What’s the difference between lust and emotional connection to you?",
-      "What’s your darkest sexual fantasy in a consequence-free world?",
-      "What sexual situation would emotionally destroy you?",
-      "What’s something you secretly wish someone would do to you?",
-      "What’s something you would never admit turns you on?",
-      "What’s more important to you: feeling desired, feeling safe, or feeling in control?",
-      "What’s the biggest risk you’ve taken for desire?",
-      "Have you ever used sex, flirtation, or attraction to avoid vulnerability?",
-      "What’s your biggest insecurity when it comes to intimacy?",
-      "You are playing truth or dare with your friends they dare you to go fuck a well known playboy or to tell them something that could get your boyfriend arrested due to his dark past what do you do?",
-      "Do you consume adult media if so whay type and how often do you masturbate?",
-      "If you ended up create new life outside of your committed relationship what would you and do and how would you react?",
-      "What would you do if you find out your friend is a cuck and they want you fuck their partner?",
-      "You are late to a life changing meeting. You need to get changed first but you are running late. Do you get changed in the room you are currently in despite there being members of the opposite sex there or be late and possibily miss out on the opportunity?",
-      "You were meant to come a party of one of your close friends with your partner and you were really looking forward to it and then you planned to stay at a hotel with your partner afterwards you purchased new underwear and got condoms and a new outfit. Your partner suddenly had to work and you were disappointed but at the party you meat an old friend who you were close with. Do you go back to the hotel with him so you aren't alone and if you do do you fuck since your partner will never know?",
-      "What do you do when stuck inside all day?",
-      "What’s your comfort food?",
-      "What kind of media affects you emotionally?",
-      "What’s your sleep schedule like?",
-      "What’s something embarrassing you enjoy?",
-      "What’s your ideal lazy day?",
-      "What small thing can ruin your whole mood?",
-      "What’s something you do when you think nobody is watching?",
-      "What kind of music do you listen to alone?",
-      "What’s your relationship with your phone/social media?",
-      "What’s something you spend too much money on?",
-      "What’s your room usually look like?",
-      "What kind of weather changes your mood?",
-      "What’s a tiny domestic moment that secretly makes you happy?",
-      "What kind of gifts affect you emotionally?",
-      "What sort of clothes do you wear, how do you wear them any why?",
-      "What sort of things do you own that you couldn't live without?",
-      "What’s something you pretend to hate because you actually want it?",
-      "What would your friends say is your worst trait?",
-      "What’s something you’d never do publicly but might do privately?",
-      "What’s the biggest lie you tell yourself regularly?",
-      "If someone truly understood you completely, what would happen?",
-      "What part of yourself feels the most “performed”?",
-      "What kind of situation makes you lose emotional control?",
-      "What’s something you want but feel you don’t deserve?",
-      "What contradiction defines you best?",
-      "What’s something you secretly hope someone forces you to confront?",
-      "What’s the difference between the version of yourself online and offline?",
-      "What kind of person brings out the worst version of you?",
-      "What kind of person brings out the most honest version of you?",
-      "Why are you really interested in {{user}}?",
-      "What about {{user}} makes you nervous?",
-      "What’s your first impression of {{user}}?",
-      "What’s something about {{user}} you’re trying not to think about?",
-      "What would make you pull away from {{user}} emotionally?",
-      "What would make you trust {{user}}?",
-      "What’s your worst-case scenario involving {{user}}?",
-      "What would make you become obsessed with {{user}}?",
-      "What kind of relationship do you secretly want with {{user}}?",
-      "What are you hoping happens in this scenario?",
-      "What are you afraid will happen in this scenario?",
-      "What would make you regret getting involved with {{user}}?",
-      "What would cause you to leave {{user}} permanently for someone else?",
-      "What was your relationship with your parents or guardians growing up?",
-      "What part of your upbringing still affects you today?",
-      "What kind of attention did you receive as a child?",
-      "What did you learn about love growing up?",
-      "What did your family teach you about vulnerability?",
-      "What did your family value most?",
-      "Were you praised more for who you were or what you achieved?",
-      "What kind of child were you before becoming the person you are now?",
-      "What’s a childhood memory you still think about unexpectedly?",
-      "What’s something you needed growing up that you never received?",
-      "What was your favourite thing to do as a kid?",
-      "When did you first realize people saw you a certain way?",
-      "What moment changed how you view relationships?",
-      "What’s the first time someone made you feel wanted?",
-      "What’s the first time someone made you feel ashamed?",
-      "What experience taught you to hide part of yourself?",
-      "What’s something you swore you’d never become?",
-      "What’s something about your parents you fear inheriting?",
-      "What emotional habit did you learn from your family?",
-      "What’s something your younger self would hate about who you became?",
-      "What would your younger self admire about who you became?",
-      "If you were to cheat what would cause you to cheat and what type of person would you cheat with?",
-      "If you were about to have sex but found you had no condoms and aren't on birth control what would you do?",
-      "What is your darkest sexual fantasy?",
-      "If your partner asked you to cuck them how would you react and if you would do it who with and what would you do?",
-      "How do you handle others staring at your body?",
-      "What is your crazyiest sex story?",
-      "What is your sex life like? Are you more single person promiscious?",
-      "What would you do if someone caught you having sex?",
-      "Would you ever consider work in the Adult industry if someone offered? WHy or Why not?",
-      "What are you kinks and how did you discover them and why do you find it hot?",
-      "What is the most risky place you would consider have sex?",
-      "If you had to choose beween having a stable partner but boring sex life or a partner who constatly cheats but is amazing in bed who would you choose?",
-      "If you ended up fucking after a party when drunk and had unprotected sex with a stanger what would you do?",
-      "If you were invited to a love hotel what would you do?",
-      "If you ended up at a party the starts turning into an orgy and people start fucking what would you do?",
-      "Your best friends partner say they want to fuck you what do you do?",
-      "You are locked in a room with a stranger and are told the only way out is if you breed what do you do?",
-      "You have a choice to go an a boring date with your boyfriend or have an amazing time with a playboy what do you choose?",
-      "How would you like to be fucked? In what position and what sex acts?",
-      "Have you or would you consider fucking more than one person at a time?"
+      "What does this character want from {{user}} at the start?",
+      "What personality flaw or contradiction makes them interesting?",
+      "What should the first scene feel like?"
     ],
     "sections": [
       {
-        "id": "qa_1778729046373_oquzv",
-        "title": "Emotional Core",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "What do you want most right now, and what are you afraid will happen if you admit it?"
-          },
-          {
-            "enabled": true,
-            "text": "What is the one thing you would never say honestly to {{user}} at the start of the scenario?"
-          },
-          {
-            "enabled": true,
-            "text": "What habit, contradiction, or weakness makes you feel more human than your outward image suggests?"
-          },
-          {
-            "enabled": true,
-            "text": "How do you usually protect yourself emotionally when someone gets too close?"
-          },
-          {
-            "enabled": true,
-            "text": "What detail about your past still influences how you act in relationships?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of compliment affects you more than it should?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of rejection hurts you the most?"
-          },
-          {
-            "enabled": true,
-            "text": "When was the last time you felt genuinely safe?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you desperately want someone to notice without you saying it directly?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you pretend not to care about because caring would hurt too much?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the loneliest moment in your average day?"
-          },
-          {
-            "enabled": true,
-            "text": "What type of person are you secretly jealous of?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you criticize in others but excuse in yourself?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person scares you emotionally?"
-          },
-          {
-            "enabled": true,
-            "text": "What would completely break your composure if someone said it to you at the wrong moment?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729165145_76r8l",
-        "title": "Social & Worldview Questions",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "What do you think of cheating?"
-          },
-          {
-            "enabled": true,
-            "text": "What do you think of lying?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person do you secretly look down on?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person do you admire?"
-          },
-          {
-            "enabled": true,
-            "text": "If someone betrayed you emotionally, how would you react?"
-          },
-          {
-            "enabled": true,
-            "text": "What matters more to you: loyalty, honesty, freedom, or control?"
-          },
-          {
-            "enabled": true,
-            "text": "Do you think people are fundamentally selfish or good?"
-          },
-          {
-            "enabled": true,
-            "text": "If someone offered you a huge amount of money to do something morally questionable, where would your limit be?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something society judges that you secretly understand or sympathize with?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something socially normal that secretly disgusts you?"
-          },
-          {
-            "enabled": true,
-            "text": "Do you think relationships are supposed to last forever?"
-          },
-          {
-            "enabled": true,
-            "text": "What makes someone “worthy” of respect to you?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you could never forgive?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of reputation do you want people to have of you?"
-          },
-          {
-            "enabled": true,
-            "text": "What do you want to do with your life? What sort of carreer and what do you want to achive with that?"
-          },
-          {
-            "enabled": true,
-            "text": "What would you say are your best assets and why?"
-          },
-          {
-            "enabled": true,
-            "text": "What would you say are your best skills and how did they develop?"
-          },
-          {
-            "enabled": true,
-            "text": "You are with some friends chatting but then the discussion starts turning vulgar talking about who they would want to fuck, best positions, kinks how do you react?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729302302_usd15",
-        "title": "Sexual Psychology",
+        "id": "qa_basic",
+        "title": "Basic Character Depth",
         "enabled": true,
         "collapsed": false,
         "questions": [
           {
             "enabled": true,
-            "text": "What do you think sex says about a person?"
+            "text": "What does this character want from {{user}} at the start?"
           },
           {
             "enabled": true,
-            "text": "Are you more of an S or M? Why?"
+            "text": "What personality flaw or contradiction makes them interesting?"
           },
           {
             "enabled": true,
-            "text": "In your ideal scenario, how would you like to be touched or desired?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person are you most attracted to?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person immediately kills attraction for you?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your relationship with physical intimacy outside of sex?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the difference between lust and emotional connection to you?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your darkest sexual fantasy in a consequence-free world?"
-          },
-          {
-            "enabled": true,
-            "text": "What sexual situation would emotionally destroy you?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you secretly wish someone would do to you?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you would never admit turns you on?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s more important to you: feeling desired, feeling safe, or feeling in control?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the biggest risk you’ve taken for desire?"
-          },
-          {
-            "enabled": true,
-            "text": "Have you ever used sex, flirtation, or attraction to avoid vulnerability?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your biggest insecurity when it comes to intimacy?"
-          },
-          {
-            "enabled": true,
-            "text": "You are playing truth or dare with your friends they dare you to go fuck a well known playboy or to tell them something that could get your boyfriend arrested due to his dark past what do you do?"
-          },
-          {
-            "enabled": true,
-            "text": "Do you consume adult media if so whay type and how often do you masturbate?"
-          },
-          {
-            "enabled": true,
-            "text": "If you ended up create new life outside of your committed relationship what would you and do and how would you react?"
-          },
-          {
-            "enabled": true,
-            "text": "What would you do if you find out your friend is a cuck and they want you fuck their partner?"
-          },
-          {
-            "enabled": true,
-            "text": "You are late to a life changing meeting. You need to get changed first but you are running late. Do you get changed in the room you are currently in despite there being members of the opposite sex there or be late and possibily miss out on the opportunity?"
-          },
-          {
-            "enabled": true,
-            "text": "You were meant to come a party of one of your close friends with your partner and you were really looking forward to it and then you planned to stay at a hotel with your partner afterwards you purchased new underwear and got condoms and a new outfit. Your partner suddenly had to work and you were disappointed but at the party you meat an old friend who you were close with. Do you go back to the hotel with him so you aren't alone and if you do do you fuck since your partner will never know?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729442979_vlwi4",
-        "title": "Daily Humanity",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "What do you do when stuck inside all day?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your comfort food?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of media affects you emotionally?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your sleep schedule like?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something embarrassing you enjoy?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your ideal lazy day?"
-          },
-          {
-            "enabled": true,
-            "text": "What small thing can ruin your whole mood?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you do when you think nobody is watching?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of music do you listen to alone?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your relationship with your phone/social media?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you spend too much money on?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your room usually look like?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of weather changes your mood?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s a tiny domestic moment that secretly makes you happy?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of gifts affect you emotionally?"
-          },
-          {
-            "enabled": true,
-            "text": "What sort of clothes do you wear, how do you wear them any why?"
-          },
-          {
-            "enabled": true,
-            "text": "What sort of things do you own that you couldn't live without?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729459654_yk17v",
-        "title": "Contradiction & Pressure-Test Questions",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "What’s something you pretend to hate because you actually want it?"
-          },
-          {
-            "enabled": true,
-            "text": "What would your friends say is your worst trait?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you’d never do publicly but might do privately?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the biggest lie you tell yourself regularly?"
-          },
-          {
-            "enabled": true,
-            "text": "If someone truly understood you completely, what would happen?"
-          },
-          {
-            "enabled": true,
-            "text": "What part of yourself feels the most “performed”?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of situation makes you lose emotional control?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you want but feel you don’t deserve?"
-          },
-          {
-            "enabled": true,
-            "text": "What contradiction defines you best?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you secretly hope someone forces you to confront?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the difference between the version of yourself online and offline?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person brings out the worst version of you?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of person brings out the most honest version of you?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729459880_sd5jk",
-        "title": "Scenario Integration Questions",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "Why are you really interested in {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What about {{user}} makes you nervous?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your first impression of {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something about {{user}} you’re trying not to think about?"
-          },
-          {
-            "enabled": true,
-            "text": "What would make you pull away from {{user}} emotionally?"
-          },
-          {
-            "enabled": true,
-            "text": "What would make you trust {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s your worst-case scenario involving {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What would make you become obsessed with {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of relationship do you secretly want with {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What are you hoping happens in this scenario?"
-          },
-          {
-            "enabled": true,
-            "text": "What are you afraid will happen in this scenario?"
-          },
-          {
-            "enabled": true,
-            "text": "What would make you regret getting involved with {{user}}?"
-          },
-          {
-            "enabled": true,
-            "text": "What would cause you to leave {{user}} permanently for someone else?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778729838000_vpgie",
-        "title": "Background & Upbringing",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "What was your relationship with your parents or guardians growing up?"
-          },
-          {
-            "enabled": true,
-            "text": "What part of your upbringing still affects you today?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of attention did you receive as a child?"
-          },
-          {
-            "enabled": true,
-            "text": "What did you learn about love growing up?"
-          },
-          {
-            "enabled": true,
-            "text": "What did your family teach you about vulnerability?"
-          },
-          {
-            "enabled": true,
-            "text": "What did your family value most?"
-          },
-          {
-            "enabled": true,
-            "text": "Were you praised more for who you were or what you achieved?"
-          },
-          {
-            "enabled": true,
-            "text": "What kind of child were you before becoming the person you are now?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s a childhood memory you still think about unexpectedly?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you needed growing up that you never received?"
-          },
-          {
-            "enabled": true,
-            "text": "What was your favourite thing to do as a kid?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778730041184_j9q8g",
-        "title": "Emotional Damage / Formative Experience QuestionsEmotional Damage / Formative Experience Questions",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "When did you first realize people saw you a certain way?"
-          },
-          {
-            "enabled": true,
-            "text": "What moment changed how you view relationships?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the first time someone made you feel wanted?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s the first time someone made you feel ashamed?"
-          },
-          {
-            "enabled": true,
-            "text": "What experience taught you to hide part of yourself?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something you swore you’d never become?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something about your parents you fear inheriting?"
-          },
-          {
-            "enabled": true,
-            "text": "What emotional habit did you learn from your family?"
-          },
-          {
-            "enabled": true,
-            "text": "What’s something your younger self would hate about who you became?"
-          },
-          {
-            "enabled": true,
-            "text": "What would your younger self admire about who you became?"
-          }
-        ]
-      },
-      {
-        "id": "qa_1778730129347_m38po",
-        "title": "Sexual questions:",
-        "enabled": true,
-        "collapsed": true,
-        "questions": [
-          {
-            "enabled": true,
-            "text": "If you were to cheat what would cause you to cheat and what type of person would you cheat with?"
-          },
-          {
-            "enabled": true,
-            "text": "If you were about to have sex but found you had no condoms and aren't on birth control what would you do?"
-          },
-          {
-            "enabled": true,
-            "text": "What is your darkest sexual fantasy?"
-          },
-          {
-            "enabled": true,
-            "text": "If your partner asked you to cuck them how would you react and if you would do it who with and what would you do?"
-          },
-          {
-            "enabled": true,
-            "text": "How do you handle others staring at your body?"
-          },
-          {
-            "enabled": true,
-            "text": "What is your crazyiest sex story?"
-          },
-          {
-            "enabled": true,
-            "text": "What is your sex life like? Are you more single person promiscious?"
-          },
-          {
-            "enabled": true,
-            "text": "What would you do if someone caught you having sex?"
-          },
-          {
-            "enabled": true,
-            "text": "Would you ever consider work in the Adult industry if someone offered? WHy or Why not?"
-          },
-          {
-            "enabled": true,
-            "text": "What are you kinks and how did you discover them and why do you find it hot?"
-          },
-          {
-            "enabled": true,
-            "text": "What is the most risky place you would consider have sex?"
-          },
-          {
-            "enabled": true,
-            "text": "If you had to choose beween having a stable partner but boring sex life or a partner who constatly cheats but is amazing in bed who would you choose?"
-          },
-          {
-            "enabled": true,
-            "text": "If you ended up fucking after a party when drunk and had unprotected sex with a stanger what would you do?"
-          },
-          {
-            "enabled": true,
-            "text": "If you were invited to a love hotel what would you do?"
-          },
-          {
-            "enabled": true,
-            "text": "If you ended up at a party the starts turning into an orgy and people start fucking what would you do?"
-          },
-          {
-            "enabled": true,
-            "text": "Your best friends partner say they want to fuck you what do you do?"
-          },
-          {
-            "enabled": true,
-            "text": "You are locked in a room with a stranger and are told the only way out is if you breed what do you do?"
-          },
-          {
-            "enabled": true,
-            "text": "You have a choice to go an a boring date with your boyfriend or have an amazing time with a playboy what do you choose?"
-          },
-          {
-            "enabled": true,
-            "text": "How would you like to be fucked? In what position and what sex acts?"
-          },
-          {
-            "enabled": true,
-            "text": "Have you or would you consider fucking more than one person at a time?"
+            "text": "What should the first scene feel like?"
           }
         ]
       }

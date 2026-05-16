@@ -194,6 +194,138 @@ def _seed_user_data_from_bundle():
 _seed_user_data_from_bundle()
 
 
+def _upgrade_front_porch_prompt_text(text):
+    text = str(text or "")
+    if not text:
+        return text
+    replacements = [
+        (r"(?i)bond\s+ranges\s*:\s*short\s*/\s*long\s*-?200\s*\.\.\s*200\s*;\s*trust\s*-?50\s*\.\.\s*50", "Bond ranges: short/long -300..300; trust -100..100"),
+        (r"(?i)bond\s+ranges\s*:\s*short\s*/\s*long\s*-?200\s*to\s*200\s*;\s*trust\s*-?50\s*to\s*50", "Bond ranges: short/long -300..300; trust -100..100"),
+        (r"(?i)short[- ]term\s+bond\s+range\s*:\s*-?200\s*(?:to|\.\.)\s*200", "Short-Term Bond range: -300 to 300"),
+        (r"(?i)long[- ]term\s+bond\s+range\s*:\s*-?200\s*(?:to|\.\.)\s*200", "Long-Term Bond range: -300 to 300"),
+        (r"(?i)trust\s+level\s+range\s*:\s*-?50\s*(?:to|\.\.)\s*50", "Trust Level range: -100 to 100"),
+        (r"(?i)front\s+porch\s+range\s*:\s*-?200\s*to\s*200", "Front Porch range: -300 to 300"),
+        (r"(?i)front\s+porch\s+range\s*:\s*-?50\s*to\s*50", "Front Porch range: -100 to 100"),
+        (r"(?i)late\s+afternoon", "Afternoon"),
+    ]
+    out = text
+    for pat, rep in replacements:
+        out = re.sub(pat, rep, out)
+    return out
+
+
+def _merge_front_porch_state_tracking_section(template):
+    if not isinstance(template, dict):
+        return template, False
+    sections = template.get("sections")
+    if not isinstance(sections, list):
+        return template, False
+    changed = False
+    for section in sections:
+        if not isinstance(section, dict) or str(section.get("id") or "").strip() != "state_tracking":
+            continue
+        desired_description = "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon."
+        if str(section.get("description") or "") != desired_description:
+            old = str(section.get("description") or "")
+            section["description"] = _upgrade_front_porch_prompt_text(old)
+            if not section["description"] or section["description"] == old:
+                section["description"] = desired_description
+            changed = True
+        fields = section.get("fields")
+        if not isinstance(fields, list):
+            fields = []
+            section["fields"] = fields
+            changed = True
+        field_map = {}
+        for item in fields:
+            if isinstance(item, dict) and item.get("id"):
+                field_map[str(item.get("id"))] = item
+        desired_fields = [
+            ("emotion", "Starting Emotion", "Primary emotional state."),
+            ("objective", "Current Objective", "Immediate goal."),
+            ("short_term_bond", "Short-Term Bond", "Front Porch range: -300 to 300."),
+            ("long_term_bond", "Long-Term Bond", "Front Porch range: -300 to 300."),
+            ("trust_level", "Trust Level", "Front Porch range: -100 to 100."),
+            ("time_of_day", "Time of Day", "Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon."),
+        ]
+        new_fields = []
+        for fid, label, hint in desired_fields:
+            existing = field_map.get(fid)
+            if isinstance(existing, dict):
+                if str(existing.get("label") or "") != label:
+                    existing["label"] = label
+                    changed = True
+                new_hint = _upgrade_front_porch_prompt_text(str(existing.get("hint") or ""))
+                if not new_hint or fid in {"short_term_bond", "long_term_bond", "trust_level", "time_of_day"}:
+                    new_hint = hint
+                if str(existing.get("hint") or "") != new_hint:
+                    existing["hint"] = new_hint
+                    changed = True
+                if "enabled" not in existing:
+                    existing["enabled"] = True
+                    changed = True
+                new_fields.append(existing)
+            else:
+                new_fields.append({"id": fid, "label": label, "enabled": True, "hint": hint})
+                changed = True
+        if len(new_fields) != len(fields) or any(a is not b for a,b in zip(new_fields,fields[:len(new_fields)])):
+            section["fields"] = new_fields
+            changed = True
+        break
+    return template, changed
+
+
+def _migrate_front_porch_templates_and_prompts():
+    migrated = []
+    try:
+        # Main active template
+        if TEMPLATE_FILE.exists():
+            try:
+                data = json.loads(TEMPLATE_FILE.read_text(encoding="utf-8"))
+                data, changed = _merge_front_porch_state_tracking_section(data)
+                if changed:
+                    TEMPLATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                    migrated.append(str(TEMPLATE_FILE))
+            except Exception:
+                pass
+
+        # Saved custom templates
+        if TEMPLATES_DIR.exists():
+            for path in TEMPLATES_DIR.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                changed = False
+                if isinstance(payload, dict) and isinstance(payload.get("template"), dict):
+                    new_tpl, inner_changed = _merge_front_porch_state_tracking_section(payload.get("template"))
+                    if inner_changed:
+                        payload["template"] = new_tpl
+                        changed = True
+                elif isinstance(payload, dict) and isinstance(payload.get("sections"), list):
+                    payload, changed = _merge_front_porch_state_tracking_section(payload)
+                if changed:
+                    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                    migrated.append(str(path))
+
+        # Prompt text files in user data root (current and future-proof)
+        for base in [DATA_DIR, TEMPLATES_DIR]:
+            if not Path(base).exists():
+                continue
+            for path in Path(base).glob("*.txt"):
+                try:
+                    original = path.read_text(encoding="utf-8")
+                    updated = _upgrade_front_porch_prompt_text(original)
+                    if updated != original:
+                        path.write_text(updated, encoding="utf-8")
+                        migrated.append(str(path))
+                except Exception:
+                    pass
+        return migrated
+    except Exception:
+        return migrated
+
+
 class TextRefusalForLiteFallback(Exception):
     """Raised when the primary text model refuses and backup Lite Mode should take over."""
 
@@ -351,7 +483,23 @@ DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and
                           {'id': 'objective',
                            'label': 'Current Objective',
                            'enabled': True,
-                           'hint': 'Immediate goal.'}]},
+                           'hint': 'Immediate goal.'},
+                          {'id': 'short_term_bond',
+                           'label': 'Short-Term Bond',
+                           'enabled': True,
+                           'hint': 'Front Porch range: -300 to 300.'},
+                          {'id': 'long_term_bond',
+                           'label': 'Long-Term Bond',
+                           'enabled': True,
+                           'hint': 'Front Porch range: -300 to 300.'},
+                          {'id': 'trust_level',
+                           'label': 'Trust Level',
+                           'enabled': True,
+                           'hint': 'Front Porch range: -100 to 100.'},
+                          {'id': 'time_of_day',
+                           'label': 'Time of Day',
+                           'enabled': True,
+                           'hint': 'Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon.'}]},
               {'id': 'stable_diffusion',
                'title': 'Stable Diffusion Prompt',
                'enabled': False,
@@ -404,12 +552,15 @@ EMOTION_OPTIONS = [
 class Api:
     def __init__(self):
         self.settings = self._load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        migrated = _migrate_front_porch_templates_and_prompts()
         self.template = self._normalise_template(self._load_json(TEMPLATE_FILE, DEFAULT_TEMPLATE))
         self._save_json(TEMPLATE_FILE, self.template)
         self.cancel_event = threading.Event()
         self.window = None
         self._last_browser_description_source = "extracted"
         self._init_library_db()
+        if migrated:
+            self._log_event("front_porch_template_prompt_migration", {"files": migrated})
 
     def _load_json(self, path, default):
         path = Path(path)
