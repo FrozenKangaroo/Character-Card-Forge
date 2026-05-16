@@ -60,6 +60,66 @@ function showRandomTip(forceDifferent = false) {
   tipText.textContent = next;
 }
 
+function setTextareaValue(id, value) {
+  const el = $('#' + id);
+  if (el) el.value = value || '';
+}
+
+function clearGenerationArtifacts() {
+  lastQnaAnswers = '';
+  currentBrowserDescription = '';
+  emotionImageState = [];
+  setTextareaValue('qaAnswersText', '');
+  setTextareaValue('outputText', '');
+  setTextareaValue('followupText', '');
+  const emotions = $('#emotionImages');
+  if (emotions) emotions.innerHTML = '';
+  const generated = $('#generatedImages');
+  if (generated) generated.innerHTML = '';
+  const cardImage = $('#cardImagePath');
+  if (cardImage) cardImage.value = '';
+  if (settings) settings.cardImagePath = '';
+}
+
+window.ccfStreamUpdate = function(payload) {
+  try {
+    const target = String(payload?.target || '').toLowerCase();
+    // Emotion prompt generation is an internal JSON request. It should never
+    // replace the main generated card text, even if an older backend emits
+    // a stray output stream event.
+    if (target === 'output' && /emotion/i.test(String(currentTask || ''))) return;
+    const text = String(payload?.text || '');
+    const chunk = String(payload?.chunk || '');
+    const id = target === 'qa' ? 'qaAnswersText' : target === 'output' ? 'outputText' : '';
+    if (!id) return;
+    const el = $('#' + id);
+    if (!el) return;
+    el.value = text || (el.value + chunk);
+    el.scrollTop = el.scrollHeight;
+    updateAvailability();
+  } catch (_) {}
+};
+
+window.ccfEmotionProgress = function(payload) {
+  try {
+    const msg = payload?.message || '';
+    if (msg) setStatus(msg, '');
+    if (payload?.phase === 'prompts') setBusy('GENERATING EMOTION PROMPTS — AI is preparing image prompts…');
+    if (payload?.phase === 'images') setBusy('GENERATING EMOTION IMAGES — SD Forge / Automatic1111 is working…');
+  } catch (_) {}
+};
+
+window.ccfEmotionImageGenerated = function(image) {
+  try {
+    if (!image || !image.emotion) return;
+    const idx = emotionImageState.findIndex(x => x.emotion === image.emotion);
+    if (idx >= 0) emotionImageState[idx] = {...image};
+    else emotionImageState.push({...image});
+    renderEmotionImageResults([], false);
+    setStatus(`Generated ${image.emotion}.png (${emotionImageState.length} so far)…`, 'ok');
+  } catch (_) {}
+};
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -109,8 +169,38 @@ function setBusy(task) {
   if (banner) {
     if (busyText) busyText.textContent = task || '';
     banner.classList.toggle('hidden', !task);
+    banner.classList.toggle('ai-only-busy', isAiGenerationBusy());
   }
   updateAvailability();
+}
+
+function isAiGenerationBusy() {
+  if (!isBusy) return false;
+  const task = String(currentTask || '').toLowerCase();
+  return /\b(ai|generation|generating|q&a|vision|stable diffusion|sd forge|sd images|emotion image|tag cleanup|description|revision|revise|suggestion|random theme|transfer to builders|backup text model|model)\b/.test(task);
+}
+
+function isInterfaceLocked() {
+  // AI work should only lock other AI actions. Non-AI file/browser/editor controls stay usable.
+  return isBusy && !isAiGenerationBusy();
+}
+
+function isAiActionElement(el) {
+  if (!el) return false;
+  const id = String(el.id || '');
+  if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
+  if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
+  const aiIds = new Set([
+    'generateBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeVisionToBuildersBtn',
+    'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
+    'generateImagesBtn','generateEmotionImagesBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
+  ]);
+  if (aiIds.has(id)) return true;
+  return /(?:^|)(ai|suggest|analyze|generate|revise|random)(?:|$)/i.test(id) && !/export|copy|load|select|clear|save|delete|folder|refresh|zip/i.test(id);
+}
+
+function isAiDropZoneId(id) {
+  return ['visionDropZone','builderCardDropZoneMain','builderCardDropZoneMode'].includes(String(id || ''));
 }
 function describeBackupInfo(info, fallbackPhase) {
   if (!info || !info.used) return '';
@@ -155,7 +245,7 @@ function setVisionImagePath(path) {
   const analyze = $('#analyzeVisionBtn');
   if (analyze) {
     analyze.dataset.visionPath = value;
-    analyze.disabled = isBusy ? true : !value;
+    analyze.disabled = isInterfaceLocked() || isAiGenerationBusy() ? true : !value;
     analyze.title = value ? '' : 'Select a vision image first.';
   }
 }
@@ -169,10 +259,11 @@ function bindDropZone(id, options) {
   const zone = $('#' + id);
   if (!zone) return;
   const input = options.inputId ? $('#' + options.inputId) : null;
-  const setActive = (active) => zone.classList.toggle('drag-over', !!active && !isBusy);
+  const isBlocked = () => isInterfaceLocked() || (isAiGenerationBusy() && isAiDropZoneId(id));
+  const setActive = (active) => zone.classList.toggle('drag-over', !!active && !isBlocked());
   ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, (e) => {
     preventDragDefaults(e);
-    if (isBusy) return;
+    if (isBlocked()) return;
     setActive(true);
   }));
   ['dragleave', 'dragend'].forEach(evt => zone.addEventListener(evt, (e) => {
@@ -182,8 +273,8 @@ function bindDropZone(id, options) {
   zone.addEventListener('drop', async (e) => {
     preventDragDefaults(e);
     setActive(false);
-    if (isBusy) {
-      setStatus('Please wait until the current task finishes before dropping files.', 'error');
+    if (isBlocked()) {
+      setStatus(isAiGenerationBusy() ? 'An AI task is running. AI-assisted drop zones are paused, but other controls are still usable.' : 'Please wait until the current task finishes before dropping files.', 'error');
       return;
     }
     const files = [...(e.dataTransfer?.files || [])];
@@ -191,7 +282,7 @@ function bindDropZone(id, options) {
     await options.onFiles(files);
   });
   zone.addEventListener('click', () => {
-    if (isBusy) return;
+    if (isBlocked()) return;
     if (input) input.click();
     else if (options.onClick) options.onClick();
   });
@@ -200,24 +291,41 @@ function bindDropZone(id, options) {
 function updateAvailability() {
   const output = hasOutput();
   const sdReady = hasStableDiffusionPrompt();
-  const visionReady = hasVisionImageSelected();
+  const aiBusy = isAiGenerationBusy();
+  const hardLocked = isInterfaceLocked();
+
   $$('button, select, input, textarea').forEach(el => {
     if (el.id === 'status') return;
-    el.disabled = isBusy;
+    if (hardLocked) {
+      el.disabled = true;
+    } else if (aiBusy) {
+      el.disabled = isAiActionElement(el);
+    } else {
+      el.disabled = false;
+    }
   });
+
   const stopBtn = $('#stopTaskBtn');
   if (stopBtn) stopBtn.disabled = !isBusy;
-  ['conceptAttachmentDropZone','visionDropZone','savedFileDropZone','cardImageDropZone','builderCardDropZoneMain','builderCardDropZoneMode','conceptCardDropZoneMain','conceptCardDropZoneMode'].forEach(id => { const z = $('#'+id); if (z) z.classList.toggle('disabled', isBusy); });
-  if (!isBusy) {
-    ['copyBtn','exportBtn','reviseBtn','generateEmotionImagesBtn','zipEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
+
+  ['conceptAttachmentDropZone','visionDropZone','savedFileDropZone','cardImageDropZone','builderCardDropZoneMain','builderCardDropZoneMode','conceptCardDropZoneMain','conceptCardDropZoneMode'].forEach(id => {
+    const z = $('#'+id);
+    if (z) z.classList.toggle('disabled', hardLocked || (aiBusy && isAiDropZoneId(id)));
+  });
+
+  if (!hardLocked) {
+    ['copyBtn','exportBtn','zipEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
+    ['reviseBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output || aiBusy; });
+    const genCard = $('#generateBtn');
+    if (genCard) genCard.disabled = aiBusy;
     const genImg = $('#generateImagesBtn');
-    if (genImg) genImg.disabled = !sdReady;
+    if (genImg) genImg.disabled = !sdReady || aiBusy;
     const analyze = $('#analyzeVisionBtn');
     if (analyze) {
       const path = getVisionImagePath();
       analyze.dataset.visionPath = path;
-      analyze.disabled = !path;
-      analyze.title = path ? '' : 'Select a vision image first.';
+      analyze.disabled = !path || aiBusy;
+      analyze.title = path ? (aiBusy ? 'An AI task is already running.' : '') : 'Select a vision image first.';
     }
     const follow = $('#followupText');
     if (follow) follow.disabled = !output;
@@ -291,6 +399,7 @@ function hydrateSettings() {
   $('#maxOutputTokens').value = settings.maxOutputTokens ?? 131000;
   const apiTimeoutSeconds = $('#apiTimeoutSeconds'); if (apiTimeoutSeconds) apiTimeoutSeconds.value = settings.apiTimeoutSeconds ?? 300;
   const apiRetryCount = $('#apiRetryCount'); if (apiRetryCount) apiRetryCount.value = settings.apiRetryCount ?? 2;
+  const streamAi = $('#streamAi'); if (streamAi) streamAi.checked = !!settings.streamAi;
   const frontPorchDataFolder = $('#frontPorchDataFolder'); if (frontPorchDataFolder) frontPorchDataFolder.value = settings.frontPorchDataFolder || '';
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
   renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
@@ -482,6 +591,7 @@ function collectSettings() {
     maxOutputTokens: Number($('#maxOutputTokens').value || 131000),
     apiTimeoutSeconds: Number(($('#apiTimeoutSeconds') ? $('#apiTimeoutSeconds').value : 300) || 300),
     apiRetryCount: Number(($('#apiRetryCount') ? $('#apiRetryCount').value : 2) || 2),
+    streamAi: !!($('#streamAi') && $('#streamAi').checked),
     frontPorchDataFolder: ($('#frontPorchDataFolder') ? $('#frontPorchDataFolder').value.trim() : ''),
     sdBaseUrl: $('#sdBaseUrl').value.trim() || 'http://127.0.0.1:7860',
     sdModel: ($('#sdModel') ? $('#sdModel').value.trim() : ''),
@@ -1048,6 +1158,7 @@ function bindActions() {
   $('#aiTagRenameAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('rename'));
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserLoadBtn')?.addEventListener('click', loadSelectedCharacterWorkspace);
+  $('#browserDeleteSelectedBtn')?.addEventListener('click', deleteSelectedCharacterCard);
   $('#browserExportPngBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_png'));
   $('#browserExportJsonBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_json'));
   $('#browserEmotionZipBtn')?.addEventListener('click', zipSelectedCharacterEmotions);
@@ -1423,7 +1534,7 @@ async function transferConceptToBuilders() {
 }
 
 async function aiRandomizeBuilderPreset({ build = false } = {}) {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   settings = collectSettings();
   const missing = validateTextApiSettings({ ...settings, model: settings.aiSuggestionModel || settings.model });
   if (missing) {
@@ -1590,7 +1701,7 @@ function applySuggestionToField(fieldId, value, custom) {
 }
 
 async function suggestBuilderField(fieldId) {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   settings = collectSettings();
   const missing = validateTextApiSettings({ ...settings, model: settings.aiSuggestionModel || settings.model });
   if (missing) {
@@ -1625,7 +1736,7 @@ async function suggestBuilderField(fieldId) {
 
 
 async function newCard() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   const hasWork = $('#conceptText').value.trim() || $('#outputText').value.trim() || $('#followupText').value.trim() || $('#visionDescription').value.trim() || $('#visionImagePath').value.trim() || $('#cardImagePath').value.trim();
   if (hasWork && !confirm('Clear the current character draft and start a new card?')) return;
   $('#conceptText').value = '';
@@ -1668,7 +1779,7 @@ async function newCard() {
 }
 
 async function loadSelectedTemplate() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   const name = $('#templateSelect').value || 'Default';
   if (!confirm(`Load prompt template "${name}"? Unsaved edits to the current template will be replaced.`)) return;
   setBusy('LOADING PROMPT TEMPLATE…');
@@ -1690,7 +1801,7 @@ async function loadSelectedTemplate() {
 }
 
 async function saveTemplateAs() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   const name = ($('#templateNameInput').value || '').trim();
   if (!name) { setStatus('Enter a template name first.', 'error'); return; }
   setBusy('SAVING PROMPT TEMPLATE…');
@@ -1710,7 +1821,7 @@ async function saveTemplateAs() {
 }
 
 async function deleteSelectedTemplate() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   const name = $('#templateSelect').value || 'Default';
   if (name === 'Default') { setStatus('Default template cannot be deleted.', 'error'); return; }
   if (!confirm(`Delete prompt template "${name}"?`)) return;
@@ -1745,7 +1856,7 @@ async function stopCurrentTask() {
 }
 
 async function selectVisionImage() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   setBusy('SELECTING VISION IMAGE…');
   try {
     const res = await window.pywebview.api.pick_image_file('vision');
@@ -1918,7 +2029,7 @@ function renderConceptAttachments() {
 }
 
 async function attachConceptFiles() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   setBusy('ATTACHING CONCEPT FILE(S)…');
   try {
     const res = await window.pywebview.api.pick_concept_attachments();
@@ -2800,6 +2911,27 @@ async function moveSelectedCharactersToFolder() {
   }
 }
 
+async function deleteSelectedCharacterCard() {
+  if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
+  const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
+  const name = card?.name || 'this character';
+  const ok = confirm(`Delete saved card "${name}" from Character Card Forge?\n\nThis deletes the physical saved/export folder for this card only. It does not delete virtual folders and does not touch Front Porch AI database entries.`);
+  if (!ok) return;
+  setBusy('DELETING SAVED CHARACTER CARD…');
+  try {
+    const res = await window.pywebview.api.delete_character_project_directories([selectedCharacterProjectPath]);
+    if (!res.ok) throw new Error(res.error || 'Delete failed.');
+    browserSelectedProjects.delete(selectedCharacterProjectPath);
+    selectedCharacterProjectPath = '';
+    await refreshCharacterBrowser(false);
+    setStatus(`Deleted saved card folder for ${name}. Front Porch was not touched.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 async function deleteSelectedCharacterDirectories() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
@@ -3646,6 +3778,7 @@ async function analyzeSelectedImageToBuilders() {
 
 async function generateCard() {
   if (!handleUnbuiltBuilderWarning()) return;
+  clearGenerationArtifacts();
   setStatus('Starting generation…', '');
   $$('.nav').forEach(b => b.classList.remove('active'));
   $$('.tab').forEach(t => t.classList.remove('active'));
@@ -3667,7 +3800,9 @@ async function generateCard() {
     let qaAnswers = '';
     if (template?.qa?.enabled) {
       setBusy('PRE-GENERATION Q&A — interviewing the character(s)…');
-      setStatus('Running Q&A interview pass before card generation…', '');
+      setStatus(settings.streamAi ? 'Running Q&A interview pass with streaming enabled…' : 'Running Q&A interview pass before card generation…', '');
+      const qaBoxStream = $('#qaAnswersText');
+      if (qaBoxStream && settings.streamAi) qaBoxStream.value = '';
       const qaRes = await window.pywebview.api.generate_qa_context(conceptForModel, template, settings);
       if (!qaRes.ok) throw new Error(qaRes.error || 'Q&A generation failed.');
       qaAnswers = qaRes.qaAnswers || '';
@@ -3684,7 +3819,9 @@ async function generateCard() {
       const qaBox = $('#qaAnswersText');
       if (qaBox) qaBox.value = 'Q&A was disabled for this generation.';
     }
-    setBusy('CHARACTER GENERATION — writing the final card…');
+    setBusy(settings.streamAi ? 'CHARACTER GENERATION — streaming the final card…' : 'CHARACTER GENERATION — writing the final card…');
+    const outBoxStream = $('#outputText');
+    if (outBoxStream && settings.streamAi) outBoxStream.value = '';
     const res = await window.pywebview.api.generate_with_qa_answers(conceptForModel, template, settings, qaAnswers);
     if (!res.ok) throw new Error(res.error || 'Generation failed.');
     $('#outputText').value = res.output;
@@ -3752,7 +3889,7 @@ async function reviseCard() {
 }
 
 async function selectCardImage() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   setBusy('SELECTING CARD IMAGE…');
   try {
     const res = await window.pywebview.api.pick_image_file('card');
@@ -3884,7 +4021,7 @@ function renderEmotionImageResults(images, replace=true) {
     $('.emotion-prompt-editor', card).addEventListener('input', (ev) => { emotionImageState[index].prompt = ev.target.value; });
     $('.emotion-negative-editor', card).addEventListener('input', (ev) => { emotionImageState[index].negativePrompt = ev.target.value; });
     $('.regen-emotion-btn', card).addEventListener('click', async () => {
-      if (isBusy) return;
+      if (isInterfaceLocked()) return;
       await regenerateEmotionImage(index);
     });
     holder.appendChild(card);
@@ -3921,23 +4058,34 @@ async function generateEmotionImages() {
   settings = collectSettings();
   await window.pywebview.api.save_settings(settings);
   if (!hasOutput()) { setStatus('Generate or load a card first.', 'error'); return; }
-  setBusy('GENERATING EMOTION IMAGES — SD Forge / Automatic1111 is working…');
-  setStatus('Generating emotion images for the selected Front Porch emotions…', '');
+  emotionImageState = [];
+  renderEmotionImageResults([], false);
+  setBusy('GENERATING EMOTION PROMPTS — AI is preparing image prompts…');
+  setStatus('Generating emotion prompts with the AI model…', '');
   try {
     const res = await window.pywebview.api.generate_emotion_images($('#outputText').value, settings.emotionImageEmotions, settings);
-    if (!res.ok) throw new Error(res.error || 'Emotion image generation failed.');
-    renderEmotionImageResults(res.images || []);
-    setStatus(`Generated ${res.images?.length || 0} emotion image(s) in ${res.folder}. Autosaving workspace…`, 'ok');
+    if (res.cancelled) {
+      if (Array.isArray(res.images) && res.images.length) renderEmotionImageResults(res.images || []);
+      setStatus(`Emotion generation stopped. Kept ${emotionImageState.length || res.images?.length || 0} generated image(s).`, 'error');
+      if ((emotionImageState.length || res.images?.length || 0) > 0) await saveCurrentWorkspace('silent');
+      return;
+    }
+    if (!res.ok) {
+      if (Array.isArray(res.images) && res.images.length) renderEmotionImageResults(res.images || []);
+      throw new Error(res.error || 'Emotion image generation failed.');
+    }
+    renderEmotionImageResults(res.images || emotionImageState || []);
+    setStatus(`Generated ${res.images?.length || emotionImageState.length || 0} emotion image(s) in ${res.folder}. Autosaving workspace…`, 'ok');
     await saveCurrentWorkspace('silent');
   } catch (err) {
-    setStatus(err.message || String(err), 'error');
+    setStatus((err.message || String(err)) + (emotionImageState.length ? ` Kept ${emotionImageState.length} generated image(s).` : ''), 'error');
   } finally {
     setBusy('');
   }
 }
 
 async function createEmotionZip() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   if (!hasOutput()) { setStatus('Generate or load a card first.', 'error'); return; }
   setBusy('CREATING FRONT PORCH EMOTION ZIP…');
   setStatus('Creating import-ready emotion image zip…', '');
@@ -3954,7 +4102,7 @@ async function createEmotionZip() {
 
 
 async function loadSavedCardOrProject() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   setBusy('LOADING SAVED CARD / PROJECT…');
   setStatus('Loading saved character card or project…', '');
   try {
@@ -4028,7 +4176,7 @@ async function applyCardToMainConceptResult(res, sourceLabel) {
 }
 
 async function loadCardToMainConceptNative() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   if (!confirmLoadCardToMainConceptWarning()) return;
   settings = collectSettings();
   setBusy('LOAD CARD TO MAIN CONCEPT — choose V2/V3 card…');
@@ -4051,7 +4199,7 @@ async function loadCardToMainConceptNative() {
 async function importCardToMainConceptFiles(files) {
   const file = [...(files || [])][0];
   if (!file) return;
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   if (!confirmLoadCardToMainConceptWarning()) return;
   settings = collectSettings();
   setBusy('LOAD CARD TO MAIN CONCEPT — reading V2/V3 card…');
@@ -4106,7 +4254,7 @@ async function applyCardToBuildersResult(res, sourceLabel) {
 }
 
 async function loadCardToBuildersNative() {
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   if (!confirmLoadCardToBuildersWarning()) return;
   settings = collectSettings();
   const missing = validateTextApiSettings(settings);
@@ -4136,7 +4284,7 @@ async function loadCardToBuildersNative() {
 async function importBuilderCardFiles(files) {
   const file = [...(files || [])][0];
   if (!file) return;
-  if (isBusy) return;
+  if (isInterfaceLocked()) return;
   if (!confirmLoadCardToBuildersWarning()) return;
   settings = collectSettings();
   const missing = validateTextApiSettings(settings);

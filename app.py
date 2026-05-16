@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
     "cardImagePath": "",
     "sdBaseUrl": "http://127.0.0.1:7860",
     "sdModel": "",
+    "streamAi": False,
     "sdSteps": 28,
     "sdCfgScale": 7.0,
     "sdSampler": "Euler a",
@@ -262,6 +263,7 @@ class Api:
         self.template = self._normalise_template(self._load_json(TEMPLATE_FILE, DEFAULT_TEMPLATE))
         self._save_json(TEMPLATE_FILE, self.template)
         self.cancel_event = threading.Event()
+        self.window = None
         self._last_browser_description_source = "extracted"
         self._init_library_db()
 
@@ -899,6 +901,7 @@ class Api:
         settings["frontPorchDataFolder"] = str(settings.get("frontPorchDataFolder") or "").strip()
         settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
         settings["sdModel"] = str(settings.get("sdModel") or "").strip()
+        settings["streamAi"] = bool(settings.get("streamAi"))
         merges = settings.get("browserTagMerges") if isinstance(settings.get("browserTagMerges"), dict) else {}
         clean_merges = {}
         for raw_from, raw_to in merges.items():
@@ -1565,6 +1568,9 @@ class Api:
             desc = section.get("description", "")
             if desc:
                 lines.append(desc)
+            if section.get("id") == "stable_diffusion":
+                lines.append("Return only these labels and their comma-separated prompt text: Positive Prompt: ... and Negative Prompt: ...")
+                lines.append("Do not echo helper text, ordering guidance, field descriptions, or explanations inside the Stable Diffusion Prompt section.")
             if section.get("id") == "first_message":
                 lines.append(f"First message style: {style_text}")
             if section.get("id") == "example_dialogues":
@@ -1588,7 +1594,10 @@ class Api:
             for field in fields:
                 label = field.get("label", "Field")
                 hint = field.get("hint", "")
-                lines.append(f"- {label}:" + (f" {hint}" if hint else ""))
+                if section.get("id") == "stable_diffusion":
+                    lines.append(f"- {label}:")
+                else:
+                    lines.append(f"- {label}:" + (f" {hint}" if hint else ""))
             lines.append("")
         lines.append("------------------------------------------------")
         lines.append("CHARACTER CONCEPT")
@@ -1707,6 +1716,73 @@ class Api:
     def _get_backup_info(self):
         return self._last_backup_info or {"used": False}
 
+    def _emit_frontend_event(self, event_name, payload=None):
+        """Best-effort UI callback used for streaming/progress updates."""
+        try:
+            if not getattr(self, "window", None):
+                return
+            js = f"window.{event_name} && window.{event_name}({json.dumps(payload or {}, ensure_ascii=False)});"
+            self.window.evaluate_js(js)
+        except Exception:
+            # UI updates must never break generation.
+            pass
+
+    def _stream_target_for_attempt(self, settings, attempt_label):
+        # Only stream into visible UI text boxes when the caller explicitly asks for it.
+        # Several internal AI jobs also use the generic "primary" attempt label
+        # (emotion prompt generation, JSON cleanup, tag suggestions, browser summaries).
+        # The old inference treated any "primary" response as final card output,
+        # which could overwrite the Full Text Output with internal JSON prompts.
+        explicit = str((settings or {}).get("_streamTarget") or "").strip().lower()
+        if explicit in {"qa", "output"}:
+            return explicit
+        return ""
+
+    def _emit_stream_chunk(self, settings, attempt_label, chunk, full_text=None):
+        if not chunk:
+            return
+        target = self._stream_target_for_attempt(settings, attempt_label)
+        if not target:
+            return
+        self._emit_frontend_event("ccfStreamUpdate", {
+            "target": target,
+            "chunk": chunk,
+            "text": full_text or "",
+            "attempt": attempt_label,
+        })
+
+    def _read_streaming_chat_response(self, resp, settings, attempt_label):
+        content_parts = []
+        for raw_line in resp:
+            self._raise_if_cancelled()
+            try:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if not line:
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                data = json.loads(line)
+            except Exception:
+                continue
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0] or {}
+            delta = choice.get("delta") or {}
+            chunk = delta.get("content")
+            if chunk is None:
+                msg = choice.get("message") or {}
+                chunk = msg.get("content")
+            if chunk:
+                content_parts.append(str(chunk))
+                self._emit_stream_chunk(settings, attempt_label, str(chunk), "".join(content_parts))
+        return "".join(content_parts).strip()
+
     def _chat_once(self, prompt, settings, model, attempt_label="primary"):
         self._raise_if_cancelled()
         base = (settings.get("apiBaseUrl") or "").rstrip("/")
@@ -1721,6 +1797,8 @@ class Api:
             "temperature": float(settings.get("temperature", 0.75)),
             "max_tokens": int(settings.get("maxOutputTokens", DEFAULT_SETTINGS["maxOutputTokens"])),
         }
+        if settings.get("streamAi"):
+            payload["stream"] = True
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
         req.add_header("Content-Type", "application/json")
         if key:
@@ -1729,6 +1807,11 @@ class Api:
         try:
             with self._urlopen_with_retries(req, settings, timeout=180, label="Text generation") as resp:
                 self._raise_if_cancelled()
+                if settings.get("streamAi"):
+                    content = self._read_streaming_chat_response(resp, settings, attempt_label)
+                    self._raise_if_cancelled()
+                    self._log_event("text_generation_response", {"attempt": attempt_label, "model": model, "streamed": True, "looks_like_refusal": self._looks_like_text_refusal(content), "preview": content[:800]})
+                    return content
                 data = json.loads(resp.read().decode("utf-8"))
                 self._raise_if_cancelled()
         except urllib.error.HTTPError as e:
@@ -2048,12 +2131,65 @@ class Api:
                 blocks.append("------------------------------------------------\n" + titles.get(sid, sid.replace("_", " ").title()) + "\n\n" + body.strip())
         return "\n\n".join(blocks).strip()
 
-    def _generate_template_qa(self, concept, template, settings):
+    def _qa_enabled_questions(self, template):
         template = self._normalise_template(template or self.template)
         qa = template.get("qa", {}) or {}
         if not qa.get("enabled"):
-            return ""
-        questions = [str(q).strip() for q in qa.get("questions", []) if str(q).strip()]
+            return []
+        return [str(q).strip() for q in qa.get("questions", []) if str(q).strip()]
+
+    def _qa_answered_indexes(self, answers, question_count):
+        text = str(answers or "")
+        answered = set()
+        for match in re.finditer(r"(?im)^\s*A\s*(\d{1,3})\s*[:：\-]\s*(.+)$", text):
+            try:
+                idx = int(match.group(1))
+            except Exception:
+                continue
+            body = (match.group(2) or "").strip()
+            if 1 <= idx <= question_count and body and not re.fullmatch(r"(?is)(?:n/?a|none|skip(?:ped)?|unknown|no answer)[.\s]*", body):
+                answered.add(idx)
+        if not answered:
+            for i in range(1, question_count + 1):
+                if re.search(rf"(?is)(?:^|\n)\s*(?:Q\s*)?{i}\s*[:.)\-].{{0,700}}?(?:A\s*{i}\s*[:：\-]|Answer\s*[:：\-])\s*\S", text):
+                    answered.add(i)
+        return answered
+
+    def _qa_missing_indexes(self, answers, questions):
+        answered = self._qa_answered_indexes(answers, len(questions))
+        return [i for i in range(1, len(questions) + 1) if i not in answered]
+
+    def _retry_missing_qa_answers(self, concept, questions, previous_answers, missing_indexes, settings):
+        missing_lines = []
+        for idx in missing_indexes:
+            if 1 <= idx <= len(questions):
+                missing_lines.append(f"{idx}. {questions[idx - 1]}")
+        prompt = "\n".join([
+            "The previous Q&A answer set skipped one or more required questions.",
+            "Answer ONLY the missing questions below. Use the exact labels Q<number>: and A<number>:. Do not answer any other questions.",
+            "Return only Q&A pairs. No markdown, no commentary.",
+            "",
+            "CHARACTER CONCEPT",
+            concept.strip(),
+            "",
+            "PREVIOUS Q&A ANSWERS",
+            str(previous_answers or "").strip() or "(none)",
+            "",
+            "MISSING QUESTIONS",
+            "\n".join(missing_lines),
+        ]).strip()
+        check = self._context_check(prompt, settings, mode_label="Q&A missing-answer retry")
+        if not check.get("ok"):
+            raise RuntimeError(check.get("error", "Q&A missing-answer retry exceeds context window."))
+        self._log_event("qa_generation_retry_request", {"missing": missing_indexes, "prompt": prompt})
+        qa_settings = {**settings, "_streamTarget": "qa"}
+        extra = self._chat(prompt, qa_settings).strip()
+        self._log_event("qa_generation_retry_response", {"missing": missing_indexes, "answers": extra})
+        return extra
+
+    def _generate_template_qa(self, concept, template, settings):
+        template = self._normalise_template(template or self.template)
+        questions = self._qa_enabled_questions(template)
         if not questions:
             return ""
         lines = [
@@ -2063,6 +2199,8 @@ class Api:
             "If this is a multi-character card, answer each question for the relevant primary characters or as a grouped dynamic when appropriate.",
             "Keep answers concise but specific, emotionally useful, and character-consistent.",
             "Do not add sections from the final character-card template. Return only Q&A pairs.",
+            "Every question is mandatory. Do not skip any question.",
+            "Use the exact labels Q1/A1, Q2/A2, and so on, so the app can verify completion.",
             "",
             "CHARACTER CONCEPT",
             concept.strip(),
@@ -2084,8 +2222,20 @@ class Api:
         if not check.get("ok"):
             raise RuntimeError(check.get("error", "Q&A pre-generation pass exceeds context window."))
         self._log_event("qa_generation_request", {"questions": questions, "prompt": prompt})
-        answers = self._chat(prompt, settings)
+        qa_settings = {**settings, "_streamTarget": "qa"}
+        answers = self._chat(prompt, qa_settings).strip()
         self._log_event("qa_generation_response", {"answers": answers})
+        missing = self._qa_missing_indexes(answers, questions)
+        retries = 0
+        while missing and retries < 2:
+            retries += 1
+            extra = self._retry_missing_qa_answers(concept, questions, answers, missing, settings)
+            if extra:
+                answers = (answers.rstrip() + "\n\n" + extra.strip()).strip()
+            missing = self._qa_missing_indexes(answers, questions)
+        if missing:
+            missing_labels = ", ".join([f"Q{i}" for i in missing])
+            raise RuntimeError(f"Q&A is enabled but the AI skipped required question(s): {missing_labels}. Try again or simplify the Q&A list.")
         return answers.strip()
 
     def generate_qa_context(self, concept, template, settings):
@@ -2129,7 +2279,8 @@ class Api:
             if qa_answers:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
-            output = self._generate_full_or_lite_output(generation_concept, template, merged_settings)
+            output_settings = {**merged_settings, "_streamTarget": "output"}
+            output = self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings))
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -2140,6 +2291,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
+                output = self._clean_generated_output(output)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -2166,7 +2318,8 @@ class Api:
             if qa_answers:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
-            output = self._generate_full_or_lite_output(generation_concept, template, merged_settings)
+            output_settings = {**merged_settings, "_streamTarget": "output"}
+            output = self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings))
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -2177,6 +2330,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
+                output = self._clean_generated_output(output)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -2241,7 +2395,8 @@ class Api:
                 if not check["ok"]:
                     return check
             self._reset_backup_info()
-            output = self._chat(prompt, merged_settings)
+            output_settings = {**merged_settings, "_streamTarget": "output"}
+            output = self._clean_generated_output(self._chat(prompt, output_settings))
             info = self._get_backup_info()
             if info.get("used"):
                 info["phase"] = "followup_revision"
@@ -3538,22 +3693,51 @@ class Api:
             self._log_event('browser_description_generation_failed', {'error': str(e)})
             return fallback
 
+    def _clean_character_tag(self, value):
+        tag = str(value or "").strip().strip(",;|/\\").strip().strip('"\'`“”‘’')
+        tag = re.sub(r"^[-•*]+\s*", "", tag).strip()
+        tag = re.sub(r"\s+", " ", tag)
+        if not tag:
+            return ""
+        low = tag.lower()
+        instruction_bits = [
+            "lowercase", "hyphen-separated", "hyphen seperated", "hyphen-seperated", "maximum", "naximum",
+            "max ", "minimum", "tags only", "comma-separated", "comma separated", "8-12", "8 to 12",
+            "include ", "do not ", "return ", "format", "tag list", "number of tags",
+        ]
+        if any(bit in low for bit in instruction_bits):
+            return ""
+        if re.search(r"\b(?:tags?|maximum|max|minimum|min)\b", low) and re.search(r"\d", low):
+            return ""
+        if len(tag) > 48 or tag.count(" ") >= 5 or any(ch in tag for ch in "{}[]<>#"):
+            return ""
+        tag = tag.replace("_", "-")
+        tag = re.sub(r"\s+", "-", tag.strip().lower())
+        tag = re.sub(r"[^a-z0-9+.-]+", "-", tag)
+        tag = re.sub(r"-{2,}", "-", tag).strip("-.")
+        if not tag or len(tag) > 48:
+            return ""
+        if tag in {"tag", "tags", "none", "n-a", "na", "naximum-15", "maximum-15"}:
+            return ""
+        return tag
+
+    def _clean_character_tags(self, tags):
+        cleaned = []
+        seen = set()
+        for raw in tags or []:
+            tag = self._clean_character_tag(raw)
+            key = self._normalise_tag_key(tag)
+            if tag and key not in seen:
+                seen.add(key)
+                cleaned.append(tag)
+        return cleaned[:30]
+
     def _extract_tags_from_output(self, output, template=None):
         try:
             parsed_tags = self._parse_sections(output or "", template or self.template).get("tags", "")
             if not parsed_tags:
                 parsed_tags = self._section(output or "", "Tags")
-            seen = set()
-            tags = []
-            for raw in re.split(r"[,\n]+", str(parsed_tags or "")):
-                tag = raw.strip().lstrip("-•*").strip()
-                if not tag:
-                    continue
-                key = tag.lower()
-                if key not in seen:
-                    seen.add(key)
-                    tags.append(tag)
-            return tags
+            return self._clean_character_tags(re.split(r"[,\n]+", str(parsed_tags or "")))
         except Exception:
             return []
 
@@ -3622,7 +3806,7 @@ class Api:
                 clean_tags = []
                 seen_for_card = set()
                 for raw in tags:
-                    tag = str(raw or "").strip().strip(",")
+                    tag = self._clean_character_tag(raw)
                     key = self._normalise_tag_key(tag)
                     if not key or key in seen_for_card:
                         continue
@@ -3707,7 +3891,7 @@ class Api:
             clean_map = {}
             for old, new in rename_map.items():
                 old_key = self._normalise_tag_key(old)
-                new_tag = str(new or "").strip().strip(",")
+                new_tag = self._clean_character_tag(new)
                 if old_key and new_tag and old_key != self._normalise_tag_key(new_tag):
                     clean_map[old_key] = new_tag[:120]
             if not clean_map:
@@ -4158,8 +4342,17 @@ class Api:
                     failed.append({"project": str(raw), "error": str(e)})
             for folder in folders:
                 try:
+                    project_paths_in_folder = [str(p.resolve()) for p in folder.glob("*_ccf_project.json")] + [str((folder / "latest_ccf_project.json").resolve())]
                     shutil.rmtree(folder)
                     deleted += 1
+                    try:
+                        with self._library_connect() as conn:
+                            now = time.time()
+                            for pp in project_paths_in_folder:
+                                conn.execute("UPDATE browser_cards SET deleted=1, last_seen_ts=? WHERE project_path=?", (now, pp))
+                            conn.commit()
+                    except Exception:
+                        pass
                 except Exception as e:
                     failed.append({"folder": str(folder), "error": str(e)})
             return {"ok": True, "deleted": deleted, "failed": failed}
@@ -4636,8 +4829,70 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _strip_sd_prompt_guidance(self, text):
+        """Remove template/helper prose that some models echo before real SD prompts."""
+        if not text:
+            return ""
+        lines = str(text).splitlines()
+        cleaned = []
+        guidance_patterns = [
+            r"^\s*positive\s+and\s+negative\s+prompts\s+for\s+image\s+generation\b",
+            r"^\s*positive\s+order\s*:",
+            r"^\s*order\s*:\s*subject\s*[→>\-]",
+            r"^\s*subject\s*[→>\-]\s*traits\s*[→>\-]",
+            r"^\s*comma[-\s]*separated\s+visual\s+descriptors\b",
+            r"^\s*optional\s+image\s+prompt\b",
+            r"^\s*disabled\s+by\s+default\b",
+            r"^\s*low\s+quality,\s*bad\s+anatomy,\s*blurry,\s*watermark,\s*text\s*$",
+        ]
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                cleaned.append(raw)
+                continue
+            if any(re.search(pat, line, re.I) for pat in guidance_patterns):
+                continue
+            cleaned.append(raw)
+        out = "\n".join(cleaned).strip()
+        # If guidance prose appears inline before Positive Prompt, cut it away.
+        m = re.search(r"(?is)(positive\s+prompt\s*[:：].*)$", out)
+        if m:
+            prefix = out[:m.start()].strip()
+            if re.search(r"positive\s+and\s+negative\s+prompts|positive\s+order\s*:", prefix, re.I):
+                out = m.group(1).strip()
+        return out
+
+    def _clean_generated_output(self, output):
+        """Final output cleanup for known prompt/template leakage without removing features."""
+        if not output:
+            return output
+        text = str(output)
+        template = self.template or DEFAULT_TEMPLATE
+        parsed = self._parse_sections(text, template)
+        sd_body = parsed.get("stable_diffusion") or self._section(text, "Stable Diffusion Prompt")
+        if not sd_body:
+            return text
+        cleaned_sd = self._strip_sd_prompt_guidance(sd_body)
+        if cleaned_sd.strip() == sd_body.strip():
+            return text
+        # Replace the body between Stable Diffusion Prompt heading and the next known heading/divider.
+        headings = []
+        for sec in template.get("sections", []):
+            title = str(sec.get("title") or "").strip()
+            if title and title.lower() != "stable diffusion prompt":
+                headings.append(re.escape(title))
+        heading_alt = "|".join(headings) or r"Name|Description|Personality|Scenario|First Message|Example Dialogues|Tags"
+        pattern = re.compile(
+            r"(?is)(^|\n)(\s*-{0,}\s*Stable\s+Diffusion\s+Prompt\s*:?\s*\n)(.*?)(?=\n\s*-{3,}\s*\n\s*(?:" + heading_alt + r")\s*:?\s*\n|\n\s*(?:" + heading_alt + r")\s*:?\s*\n|\Z)"
+        )
+        def repl(m):
+            return m.group(1) + m.group(2) + cleaned_sd.strip() + "\n"
+        new_text, count = pattern.subn(repl, text, count=1)
+        return new_text if count else text
+
     def _extract_sd_prompts(self, output):
         section = self._clean_section_text(self._section(output, "Stable Diffusion Prompt"))
+        section = self._strip_sd_prompt_guidance(section)
         positive = ""
         negative = ""
         if not section:
@@ -4770,7 +5025,10 @@ class Api:
         check = self._context_check(prompt, settings, mode_label="Emotion prompt generation")
         if not check.get("ok"):
             raise RuntimeError(check.get("error", "Emotion prompt generation exceeds context window."))
-        raw = self._chat(prompt, settings)
+        # This is an internal helper request. Never stream its JSON into the
+        # Q&A or Full Text Output boxes.
+        prompt_settings = {**settings, "_streamTarget": "", "streamAi": False}
+        raw = self._chat(prompt, prompt_settings)
         raw = raw.strip()
         m = re.search(r"\{[\s\S]*\}$", raw)
         if m:
@@ -4849,7 +5107,9 @@ class Api:
         emotions = [e for e in emotions if e in EMOTION_OPTIONS]
         if not emotions:
             return {"ok": False, "error": "Select at least one emotion first."}
+        self._emit_frontend_event("ccfEmotionProgress", {"phase": "prompts", "message": "Generating emotion prompts with AI…"})
         prompts = self._build_emotion_prompts(output, emotions, merged_settings)
+        self._emit_frontend_event("ccfEmotionProgress", {"phase": "images", "message": "Generating emotion images with SD Forge / Automatic1111…"})
         base = (merged_settings.get("sdBaseUrl") or "http://127.0.0.1:7860").rstrip("/")
         url = base + "/sdapi/v1/txt2img"
         name = self._extract_name(output) or "character_card"
@@ -4858,27 +5118,32 @@ class Api:
         results = []
         prompt_manifest = {}
         for emo in emotions:
-            self._raise_if_cancelled()
-            emo_prompts = prompts.get(emo, {})
-            prompt_manifest[emo] = emo_prompts
             try:
+                self._raise_if_cancelled()
+                self._emit_frontend_event("ccfEmotionProgress", {"phase": "images", "emotion": emo, "message": f"Generating {emo}.png…"})
+                emo_prompts = prompts.get(emo, {})
+                prompt_manifest[emo] = emo_prompts
                 raw = self._generate_sd_single_image(
                     emo_prompts.get("positive", ""),
                     emo_prompts.get("negative", "low quality, bad anatomy, extra fingers, extra limbs, blurry, watermark, text"),
                     merged_settings,
                     emo,
                 )
+                file_path = folder / f"{emo}.png"
+                file_path.write_bytes(raw)
+                image_item = {
+                    "emotion": emo,
+                    "path": str(file_path),
+                    "dataUrl": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
+                    "prompt": emo_prompts.get("positive", ""),
+                    "negativePrompt": emo_prompts.get("negative", ""),
+                }
+                results.append(image_item)
+                self._emit_frontend_event("ccfEmotionImageGenerated", image_item)
             except Exception as e:
-                return {"ok": False, "error": str(e)}
-            file_path = folder / f"{emo}.png"
-            file_path.write_bytes(raw)
-            results.append({
-                "emotion": emo,
-                "path": str(file_path),
-                "dataUrl": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
-                "prompt": emo_prompts.get("positive", ""),
-                "negativePrompt": emo_prompts.get("negative", ""),
-            })
+                if "cancelled" in str(e).lower():
+                    return {"ok": False, "cancelled": True, "error": str(e), "images": results, "folder": str(folder)}
+                return {"ok": False, "error": str(e), "images": results, "folder": str(folder)}
         manifest_path = folder / f"emotion_prompts_{stamp}.json"
         manifest_path.write_text(json.dumps(prompt_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
         return {"ok": True, "images": results, "folder": str(folder), "manifest": str(manifest_path)}
@@ -5491,7 +5756,7 @@ class Api:
         stable_diffusion = sec_by_id("stable_diffusion", "Stable Diffusion Prompt")
         lorebook_entries = self._parse_lorebook_entries(sec_by_id("lorebook", "Lorebook Entries"))
         front_porch_realism_engine = self._front_porch_realism_engine(state_tracking)
-        tags = [t.strip() for t in sec_by_id("tags", "Tags").replace("\n", ",").split(",") if t.strip()]
+        tags = self._clean_character_tags(sec_by_id("tags", "Tags").replace("\n", ",").split(","))
 
         # New tabbed template model: every enabled section assigned to the
         # Description tab is folded into the Chara V2 data.description field;
@@ -5697,6 +5962,7 @@ def main():
         height=880,
         min_size=(980, 700),
     )
+    api.window = window
     webview.start(gui="qt", debug=False)
 
 if __name__ == "__main__":

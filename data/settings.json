@@ -38,5 +38,6 @@
   "browserVirtualFolders": [],
   "browserVirtualFolderAssignments": {},
   "browserShowSubfolders": false,
-  "settingsSchemaVersion": "0.6.0"
+  "settingsSchemaVersion": "0.6.0",
+  "streamAi": false
 }

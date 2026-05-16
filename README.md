@@ -290,3 +290,39 @@ Virtual folders remain browser-only. They do not move physical files on disk and
 ## Character Browser SQLite cache
 
 Character Browser now uses `data/character_library.sqlite3` as a cached index. The app still scans `exports/` to discover saved projects, but it stores card names, tags, browser descriptions, thumbnail image data, virtual folder membership, and hash checks in SQLite. If a project JSON, latest card PNG, or selected source image changes on disk, the next browser refresh or character open detects the hash change and refreshes the cached row. Editing the output text also autosaves back into the project and refreshes the SQLite cache after a short delay.
+
+## v0.9.18 quality fixes
+
+- Q&A generation now verifies that every enabled Q&A question has an answer before final card generation starts.
+- If the AI skips one or more Q&A questions, the app automatically asks the AI again for only the missing answers.
+- Added a **Delete Saved Card** button for the currently selected Character Browser card. This deletes only the local Character Card Forge saved/export folder and does not touch Front Porch AI entries.
+- Tightened tag cleanup so prompt instructions such as `8-12 lowercase hyphen-separated tags` or `maximum 15` are not saved as real character tags.
+
+
+## v0.9.19 - AI task interface unlock
+
+- AI generation tasks no longer lock the entire interface.
+- While a text/vision/SD/AI cleanup task is running, only other AI-powered controls are disabled.
+- Non-AI actions such as browsing characters, editing text, copying, exporting, selecting images, and organizing folders remain usable where safe.
+- Non-AI file/write operations can still use a full temporary lock when needed.
+
+
+## v0.9.20
+
+- Fixed Stable Diffusion Prompt helper text leaking into generated card output.
+- Stable Diffusion prompt extraction now strips echoed ordering guidance before sending prompts to SD Forge / Automatic1111.
+- The generation prompt now tells models not to echo helper text in the Stable Diffusion section.
+
+## v0.9.21 generation flow polish
+
+- Starting **Generate Card** now clears stale Q&A answers, full text output, generated card images, selected quick-save image state, and previous emotion image results.
+- Added optional **Stream AI text into output boxes** in AI Settings. When enabled, Q&A answers and the final card text appear while the model is responding.
+- Emotion image generation now reports whether it is generating AI prompts or SD images.
+- Emotion images appear one by one as they finish instead of waiting for the whole batch.
+- If emotion image generation is stopped, any images already generated remain visible and can still be saved/exported.
+
+
+## v0.9.22
+
+- Fixed emotion prompt generation streaming into and replacing the main Full Text Output.
+- Internal AI helper calls no longer stream into visible Q&A/Output boxes unless explicitly routed there.
