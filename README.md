@@ -2,7 +2,7 @@
 
 Character Card Forge is a local desktop app for creating AI character cards with an OpenAI-compatible API. It is aimed at roleplay frontends such as Front Porch AI, SillyTavern, Hammer AI, and other Character Card V2-compatible tools.
 
-The app runs locally with Python and PyWebView. Your prompts, templates, generated cards, exported PNGs, and settings are stored in the app folder unless you choose external paths inside the app.
+The app runs locally with Python and PyWebView. The app folder is treated as read-only, so settings, templates, generated images, cached browser data, and exported character cards are stored in a per-user writable data folder. This makes packaged builds such as AppImage, macOS app bundles, and Windows portable/exe bundles work correctly.
 
 ## Features
 
@@ -32,7 +32,7 @@ The app runs locally with Python and PyWebView. Your prompts, templates, generat
 
 1. Install Python 3.10 or newer from the official Python website.
 2. During install, tick **Add python.exe to PATH**.
-3. Extract this zip somewhere writable, such as `Documents\Character Card Forge`.
+3. Extract this zip anywhere you like. The app stores writable data in your user data folder, not beside the app files.
 4. Double-click `setup.bat`.
 5. Double-click `start.bat`.
 
@@ -43,7 +43,7 @@ After the first setup, you normally only need `start.bat`.
 For normal macOS users:
 
 1. Install Python 3.10 or newer from the official Python website or Homebrew.
-2. Extract this zip somewhere writable, such as `Documents/Character Card Forge`.
+2. Extract this zip anywhere you like. The app stores writable data in your user data folder, not beside the app files.
 3. Double-click `setup.command`.
 4. Double-click `start.command`.
 
@@ -81,7 +81,7 @@ Then go back to the concept page, enter a character idea, and generate the card.
 
 ## Character Browser
 
-The Character Browser shows autosaved character projects from `exports/`.
+The Character Browser shows autosaved character projects from the writable user exports folder.
 
 - Sort by newest, oldest, A-Z, or Z-A.
 - Use live search to search character names, browser summaries, output previews, folders, and tags.
@@ -127,13 +127,12 @@ Longer sections such as Lorebook, Custom System Prompt, State Tracking, Alternat
 
 ## Files and folders
 
+The application folder contains only the program and bundled defaults:
+
 ```text
 app.py                  Main backend app
 frontend/               Browser/PyWebView interface
-data/settings.json      Local settings
-data/template.json      Default editable prompt template
-data/templates/         Saved custom templates
-exports/                Exported character cards and projects
+data/                   Bundled default settings/templates only
 setup.sh                Linux setup
 start.sh                Linux start
 setup.command           macOS double-click setup
@@ -144,9 +143,58 @@ setup.bat               Windows setup
 start.bat               Windows start
 ```
 
+Writable user data is stored outside the app folder so packaged builds can run from read-only locations such as AppImage mounts.
+
+Default writable location:
+
+```text
+~/Documents/Character Card Forge/
+```
+
+If `Documents` is unavailable on Linux, the fallback is:
+
+```text
+~/.local/share/Character Card Forge/
+```
+
+Inside that writable folder:
+
+```text
+data/settings.json              Local settings
+data/template.json              Editable prompt template
+data/templates/                 Saved custom templates
+data/character_library.sqlite3  Character Browser cache/library
+exports/                        Exported character cards and saved projects
+```
+
+Advanced/portable override:
+
+```bash
+CCF_DATA_DIR="/path/to/my/Character Card Forge data" ./start.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:CCF_DATA_DIR="D:\Character Card Forge Data"; .\start.bat
+```
+
+
+## AppImage / packaged builds
+
+Character Card Forge is safe to package as an AppImage or similar read-only bundle. At startup it now:
+
+- treats the app/program directory as read-only
+- creates writable folders in the user data location
+- copies bundled default settings/templates into user data only if they do not already exist
+- writes SQLite cache, generated images, imports, logs, templates, and exports outside the AppImage mount
+- disables Python bytecode writes beside `app.py`
+
+This avoids errors caused by trying to create `data/`, `exports/`, `__pycache__/`, or generated image folders inside a read-only AppImage directory.
+
 ## Updating
 
-When replacing the app folder with a newer version, keep your existing `data/` and `exports/` folders if you want to preserve settings, templates, saved projects, and generated cards.
+When replacing the app folder with a newer version, your settings, templates, saved projects, and generated cards are preserved automatically because they live in the writable user data folder, not in the app folder.
 
 If dependencies change, run the setup script again:
 
@@ -326,3 +374,8 @@ Character Browser now uses `data/character_library.sqlite3` as a cached index. T
 
 - Fixed emotion prompt generation streaming into and replacing the main Full Text Output.
 - Internal AI helper calls no longer stream into visible Q&A/Output boxes unless explicitly routed there.
+
+
+## v0.9.25 note
+
+- Stable Diffusion prompt generation now deduplicates and caps negative prompt tags before saving or sending prompts to SD Forge / Automatic1111. This prevents runaway repeated negative prompts when a text model loops on cleanup tags.

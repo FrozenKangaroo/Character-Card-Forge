@@ -29,6 +29,7 @@ let outputEditorSaveTimer = null;
 let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
+let currentLoadedType = "";
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -161,6 +162,23 @@ function hasStableDiffusionPrompt() {
   // Stable Diffusion Prompt without an explicit "Positive Prompt:" label.
   return cleaned.length > 20 && cleaned.includes(',');
 }
+
+function updateImportedCardToolsHint() {
+  const hint = $('#importedCardToolsHint');
+  if (!hint) return;
+  if (!hasOutput()) {
+    hint.textContent = 'Load or import a card first. If it does not already include a Stable Diffusion Prompt, use one of the buttons above to generate and save it.';
+    return;
+  }
+  if (hasStableDiffusionPrompt()) {
+    hint.textContent = 'This card already has a Stable Diffusion Prompt. You can still regenerate it from the current card image or full text output if you want a new one.';
+    return;
+  }
+  const hasImage = !!($('#cardImagePath')?.value || '').trim();
+  hint.textContent = hasImage
+    ? 'This card does not currently have a Stable Diffusion Prompt. Use Vision → SD Prompt to infer one from the current card image, or Full Text → SD Prompt to build one from the loaded metadata.'
+    : 'This card does not currently have a Stable Diffusion Prompt. Use Full Text → SD Prompt to build one from the loaded metadata, or choose a card image first and then use Vision → SD Prompt.';
+}
 function setBusy(task) {
   isBusy = !!task;
   currentTask = task || '';
@@ -193,7 +211,7 @@ function isAiActionElement(el) {
   const aiIds = new Set([
     'generateBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeVisionToBuildersBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
-    'generateImagesBtn','generateEmotionImagesBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
+    'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
   if (aiIds.has(id)) return true;
   return /(?:^|)(ai|suggest|analyze|generate|revise|random)(?:|$)/i.test(id) && !/export|copy|load|select|clear|save|delete|folder|refresh|zip/i.test(id);
@@ -418,10 +436,12 @@ function hydrateSettings() {
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
   browserShowSubfolders = !!settings.browserShowSubfolders;
   const showSubfolders = $('#browserShowSubfolders'); if (showSubfolders) showSubfolders.checked = browserShowSubfolders;
+  updateImportedCardToolsHint();
 }
 
 
 function applyLoadedState(state) {
+  currentLoadedType = String(state?.loadedType || "");
   if (state.settings) {
     settings = state.settings;
     if (!['chara_v2_png','chara_v2_json','markdown'].includes(settings.exportFormat)) settings.exportFormat = 'chara_v2_png';
@@ -464,6 +484,7 @@ function applyLoadedState(state) {
   if (state.builderState) {
     restoreBuilderWorkspaceState(state.builderState);
   }
+  updateImportedCardToolsHint();
 }
 
 function renderTemplateSelector() {
@@ -1132,7 +1153,7 @@ function bindActions() {
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
-  $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); });
+  $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#generateBtn').addEventListener('click', generateCard);
   $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
@@ -1164,6 +1185,7 @@ function bindActions() {
   $('#browserEmotionZipBtn')?.addEventListener('click', zipSelectedCharacterEmotions);
   $('#browserFrontPorchExportBtn')?.addEventListener('click', exportSelectedCharacterToFrontPorch);
   $('#saveWorkspaceBtn')?.addEventListener('click', () => saveCurrentWorkspace('manual'));
+  $('#importLoadedCardBtn')?.addEventListener('click', () => importCurrentOutputToBrowser(true));
   $('#analyzeImageToBuildersMainBtn')?.addEventListener('click', analyzeSelectedImageToBuilders);
   $('#analyzeVisionToBuildersBtn')?.addEventListener('click', analyzeSelectedImageToBuilders);
   $('#transferToBuildersBtn')?.addEventListener('click', transferConceptToBuilders);
@@ -1180,11 +1202,13 @@ function bindActions() {
   $('#exportBtn').addEventListener('click', exportCard);
   $('#selectImageBtn').addEventListener('click', selectCardImage);
   $('#generateImagesBtn').addEventListener('click', generateSdImages);
+  $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
+  $('#generateSdPromptFromOutputBtn')?.addEventListener('click', generateSdPromptFromLoadedOutput);
   $('#generateEmotionImagesBtn').addEventListener('click', generateEmotionImages);
   $('#zipEmotionImagesBtn').addEventListener('click', createEmotionZip);
   $('#selectAllEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = true); });
   $('#clearEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = false); });
-  $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
+  $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
   $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
   $('#clearConceptAttachmentsBtn').addEventListener('click', clearConceptAttachments);
@@ -1197,7 +1221,7 @@ function bindActions() {
 
   bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles });
   bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles });
-  bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles });
+  bindDropZone('savedFileDropZone', { onClick: loadSavedCardOrProject, onFiles: importSavedFiles });
   bindDropZone('builderCardDropZoneMain', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
   bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
   bindDropZone('conceptCardDropZoneMain', { inputId: null, onClick: loadCardToMainConceptNative, onFiles: importCardToMainConceptFiles });
@@ -2614,6 +2638,63 @@ function scheduleOutputEditorAutosave() {
   }, 1500);
 }
 
+async function importCurrentOutputToBrowser(showStatus = true) {
+  if (!hasOutput()) {
+    setStatus('Load or generate a card first.', 'error');
+    return null;
+  }
+  const res = await saveCurrentWorkspace('silent');
+  if (res && showStatus) setStatus(`Imported current card into Character Browser: ${res.folder}`, 'ok');
+  return res;
+}
+
+async function generateSdPromptFromLoadedOutput() {
+  if (isInterfaceLocked()) return;
+  if (!hasOutput()) { setStatus('Load or generate a card first.', 'error'); return; }
+  settings = collectSettings();
+  const missing = validateTextApiSettings(settings);
+  if (missing) { setStatus(missing, 'error'); switchToSettingsTab(); return; }
+  setBusy('GENERATING STABLE DIFFUSION PROMPT FROM FULL TEXT OUTPUT…');
+  try {
+    const res = await window.pywebview.api.generate_sd_prompt_from_output($('#outputText').value, settings);
+    if (!res.ok) throw new Error(res.error || 'Could not generate Stable Diffusion Prompt.');
+    $('#outputText').value = res.output || $('#outputText').value;
+    updateImportedCardToolsHint();
+    await saveCurrentWorkspace('silent');
+    setStatus('Generated Stable Diffusion Prompt from Full Text Output and saved it to the current card.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function generateSdPromptFromLoadedVision() {
+  if (isInterfaceLocked()) return;
+  if (!hasOutput()) { setStatus('Load or generate a card first.', 'error'); return; }
+  const imagePath = ($('#cardImagePath')?.value || '').trim();
+  if (!imagePath) { setStatus('Select or load a card image first.', 'error'); return; }
+  settings = collectSettings();
+  const textMissing = validateTextApiSettings(settings);
+  if (textMissing) { setStatus(textMissing, 'error'); switchToSettingsTab(); return; }
+  const visionMissing = validateVisionApiSettings(settings);
+  if (visionMissing) { setStatus(visionMissing, 'error'); switchToSettingsTab(); return; }
+  setBusy('GENERATING STABLE DIFFUSION PROMPT FROM VISION…');
+  try {
+    const res = await window.pywebview.api.generate_sd_prompt_from_vision(imagePath, $('#outputText').value, settings);
+    if (!res.ok) throw new Error(res.error || 'Could not generate Stable Diffusion Prompt from vision.');
+    $('#outputText').value = res.output || $('#outputText').value;
+    if (typeof res.visionDescription === 'string' && $('#visionDescription')) $('#visionDescription').value = res.visionDescription;
+    updateImportedCardToolsHint();
+    await saveCurrentWorkspace('silent');
+    setStatus('Generated Stable Diffusion Prompt from the current card image and saved it to the current card.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 async function saveCurrentWorkspace(reason='autosave') {
   if (!hasOutput()) return null;
   try {
@@ -3901,6 +3982,7 @@ async function selectCardImage() {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateImportedCardToolsHint();
     setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -3921,6 +4003,7 @@ async function importCardImageFiles(files) {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateImportedCardToolsHint();
     setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -4113,7 +4196,12 @@ async function loadSavedCardOrProject() {
     }
     applyLoadedState(res);
     updateAvailability();
-    setStatus(res.message || 'Loaded saved card/project.', 'ok');
+    let statusMessage = res.message || 'Loaded saved card/project.';
+    if (!/project/i.test(String(res.loadedType || ''))) {
+      const imported = await importCurrentOutputToBrowser(false);
+      if (imported?.ok) statusMessage += ' Imported into Character Browser.';
+    }
+    setStatus(statusMessage, 'ok');
     $$('.nav').forEach(b => b.classList.remove('active'));
     $$('.tab').forEach(t => t.classList.remove('active'));
     $('[data-tab="output"]').classList.add('active');
@@ -4136,7 +4224,12 @@ async function importSavedFiles(files) {
     if (!res.ok) throw new Error(res.error || 'Load failed.');
     applyLoadedState(res);
     updateAvailability();
-    setStatus(res.message || 'Loaded saved card/project.', 'ok');
+    let statusMessage = res.message || 'Loaded saved card/project.';
+    if (!/project/i.test(String(res.loadedType || ''))) {
+      const imported = await importCurrentOutputToBrowser(false);
+      if (imported?.ok) statusMessage += ' Imported into Character Browser.';
+    }
+    setStatus(statusMessage, 'ok');
     $$('.nav').forEach(b => b.classList.remove('active'));
     $$('.tab').forEach(t => t.classList.remove('active'));
     $('[data-tab="output"]').classList.add('active');

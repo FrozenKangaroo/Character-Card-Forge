@@ -1,5 +1,7 @@
 import json
 import os
+import sys
+import platform
 import re
 import time
 import uuid
@@ -20,33 +22,89 @@ import socket
 import hashlib
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 import webview
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
+APP_NAME = "Character Card Forge"
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
-EXPORT_DIR = APP_DIR / "exports"
+BUNDLED_DATA_DIR = APP_DIR / "data"
+
+
+def _safe_mkdir(path):
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _platform_app_data_root():
+    """Return a writable per-user data folder that works from AppImage/.app/.exe bundles.
+
+    AppImage contents are mounted read-only, so generated files must never be
+    written beside app.py. CCF_DATA_DIR can override this for portable installs.
+    """
+    override = os.environ.get("CCF_DATA_DIR") or os.environ.get("CHARACTER_CARD_FORGE_DATA_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    home = Path.home()
+    system = platform.system().lower()
+    # Put user-visible saved cards somewhere easy to find. This mirrors apps
+    # like Front Porch that keep their data in a Documents subfolder.
+    docs = home / "Documents"
+    if docs.exists() or system in {"windows", "darwin"}:
+        return docs / APP_NAME
+    if system == "darwin":
+        return home / "Library" / "Application Support" / APP_NAME
+    if system == "windows":
+        base = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        return Path(base) / APP_NAME
+    base = os.environ.get("XDG_DATA_HOME")
+    return (Path(base).expanduser() if base else home / ".local" / "share") / APP_NAME
+
+
+USER_DATA_ROOT = _platform_app_data_root()
+DATA_DIR = USER_DATA_ROOT / "data"
+EXPORT_DIR = USER_DATA_ROOT / "exports"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 TEMPLATE_FILE = DATA_DIR / "template.json"
 TEMPLATES_DIR = DATA_DIR / "templates"
 LOG_FILE = DATA_DIR / "debug.log"
 LIBRARY_DB_FILE = DATA_DIR / "character_library.sqlite3"
-DATA_DIR.mkdir(exist_ok=True)
-TEMPLATES_DIR.mkdir(exist_ok=True)
-EXPORT_DIR.mkdir(exist_ok=True)
-CARD_IMAGES_DIR = DATA_DIR / "card_images"
-CARD_IMAGES_DIR.mkdir(exist_ok=True)
-GENERATED_IMAGES_DIR = CARD_IMAGES_DIR / "generated"
-GENERATED_IMAGES_DIR.mkdir(exist_ok=True)
-VISION_IMAGES_DIR = DATA_DIR / "vision_images"
-VISION_IMAGES_DIR.mkdir(exist_ok=True)
-CONCEPT_ATTACHMENTS_DIR = DATA_DIR / "concept_attachments"
-CONCEPT_ATTACHMENTS_DIR.mkdir(exist_ok=True)
-IMPORT_UPLOADS_DIR = DATA_DIR / "import_uploads"
-IMPORT_UPLOADS_DIR.mkdir(exist_ok=True)
+for _dir in (USER_DATA_ROOT, DATA_DIR, TEMPLATES_DIR, EXPORT_DIR):
+    _safe_mkdir(_dir)
+CARD_IMAGES_DIR = _safe_mkdir(DATA_DIR / "card_images")
+GENERATED_IMAGES_DIR = _safe_mkdir(CARD_IMAGES_DIR / "generated")
+VISION_IMAGES_DIR = _safe_mkdir(DATA_DIR / "vision_images")
+CONCEPT_ATTACHMENTS_DIR = _safe_mkdir(DATA_DIR / "concept_attachments")
+IMPORT_UPLOADS_DIR = _safe_mkdir(DATA_DIR / "import_uploads")
 # Character workspace/library lives beside exports so every character keeps card, project, images, emotion prompts, and zips together.
 CHARACTER_LIBRARY_DIR = EXPORT_DIR
+
+
+def _seed_user_data_from_bundle():
+    """Copy bundled defaults/templates into the writable user data folder once."""
+    try:
+        if BUNDLED_DATA_DIR.exists():
+            for name in ("settings.json", "template.json"):
+                src = BUNDLED_DATA_DIR / name
+                dst = DATA_DIR / name
+                if src.exists() and not dst.exists():
+                    shutil.copy2(src, dst)
+            src_templates = BUNDLED_DATA_DIR / "templates"
+            if src_templates.exists():
+                _safe_mkdir(TEMPLATES_DIR)
+                for src in src_templates.glob("*.json"):
+                    dst = TEMPLATES_DIR / src.name
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
+    except Exception:
+        # Seeding is a convenience only; DEFAULT_SETTINGS/DEFAULT_TEMPLATE still work.
+        pass
+
+
+_seed_user_data_from_bundle()
 
 
 class TextRefusalForLiteFallback(Exception):
@@ -268,6 +326,8 @@ class Api:
         self._init_library_db()
 
     def _load_json(self, path, default):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
@@ -277,6 +337,8 @@ class Api:
         return json.loads(json.dumps(default))
 
     def _save_json(self, path, data):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _library_connect(self):
@@ -286,7 +348,7 @@ class Api:
 
     def _init_library_db(self):
         """Create the browser library database and migrate old settings-based folders/assignments."""
-        DATA_DIR.mkdir(exist_ok=True)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
         with self._library_connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
@@ -1006,7 +1068,17 @@ class Api:
         except Exception:
             pass
         self._save_json(SETTINGS_FILE, self.settings)
-        return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default")}
+        return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default"), "paths": self.get_data_locations()}
+
+    def get_data_locations(self):
+        return {
+            "appDir": str(APP_DIR),
+            "userDataRoot": str(USER_DATA_ROOT),
+            "dataDir": str(DATA_DIR),
+            "exportsDir": str(EXPORT_DIR),
+            "settingsFile": str(SETTINGS_FILE),
+            "libraryDbFile": str(LIBRARY_DB_FILE),
+        }
 
     def _network_timeout(self, settings=None, fallback=300):
         settings = settings or self.settings or {}
@@ -2955,24 +3027,12 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def select_import_file(self):
-        try:
-            window = webview.windows[0] if webview.windows else None
-            if not window:
-                return {"ok": False, "error": "No active window."}
-            # PyWebView/Qt file filter parsing is fragile across versions,
-            # so we open a plain file picker and validate extensions after selection.
-            result = window.create_file_dialog(
-                webview.OPEN_DIALOG,
-                allow_multiple=False
-            )
-            if not result:
-                return {"ok": False, "cancelled": True}
-            path = Path(str(result[0] if isinstance(result, (list, tuple)) else result))
-            if path.suffix.lower() not in {".json", ".png", ".md", ".txt"}:
-                return {"ok": False, "error": "Please select a JSON, PNG, MD, or TXT character card/project file."}
-            return self._load_import_path(path)
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        """Legacy import entry point kept for older UI paths.
+
+        Use the same modern OS picker as Load Saved / Load Card to Main Concept
+        instead of PyWebView's basic fallback picker.
+        """
+        return self.pick_saved_file()
 
     def _build_raw_card_from_chara_v2(self, payload):
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -3741,23 +3801,26 @@ class Api:
         except Exception:
             return []
 
-    def _replace_tags_section(self, output, tags, template=None):
+    def _replace_section_body(self, output, section_id, body_text, template=None, title_fallback=None):
         output = output or ""
-        tag_text = ", ".join([str(t).strip() for t in (tags or []) if str(t).strip()])
+        body_text = (body_text or "").strip()
         lines = output.splitlines()
         start = None
         end = None
+        heading_line = None
+        tmpl = template or self.template
         for i, line in enumerate(lines):
             try:
-                heading = self._canonical_heading_with_template(line, template or self.template)
+                heading = self._canonical_heading_with_template(line, tmpl)
             except Exception:
                 heading = None
-            if heading == "tags":
+            if heading == section_id:
                 start = i
+                heading_line = lines[i]
                 end = len(lines)
                 for j in range(i + 1, len(lines)):
                     try:
-                        next_heading = self._canonical_heading_with_template(lines[j], template or self.template)
+                        next_heading = self._canonical_heading_with_template(lines[j], tmpl)
                     except Exception:
                         next_heading = None
                     if next_heading:
@@ -3765,15 +3828,24 @@ class Api:
                         break
                 break
         if start is None:
-            suffix = f"Tags:\n{tag_text}" if tag_text else "Tags:\n"
+            section_title = title_fallback or None
+            if not section_title:
+                for sec in (tmpl or {}).get("sections", []):
+                    if str(sec.get("id") or "").strip() == str(section_id):
+                        section_title = str(sec.get("title") or "").strip()
+                        break
+            section_title = section_title or str(section_id).replace("_", " ").title()
+            suffix = f"{section_title}:\n{body_text}" if body_text else f"{section_title}:\n"
             return (output.rstrip() + "\n\n" + suffix).strip()
-        heading_line = lines[start]
         replacement = [heading_line]
-        if tag_text:
-            replacement.append(tag_text)
+        if body_text:
+            replacement.append(body_text)
         new_lines = lines[:start] + replacement + lines[end:]
         return "\n".join(new_lines).strip()
 
+    def _replace_tags_section(self, output, tags, template=None):
+        tag_text = ", ".join([str(t).strip() for t in (tags or []) if str(t).strip()])
+        return self._replace_section_body(output, "tags", tag_text, template=template, title_fallback="Tags")
 
     def _all_character_projects(self):
         projects = []
@@ -4669,6 +4741,129 @@ class Api:
         self._log_event("vision_analyze_response", {"retry_used": retry_used, "description": description})
         return {"ok": True, "description": description, "imagePath": str(path), "retryUsed": retry_used}
 
+
+    def _normalise_sd_prompt_items(self, text, *, max_items=90, max_chars=1200):
+        """Normalize comma-separated SD prompt fragments and remove repeated loops."""
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"(?is)^\s*(?:positive|negative)\s+prompt\s*[:：]\s*", "", text).strip()
+        parts = re.split(r",|\n", text)
+        out = []
+        seen = set()
+        for raw in parts:
+            item = re.sub(r"\s+", " ", str(raw or "").strip())
+            item = item.strip(" ,;.")
+            if not item:
+                continue
+            # Normalize wrapper parentheses only for duplicate comparison, but keep the user's weighting syntax in output.
+            key = item.lower()
+            key = re.sub(r"^[\(\[\{]+|[\)\]\}]+$", "", key).strip()
+            key = re.sub(r"\s+", " ", key)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= max_items:
+                break
+        cleaned = ", ".join(out).strip()
+        if len(cleaned) > max_chars:
+            trimmed = []
+            total = 0
+            for item in out:
+                add_len = len(item) + (2 if trimmed else 0)
+                if total + add_len > max_chars:
+                    break
+                trimmed.append(item)
+                total += add_len
+            cleaned = ", ".join(trimmed).strip()
+        return cleaned
+
+    def _default_sd_negative_prompt(self):
+        return "bad anatomy, extra fingers, missing fingers, extra limbs, missing limbs, poorly drawn hands, poorly drawn face, deformed, disfigured, mutation, ugly, blurry, cropped, out of frame, low quality, worst quality, normal quality, jpeg artifacts, watermark, signature, text, logo"
+
+    def _build_sd_prompt_from_character_text(self, reference_text, settings=None, vision_summary=""):
+        local_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        validation = self._validate_text_api_settings(local_settings)
+        if not validation.get("ok"):
+            return {"ok": False, "error": validation.get("error") or "AI settings are incomplete."}
+        model = (local_settings.get("aiSuggestionModel") or local_settings.get("model") or "").strip()
+        if not model:
+            return {"ok": False, "error": "Set a Text Model or AI Suggestion Model first."}
+        base_context = (reference_text or "").strip()
+        if not base_context and not vision_summary:
+            return {"ok": False, "error": "There is not enough character information to generate a Stable Diffusion Prompt."}
+        prompt_parts = [
+            "Create a Stable Diffusion Prompt section for a fictional anime-style character card.",
+            "Return ONLY the Stable Diffusion Prompt section body, not the whole card.",
+            "Use exactly this format:",
+            "Positive Prompt: <comma-separated prompt>",
+            "Negative Prompt: <comma-separated negative prompt>",
+            "The positive prompt should focus on a single polished portrait/card image of the character and include appearance, body type, hair, eyes, clothing, key accessories, expression, pose, environment/background, lighting, style, and quality tags.",
+            "The negative prompt must be concise: 15-30 UNIQUE comma-separated tags only. Do not repeat tags or phrases.",
+            "Do not include explanations, bullet points, JSON, markdown fences, helper text, or headings other than Positive Prompt and Negative Prompt.",
+        ]
+        if vision_summary:
+            prompt_parts.extend(["", "VISION / IMAGE NOTES", vision_summary.strip()])
+        if base_context:
+            prompt_parts.extend(["", "CHARACTER CARD TEXT", base_context])
+        prompt = "\n".join(prompt_parts).strip()
+        try:
+            sd_body = self._chat_once(prompt, local_settings, model, "sd_prompt_generation")
+        except Exception as e:
+            return {"ok": False, "error": f"Stable Diffusion prompt generation failed: {e}"}
+        sd_body = self._strip_sd_prompt_guidance(self._clean_section_text(sd_body))
+        pos_match = re.search(r"(?is)positive\s+prompt\s*[:：]\s*(.+?)(?:\n+\s*negative\s+prompt\s*[:：]|\Z)", sd_body)
+        neg_match = re.search(r"(?is)negative\s+prompt\s*[:：]\s*(.+)$", sd_body)
+        positive = (pos_match.group(1).strip() if pos_match else "")
+        negative = (neg_match.group(1).strip() if neg_match else "")
+        if not positive:
+            compact = re.sub(r"\s+", " ", sd_body).strip()
+            if compact and "," in compact:
+                positive = compact
+        positive = self._normalise_sd_prompt_items(positive, max_items=120, max_chars=1800)
+        negative = self._normalise_sd_prompt_items(negative, max_items=32, max_chars=700)
+        if not positive:
+            return {"ok": False, "error": "The AI did not return a usable Stable Diffusion positive prompt."}
+        if not negative:
+            negative = self._default_sd_negative_prompt()
+        else:
+            # Make sure common cleanup tags are present without creating the runaway repetition bug.
+            negative = self._normalise_sd_prompt_items(negative + ", " + self._default_sd_negative_prompt(), max_items=36, max_chars=800)
+        sd_body = f"Positive Prompt: {positive}\nNegative Prompt: {negative}"
+        return {"ok": True, "stableDiffusionBody": sd_body.strip(), "positive": positive, "negative": negative}
+
+    def generate_sd_prompt_from_output(self, output, settings=None):
+        output = (output or "").strip()
+        if not output:
+            return {"ok": False, "error": "Generate or load a card first so I can read the character text."}
+        res = self._build_sd_prompt_from_character_text(output, settings=settings)
+        if not res.get("ok"):
+            return res
+        updated_output = self._replace_section_body(output, "stable_diffusion", res.get("stableDiffusionBody") or "", template=self.template, title_fallback="Stable Diffusion Prompt")
+        updated_output = self._clean_generated_output(updated_output)
+        return {"ok": True, "output": updated_output, "stableDiffusionBody": res.get("stableDiffusionBody"), "positive": res.get("positive"), "negative": res.get("negative"), "method": "full_text_output"}
+
+    def generate_sd_prompt_from_vision(self, image_path, output='', settings=None):
+        image_path = str(image_path or "").strip()
+        if not image_path:
+            return {"ok": False, "error": "Select a card image first so the vision model has something to read."}
+        vision = self.analyze_vision_image(image_path, settings)
+        if not vision.get("ok"):
+            return vision
+        vision_summary = str(vision.get("description") or "").strip()
+        reference_text = (output or "").strip()
+        if reference_text:
+            reference_text = reference_text + "\n\nVisual reference summary:\n" + vision_summary
+        else:
+            reference_text = "Visual reference summary:\n" + vision_summary
+        res = self._build_sd_prompt_from_character_text(reference_text, settings=settings, vision_summary=vision_summary)
+        if not res.get("ok"):
+            return res
+        updated_output = self._replace_section_body(output or "", "stable_diffusion", res.get("stableDiffusionBody") or "", template=self.template, title_fallback="Stable Diffusion Prompt")
+        updated_output = self._clean_generated_output(updated_output)
+        return {"ok": True, "output": updated_output, "stableDiffusionBody": res.get("stableDiffusionBody"), "positive": res.get("positive"), "negative": res.get("negative"), "visionDescription": vision_summary, "method": "vision"}
+
     def select_card_image(self):
         try:
             window = webview.windows[0] if webview.windows else None
@@ -4928,6 +5123,10 @@ class Api:
             m = re.search(r"(?is)negative\s+prompt\s*[:：]\s*(.+)$", section)
             if m:
                 negative = m.group(1).strip()
+        positive = self._normalise_sd_prompt_items(positive, max_items=140, max_chars=2200)
+        negative = self._normalise_sd_prompt_items(negative, max_items=40, max_chars=900)
+        if not negative and positive:
+            negative = self._default_sd_negative_prompt()
         return {"positive": positive, "negative": negative}
 
     def _strip_stable_diffusion_for_card(self, output):
