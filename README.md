@@ -410,3 +410,19 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 ### v0.9.35
 
 - AppImage/frozen builds now force the classic PyWebView file picker for all backend file buttons and drop-zone clicks. This avoids invisible kdialog/zenity launches inside packaged builds. Normal source runs can still use host-native pickers.
+
+
+## v0.9.39 Settings / Tags / Browser Privacy
+
+- AI Settings is now labelled Settings.
+- Added Data Files Folder setting. Changing it copies existing user data and requires an app restart.
+- Added Restrict Tags mode so generated cards can only use tags from an allowed list; invalid tags are removed after generation.
+- Added Character Browser NSFW handling: show normally, blur images, or hide matching cards.
+
+## v0.9.40 - Split multi-character concepts into separate cards
+
+- Added a new **Split into Multiple Cards** card mode for multi-character concepts.
+- Added a matching **Multi-Character Setting Logic** option for split-card workflows.
+- Split-card generation identifies main characters and generates one focused single-character card per character.
+- During each split-card pass, the focused character becomes the main card character, while other characters are preserved as lorebook/background/supporting references.
+- Output areas now support character tabs, so Q&A Answers, Full Text Output, Emotion Images, and Quick Save / Image can be switched per generated card.

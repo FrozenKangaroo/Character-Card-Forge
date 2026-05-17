@@ -13,7 +13,7 @@
       <nav>
         <button class="nav active" data-tab="concept">Concept</button>
         <button class="nav" data-tab="template">Prompt Template</button>
-        <button class="nav" data-tab="settings">AI Settings</button>
+        <button class="nav" data-tab="settings">Settings</button>
         <button class="nav" data-tab="browser">Character Browser</button>
         <button class="nav" data-tab="output">Output / Editor</button>
       </nav>
@@ -205,9 +205,9 @@
         <div id="concept-mode" class="subtab-panel" data-subtab-panel="concept">
           <div class="row cards">
             <div class="card"><label>Generation Mode</label><select id="modeSelect"><option value="full">Full Prompt — large/coherent models</option><option value="lite">Lite Mode — split into multiple prompts</option><option value="compact_lite">Compact Lite — small 8k-context models</option></select></div>
-            <div class="card"><label>Card Mode</label><select id="cardMode"><option value="single">Single Character</option><option value="multi">Multi-Character Single Card</option></select></div>
+            <div class="card"><label>Card Mode</label><select id="cardMode"><option value="single">Single Character</option><option value="multi">Multi-Character Single Card</option><option value="split_cards">Split into Multiple Cards</option></select></div>
             <div class="card mini-card" id="multiCountCard"><label>Primary Characters</label><input id="multiCharacterCount" type="number" min="2" max="12" value="2" /></div>
-            <div class="card" id="sharedScenePolicyCard"><label>Multi-Character Setting Logic</label><select id="sharedScenePolicy"><option value="ai_reconcile">AI reconcile into one shared scene</option><option value="shared_opening">Different backgrounds, one shared opening</option><option value="character_backgrounds">Keep settings as character backgrounds</option><option value="user_defined">Use explicit shared scenario notes</option></select><small>Used when multiple main characters have different settings. The card still generates one Scenario, not separate scenes.</small></div>
+            <div class="card" id="sharedScenePolicyCard"><label>Multi-Character Setting Logic</label><select id="sharedScenePolicy"><option value="ai_reconcile">AI reconcile into one shared scene</option><option value="shared_opening">Different backgrounds, one shared opening</option><option value="character_backgrounds">Keep settings as character backgrounds</option><option value="user_defined">Use explicit shared scenario notes</option><option value="split_cards">Split into separate cards, one per character</option></select><small>Used when multiple main characters have different settings. Split mode generates one card per character and keeps other characters as lorebook/support references.</small></div>
             <div class="card"><label>First Message Style</label><select id="firstStyle"></select></div>
             <div class="card mini-card"><label>Alternative First Messages</label><input id="altCount" type="number" min="0" max="10" value="2" /></div>
           </div>
@@ -261,12 +261,15 @@
       </section>
 
       <section id="settings" class="tab">
-        <div class="page-head"><div><h2>AI Settings</h2><p>Any OpenAI-compatible endpoint should work if it supports <code>/chat/completions</code>. SD Forge / Automatic1111 uses <code>/sdapi/v1/txt2img</code>.</p></div><button id="saveSettingsBtn">Save Settings</button></div>
+        <div class="page-head"><div><h2>Settings</h2><p>Configure AI endpoints, Stable Diffusion, Front Porch export, data storage, tag restrictions, and browser privacy.</p></div><button id="saveSettingsBtn">Save Settings</button></div>
         <div class="settings-grid">
           <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label><label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label><label>Model<input id="model" placeholder="model-name" /></label><label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label><label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label><label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
           <label>Vision API Base URL<input id="visionApiBaseUrl" placeholder="Leave blank to use text API base URL" /></label><label>Vision API Key<input id="visionApiKey" type="password" placeholder="Leave blank to use text API key" /></label><label>Vision Model<input id="visionModel" placeholder="vision-model-name" /></label>
           <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label><label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="1000000" step="1024" value="200000" /></label><label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label><label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label><label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label><label class="toggle-inline setting-toggle"><input id="streamAi" type="checkbox" /> Stream AI text into output boxes</label>
           <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Data Folder<input id="frontPorchDataFolder" placeholder="Folder from Front Porch → Settings" /></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Front Porch Folder</button></div>
+          <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label><div class="actions"><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div>
+          <label class="toggle-inline setting-toggle"><input id="restrictTags" type="checkbox" /> Restrict AI tags to allowed list</label><label class="wide-setting">Allowed Tags<textarea id="allowedTags" placeholder="female, male, gyaru, romance, fantasy&#10;One tag per line or comma-separated."></textarea></label>
+          <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
         </div>
       </section>
 
@@ -369,6 +372,7 @@
           <button class="subtab" data-subtab="output-qa">Q&A Answers</button>
           <button class="subtab" data-subtab="output-debug">Debug Log</button>
         </div>
+        <div id="characterOutputTabs" class="character-output-tabs"></div>
         <div id="output-export" class="subtab-panel active" data-subtab-panel="output">
           <div class="actions output-actions"><button id="loadSavedBtn">Load Saved</button><button id="importLoadedCardBtn" type="button">Import to Browser</button><button id="copyBtn">Copy</button><button id="exportBtn" class="primary">Quick Export</button><button id="saveWorkspaceBtn" type="button">Save Workspace</button></div>
           <div id="savedFileDropZone" class="drop-zone compact">Drop a saved card / project here to load it, or click to browse</div>

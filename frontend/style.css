@@ -1132,3 +1132,43 @@ main {
   .character-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
   .browser-bulk-actions { grid-template-columns: 1fr; }
 }
+
+/* NSFW browser privacy */
+.character-card-tile.nsfw-blurred .character-thumb img {
+  filter: blur(14px);
+  transform: scale(1.04);
+}
+.character-thumb { position: relative; overflow: hidden; }
+.nsfw-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.42);
+  color: white;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-shadow: 0 1px 8px rgba(0,0,0,.5);
+  pointer-events: none;
+}
+.wide-setting { grid-column: 1 / -1; }
+.wide-setting textarea { min-height: 90px; }
+
+.character-output-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 14px;
+}
+.character-output-tab {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text, #e5e7eb);
+  border-radius: 999px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.character-output-tab.active {
+  border-color: rgba(96, 165, 250, 0.9);
+  background: rgba(37, 99, 235, 0.25);
+}

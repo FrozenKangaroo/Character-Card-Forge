@@ -30,6 +30,8 @@ let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
 let currentLoadedType = "";
+let characterOutputTabs = [];
+let activeOutputTabIndex = 0;
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -45,7 +47,7 @@ const NEW_USER_TIPS = [
   'Use AI Description in Character Browser when the card description is only physical appearance and you want a useful scenario summary.',
   'Tag filters are faceted: active filters shrink the tag list to tags that still exist in the current result set.',
   'Merge Tags is display-only unless you choose a rename action. It is safe for cleaning up noisy tag lists.',
-  'Fetch SD Models in AI Settings before image generation if you switch between anime, Pony, or realistic checkpoints.',
+  'Fetch SD Models in Settings before image generation if you switch between anime, Pony, or realistic checkpoints.',
   'The Output / Editor tab autosaves after edits, so the browser cache and latest card stay in sync.',
 ];
 
@@ -66,10 +68,83 @@ function setTextareaValue(id, value) {
   if (el) el.value = value || '';
 }
 
+function currentOutputTabName() {
+  const tab = characterOutputTabs[activeOutputTabIndex];
+  return tab?.name || tab?.focusName || 'Character';
+}
+
+function captureActiveOutputTab() {
+  if (!characterOutputTabs.length) return;
+  const tab = characterOutputTabs[activeOutputTabIndex];
+  if (!tab) return;
+  tab.output = $('#outputText')?.value || '';
+  tab.qaAnswers = $('#qaAnswersText')?.value || lastQnaAnswers || '';
+  tab.emotionImages = emotionImageState.map(img => ({...img}));
+  tab.cardImagePath = $('#cardImagePath')?.value || '';
+}
+
+function applyActiveOutputTab() {
+  const tab = characterOutputTabs[activeOutputTabIndex] || characterOutputTabs[0];
+  if (!tab) return;
+  setTextareaValue('outputText', tab.output || '');
+  lastQnaAnswers = tab.qaAnswers || '';
+  setTextareaValue('qaAnswersText', lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.');
+  emotionImageState = Array.isArray(tab.emotionImages) ? tab.emotionImages.map(img => ({...img})) : [];
+  renderEmotionImageResults(emotionImageState);
+  renderGeneratedImages(Array.isArray(tab.generatedImages) ? tab.generatedImages : []);
+  const cardImage = $('#cardImagePath');
+  if (cardImage) cardImage.value = tab.cardImagePath || '';
+  if (settings) settings.cardImagePath = tab.cardImagePath || '';
+  updateAvailability();
+}
+
+function renderCharacterOutputTabs() {
+  const holder = $('#characterOutputTabs');
+  if (!holder) return;
+  if (!characterOutputTabs.length) {
+    characterOutputTabs = [{ name: 'Character', output: $('#outputText')?.value || '', qaAnswers: lastQnaAnswers || '', emotionImages: emotionImageState || [], generatedImages: [], cardImagePath: $('#cardImagePath')?.value || '' }];
+    activeOutputTabIndex = 0;
+  }
+  holder.innerHTML = '';
+  characterOutputTabs.forEach((tab, idx) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'character-output-tab' + (idx === activeOutputTabIndex ? ' active' : '');
+    btn.textContent = tab.name || tab.focusName || `Character ${idx + 1}`;
+    btn.addEventListener('click', () => {
+      if (idx === activeOutputTabIndex) return;
+      captureActiveOutputTab();
+      activeOutputTabIndex = idx;
+      renderCharacterOutputTabs();
+      applyActiveOutputTab();
+      setStatus(`Switched to ${currentOutputTabName()}.`, '');
+    });
+    holder.appendChild(btn);
+  });
+}
+
+function setCharacterOutputTabs(cards) {
+  characterOutputTabs = (cards || []).map((card, idx) => ({
+    name: card.name || card.focusName || `Character ${idx + 1}`,
+    focusName: card.focusName || card.name || `Character ${idx + 1}`,
+    output: card.output || '',
+    qaAnswers: card.qaAnswers || '',
+    emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
+    generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
+    cardImagePath: card.cardImagePath || '',
+  }));
+  if (!characterOutputTabs.length) characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
+  activeOutputTabIndex = 0;
+  renderCharacterOutputTabs();
+  applyActiveOutputTab();
+}
+
 function clearGenerationArtifacts() {
   lastQnaAnswers = '';
   currentBrowserDescription = '';
   emotionImageState = [];
+  characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
+  activeOutputTabIndex = 0;
   setTextareaValue('qaAnswersText', '');
   setTextareaValue('outputText', '');
   setTextareaValue('followupText', '');
@@ -80,6 +155,7 @@ function clearGenerationArtifacts() {
   const cardImage = $('#cardImagePath');
   if (cardImage) cardImage.value = '';
   if (settings) settings.cardImagePath = '';
+  renderCharacterOutputTabs();
 }
 
 window.ccfStreamUpdate = function(payload) {
@@ -442,6 +518,10 @@ function hydrateSettings() {
   const apiRetryCount = $('#apiRetryCount'); if (apiRetryCount) apiRetryCount.value = settings.apiRetryCount ?? 2;
   const streamAi = $('#streamAi'); if (streamAi) streamAi.checked = !!settings.streamAi;
   const frontPorchDataFolder = $('#frontPorchDataFolder'); if (frontPorchDataFolder) frontPorchDataFolder.value = settings.frontPorchDataFolder || '';
+  const dataFilesFolder = $('#dataFilesFolder'); if (dataFilesFolder) dataFilesFolder.value = settings.dataFilesFolder || settings?.paths?.userDataRoot || '';
+  const restrictTags = $('#restrictTags'); if (restrictTags) restrictTags.checked = !!settings.restrictTags;
+  const allowedTags = $('#allowedTags'); if (allowedTags) allowedTags.value = settings.allowedTags || '';
+  const nsfwBrowserMode = $('#nsfwBrowserMode'); if (nsfwBrowserMode) nsfwBrowserMode.value = settings.nsfwBrowserMode || 'show';
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
   renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
   $('#sdSteps').value = settings.sdSteps ?? 28;
@@ -462,6 +542,12 @@ function hydrateSettings() {
   updateImportedCardToolsHint();
 }
 
+
+function extractOutputNameForTab(output) {
+  const text = String(output || '');
+  const m = text.match(new RegExp('(?:^|\\n)\\s*(?:-{3,}\\s*)?Name\\s*:?\\s*\\n\\s*([^\\n]+)', 'i')) || text.match(new RegExp('(?:^|\\n)\\s*Name\\s*[:：]\\s*([^\\n]+)', 'i'));
+  return m ? m[1].trim().slice(0, 80) : '';
+}
 
 function applyLoadedState(state) {
   currentLoadedType = String(state?.loadedType || "");
@@ -507,6 +593,7 @@ function applyLoadedState(state) {
   if (state.builderState) {
     restoreBuilderWorkspaceState(state.builderState);
   }
+  setCharacterOutputTabs([{ name: state.name || extractOutputNameForTab(state.output || '') || 'Character', output: state.output || '', qaAnswers: lastQnaAnswers || '', emotionImages: emotionImageState || [], generatedImages: [], cardImagePath: $('#cardImagePath')?.value || '' }]);
   updateImportedCardToolsHint();
 }
 
@@ -637,6 +724,10 @@ function collectSettings() {
     apiRetryCount: Number(($('#apiRetryCount') ? $('#apiRetryCount').value : 2) || 2),
     streamAi: !!($('#streamAi') && $('#streamAi').checked),
     frontPorchDataFolder: ($('#frontPorchDataFolder') ? $('#frontPorchDataFolder').value.trim() : ''),
+    dataFilesFolder: ($('#dataFilesFolder') ? $('#dataFilesFolder').value.trim() : ''),
+    restrictTags: !!($('#restrictTags') && $('#restrictTags').checked),
+    allowedTags: ($('#allowedTags') ? $('#allowedTags').value.trim() : ''),
+    nsfwBrowserMode: ($('#nsfwBrowserMode') ? $('#nsfwBrowserMode').value : 'show'),
     sdBaseUrl: $('#sdBaseUrl').value.trim() || 'http://127.0.0.1:7860',
     sdModel: ($('#sdModel') ? $('#sdModel').value.trim() : ''),
     sdSteps: Number($('#sdSteps').value || 28),
@@ -671,7 +762,7 @@ function validateTextApiSettings(settings) {
   if (!String(settings.model || '').trim()) missing.push('Text Model');
   if (apiKeyRequiredForBase(settings.apiBaseUrl) && !String(settings.apiKey || '').trim()) missing.push('API Key');
   if (missing.length) {
-    return `AI settings are incomplete: ${missing.join(', ')}. Open AI Settings and re-enter your endpoint/model/key before generating or revising.`;
+    return `AI settings are incomplete: ${missing.join(', ')}. Open Settings and re-enter your endpoint/model/key before generating or revising.`;
   }
   return '';
 }
@@ -684,7 +775,7 @@ function validateVisionApiSettings(settings) {
   if (!String(settings.visionModel || '').trim()) missing.push('Vision Model');
   if (apiKeyRequiredForBase(base) && !key) missing.push('Vision API Key or Text API Key');
   if (missing.length) {
-    return `Vision settings are incomplete: ${missing.join(', ')}. Open AI Settings and re-enter your vision model/key before analyzing an image.`;
+    return `Vision settings are incomplete: ${missing.join(', ')}. Open Settings and re-enter your vision model/key before analyzing an image.`;
   }
   return '';
 }
@@ -1025,7 +1116,7 @@ let multiBuilderStates = [];
 let suppressMultiBuilderCapture = false;
 
 function isMultiBuilderMode() {
-  return $('#cardMode')?.value === 'multi';
+  return ['multi','split_cards'].includes($('#cardMode')?.value);
 }
 
 function multiBuilderCount() {
@@ -1149,8 +1240,26 @@ function bindActions() {
   });
   $('#saveSettingsBtn').addEventListener('click', async () => {
     settings = collectSettings();
-    await window.pywebview.api.save_settings(settings);
-    alert('Settings saved.');
+    const res = await window.pywebview.api.save_settings(settings);
+    if (res?.settings) settings = res.settings;
+    hydrateSettings();
+    renderCharacterBrowser();
+    if (res?.dataFolder && !res.dataFolder.ok) {
+      alert('Settings saved, but data folder was not changed: ' + (res.dataFolder.error || 'Unknown error'));
+    } else if (res?.restartRequired) {
+      alert('Settings saved. Data folder changed and existing data was copied. Restart the app to use the new data folder.');
+    } else {
+      alert('Settings saved.');
+    }
+  });
+  $('#selectDataFolderBtn')?.addEventListener('click', async () => {
+    try {
+      const res = await window.pywebview.api.select_data_folder();
+      if (res?.ok && res.path && $('#dataFilesFolder')) $('#dataFilesFolder').value = res.path;
+      else if (res && !res.cancelled) setStatus(res.error || 'Could not select data folder.', 'error');
+    } catch (err) {
+      setStatus(err.message || String(err), 'error');
+    }
   });
   $('#scanFrontPorchBtn')?.addEventListener('click', scanFrontPorchFolder);
   $('#fetchSdModelsBtn')?.addEventListener('click', fetchStableDiffusionModels);
@@ -1518,7 +1627,7 @@ function applyBuilderTransferResult(res) {
   if (characters.length >= 2) {
     $('#cardMode').value = 'multi';
     $('#multiCharacterCount').value = String(Math.min(12, Math.max(2, characters.length)));
-    settings.cardMode = 'multi';
+    settings.cardMode = $('#cardMode')?.value || 'multi';
     settings.multiCharacterCount = Number($('#multiCharacterCount').value || 2);
     multiBuilderSelectedIndex = 0;
     multiBuilderStates = characters.slice(0, Number($('#multiCharacterCount').value)).map((ch, idx) => {
@@ -2618,7 +2727,7 @@ function restoreBuilderWorkspaceState(builderState) {
   if (builderState.mode === 'multi' || states.length >= 2) {
     $('#cardMode').value = 'multi';
     $('#multiCharacterCount').value = String(Math.max(2, Math.min(12, states.length || 2)));
-    settings.cardMode = 'multi';
+    settings.cardMode = $('#cardMode')?.value || 'multi';
     settings.multiCharacterCount = Number($('#multiCharacterCount').value || 2);
     multiBuilderStates = states.map(s => ({ ...(s || {}) }));
     multiBuilderSelectedIndex = Math.max(0, Math.min(multiBuilderStates.length - 1, Number(builderState.selectedIndex || 0)));
@@ -2651,6 +2760,8 @@ function collectWorkspacePayload() {
     conceptAttachments: conceptAttachments || [],
     cardImagePath: settings.cardImagePath || $('#cardImagePath')?.value || '',
     browserDescription: currentBrowserDescription || '',
+    name: currentOutputTabName(),
+    characterTabs: characterOutputTabs || [],
   };
 }
 
@@ -2720,6 +2831,7 @@ async function generateSdPromptFromLoadedVision() {
 }
 
 async function saveCurrentWorkspace(reason='autosave') {
+  captureActiveOutputTab();
   if (!hasOutput()) return null;
   try {
     const payload = collectWorkspacePayload();
@@ -3079,7 +3191,7 @@ async function exportSelectedCharactersToFrontPorchBatch() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   settings = collectSettings();
-  if (!settings.frontPorchDataFolder) { setStatus('Set Front Porch Data Folder in AI Settings first.', 'error'); return; }
+  if (!settings.frontPorchDataFolder) { setStatus('Set Front Porch Data Folder in Settings first.', 'error'); return; }
   const okConfirm = confirm(`Export ${paths.length} selected character(s) to Front Porch AI?\n\nA database backup is created by the exporter. Close Front Porch before exporting if possible.`);
   if (!okConfirm) return;
   setBusy('BATCH EXPORTING TO FRONT PORCH AI…');
@@ -3200,7 +3312,7 @@ function visibleBrowserTagStats() {
   // Faceted tag list: once filters/search are active, only show tags that exist
   // on cards still matching the current result set. Count once per card.
   browserScopeCards()
-    .filter(card => browserCardMatchesTagFilters(card) && browserCardMatchesSearch(card))
+    .filter(card => browserCardMatchesTagFilters(card) && browserCardMatchesSearch(card) && browserCardAllowedByPrivacy(card))
     .forEach(card => {
       cardEffectiveTags(card).forEach(tag => {
         const key = browserTagKey(tag);
@@ -3240,8 +3352,25 @@ function browserUpdatedTime(card) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function browserNsfwTags() {
+  return new Set(['nsfw','adult','explicit','hentai','porn','erotic','sexual','sex','nude','nudity','fetish','bdsm','japanese-adult','jav']);
+}
+
+function browserCardIsNsfw(card) {
+  const nsfw = browserNsfwTags();
+  return cardEffectiveTags(card).some(tag => nsfw.has(browserTagKey(tag)) || /(^|[-_])(nsfw|adult|hentai|porn|explicit|erotic|sexual|nude|fetish|bdsm)([-_]|$)/i.test(String(tag || '')));
+}
+
+function browserPrivacyMode() {
+  return (settings && settings.nsfwBrowserMode) || 'show';
+}
+
+function browserCardAllowedByPrivacy(card) {
+  return !(browserPrivacyMode() === 'hide' && browserCardIsNsfw(card));
+}
+
 function getVisibleBrowserCards() {
-  const cards = browserScopeCards().filter(browserCardMatches);
+  const cards = browserScopeCards().filter(card => browserCardMatches(card) && browserCardAllowedByPrivacy(card));
   const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
   const byDate = (a, b) => browserUpdatedTime(b) - browserUpdatedTime(a);
   if (browserSortMode === 'alpha_asc') cards.sort(byName);
@@ -3673,10 +3802,12 @@ function renderCharacterBrowser() {
     const ch = String(name).trim().charAt(0).toUpperCase();
     const letter = /^[A-Z]$/.test(ch) ? ch : '#';
     const multiSelected = browserSelectedProjects.has(card.projectPath);
+    const isNsfw = browserCardIsNsfw(card);
+    const privacyClass = isNsfw && browserPrivacyMode() === 'blur' ? 'nsfw-blurred' : '';
     return `
-    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
+    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
-      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}</div>
+      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary-source ${String(card.browserDescriptionSource || '').toLowerCase() === 'ai' ? 'ai-source' : 'extracted-source'}">${escapeHtml(descriptionSourceLabel(card.browserDescriptionSource))}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
@@ -3849,7 +3980,7 @@ async function exportSelectedCharacterToFrontPorch() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
   settings = collectSettings();
   if (!settings.frontPorchDataFolder) {
-    setStatus('Set Front Porch Data Folder in AI Settings first. Use the folder shown in Front Porch → Settings.', 'error');
+    setStatus('Set Front Porch Data Folder in Settings first. Use the folder shown in Front Porch → Settings.', 'error');
     $$('.nav').forEach(b => b.classList.remove('active'));
     $$('.tab').forEach(t => t.classList.remove('active'));
     $('[data-tab="settings"]').classList.add('active');
@@ -3902,6 +4033,20 @@ async function generateCard() {
   }
   const conceptForModel = buildConceptForModel();
   try {
+    if (settings.cardMode === 'split_cards') {
+      setBusy('SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
+      setStatus('Generating one card per main character. Each card will get its own Output/Q&A/Emotion/Image tab.', '');
+      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, settings, '');
+      if (!res.ok) throw new Error(res.error || 'Split-card generation failed.');
+      setCharacterOutputTabs(res.cards || []);
+      currentBrowserDescription = '';
+      updateAvailability();
+      const count = characterOutputTabs.length;
+      setStatus(`Split-card generation complete: ${count} card${count === 1 ? '' : 's'} generated. Current tab autosaving…`, 'ok');
+      await saveCurrentWorkspace('silent');
+      return;
+    }
+
     let qaAnswers = '';
     if (template?.qa?.enabled) {
       setBusy('PRE-GENERATION Q&A — interviewing the character(s)…');
@@ -3934,6 +4079,7 @@ async function generateCard() {
     lastQnaAnswers = res.qaAnswers || qaAnswers || '';
     const qaBox = $('#qaAnswersText');
     if (qaBox) qaBox.value = lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.';
+    setCharacterOutputTabs([{ name: extractOutputNameForTab(res.output) || (settings.cardMode === 'multi' ? 'Characters' : 'Character'), output: res.output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '' }]);
     updateAvailability();
     const backupMsg = describeBackupInfo(res.backupInfo, 'character_generation');
     if (res.backupInfo?.used) {
@@ -4052,6 +4198,7 @@ async function generateSdImages() {
   try {
     const res = await window.pywebview.api.generate_sd_images($('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Image generation failed.');
+    if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].generatedImages = res.images || [];
     renderGeneratedImages(res.images || []);
     setStatus('Generated 4 image candidates. Select the one you like, delete rejects, or regenerate.', 'ok');
   } catch (err) {
@@ -4080,6 +4227,7 @@ function renderGeneratedImages(images) {
       $('#cardImagePath').value = img.path;
       settings = collectSettings();
       await window.pywebview.api.save_settings(settings);
+      if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = img.path;
       if (hasOutput()) await saveCurrentWorkspace('silent');
       setStatus('Selected generated image for Character Card V2 PNG export' + (hasOutput() ? ' and updated the saved workspace.' : '.'), 'ok');
     });
@@ -4182,6 +4330,7 @@ async function generateEmotionImages() {
       throw new Error(res.error || 'Emotion image generation failed.');
     }
     renderEmotionImageResults(res.images || emotionImageState || []);
+    if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].emotionImages = emotionImageState.map(img => ({...img}));
     setStatus(`Generated ${res.images?.length || emotionImageState.length || 0} emotion image(s) in ${res.folder}. Autosaving workspace…`, 'ok');
     await saveCurrentWorkspace('silent');
   } catch (err) {

@@ -84,8 +84,56 @@ def _real_home_dir():
         return Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or "/tmp").expanduser().resolve()
 
 
+def _data_dir_config_file():
+    home = _real_home_dir()
+    system = platform.system().lower()
+    if system == "windows":
+        base = Path(os.environ.get("APPDATA") or (home / "AppData" / "Roaming"))
+    elif system == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+    return base / APP_NAME / "data_dir.txt"
+
+
+def _path_is_safe_user_data_root(candidate):
+    try:
+        candidate = Path(candidate).expanduser().resolve()
+        candidate_str = str(candidate)
+        if ".mount_" in candidate_str or "squashfs-root" in candidate_str or "_internal" in candidate.parts:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _read_user_data_root_override():
+    try:
+        cfg = _data_dir_config_file()
+        if cfg.exists():
+            value = cfg.read_text(encoding="utf-8").strip()
+            if value:
+                candidate = Path(value).expanduser().resolve()
+                if _path_is_safe_user_data_root(candidate):
+                    return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _write_user_data_root_override(path):
+    cfg = _data_dir_config_file()
+    _safe_mkdir(cfg.parent)
+    cfg.write_text(str(Path(path).expanduser().resolve()), encoding="utf-8")
+    return cfg
+
+
 def _get_writable_user_root():
     """Return a user-writable data root outside the application bundle."""
+    configured = _read_user_data_root_override()
+    if configured is not None and _path_is_writable_dir(configured):
+        return configured
+
     # Explicit override, but ignore unsafe AppImage/internal mount overrides.
     for env_name in ("CCF_DATA_DIR", "CHARACTER_CARD_FORGE_DATA_DIR"):
         value = os.environ.get(env_name)
@@ -368,6 +416,10 @@ DEFAULT_SETTINGS = {
     "visionImagePath": "",
     "activeTemplateName": "Default",
     "frontPorchDataFolder": "",
+    "dataFilesFolder": "",
+    "restrictTags": False,
+    "allowedTags": "",
+    "nsfwBrowserMode": "show",
     "browserTagMerges": {},
     "browserVirtualFolders": [],
     "browserVirtualFolderAssignments": {},
@@ -1198,6 +1250,14 @@ class Api:
         except Exception:
             settings["apiRetryCount"] = DEFAULT_SETTINGS["apiRetryCount"]
         settings["frontPorchDataFolder"] = str(settings.get("frontPorchDataFolder") or "").strip()
+        settings["dataFilesFolder"] = str(settings.get("dataFilesFolder") or str(USER_DATA_ROOT)).strip() or str(USER_DATA_ROOT)
+        settings["restrictTags"] = bool(settings.get("restrictTags"))
+        allowed_tags_value = settings.get("allowedTags")
+        if isinstance(allowed_tags_value, list):
+            allowed_tags_value = ", ".join(str(x).strip() for x in allowed_tags_value if str(x).strip())
+        settings["allowedTags"] = str(allowed_tags_value or "").strip()
+        nsfw_mode = str(settings.get("nsfwBrowserMode") or "show").strip().lower()
+        settings["nsfwBrowserMode"] = nsfw_mode if nsfw_mode in {"show", "blur", "hide"} else "show"
         settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
         settings["sdModel"] = str(settings.get("sdModel") or "").strip()
         settings["streamAi"] = bool(settings.get("streamAi"))
@@ -1236,7 +1296,7 @@ class Api:
             cleaned_styles.append(s if s in FIRST_MESSAGE_STYLES else "")
         settings["alternateFirstMessageStyles"] = cleaned_styles
         mode = str(settings.get("cardMode") or "single").strip().lower()
-        settings["cardMode"] = "multi" if mode in {"multi", "multi_character", "multi-character"} else "single"
+        settings["cardMode"] = "split_cards" if mode in {"split_cards", "split-cards", "multi_split", "split"} else ("multi" if mode in {"multi", "multi_character", "multi-character"} else "single")
         try:
             settings["multiCharacterCount"] = max(2, min(12, int(settings.get("multiCharacterCount") or 2)))
         except Exception:
@@ -1315,6 +1375,7 @@ class Api:
             "exportsDir": str(EXPORT_DIR),
             "settingsFile": str(SETTINGS_FILE),
             "libraryDbFile": str(LIBRARY_DB_FILE),
+            "dataDirConfigFile": str(_data_dir_config_file()),
         }
 
     def _network_timeout(self, settings=None, fallback=300):
@@ -1699,10 +1760,61 @@ class Api:
             self._log_event("ai_transfer_to_builders_error", {"error": str(e)})
             return {"ok": False, "error": f"Transfer to Builders failed: {e}"}
 
+    def _copy_user_data_to(self, target_root):
+        target_root = Path(target_root).expanduser().resolve()
+        if not _path_is_safe_user_data_root(target_root):
+            return {"ok": False, "error": "That folder is inside a read-only app/bundle mount. Choose a normal user folder."}
+        try:
+            _safe_mkdir(target_root)
+            if not _path_is_writable_dir(target_root):
+                return {"ok": False, "error": "The selected data folder is not writable."}
+            if USER_DATA_ROOT.exists() and USER_DATA_ROOT.resolve() != target_root.resolve():
+                shutil.copytree(USER_DATA_ROOT, target_root, dirs_exist_ok=True)
+            _write_user_data_root_override(target_root)
+            return {"ok": True, "path": str(target_root), "restartRequired": True}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not set data folder: {e}"}
+
+    def select_data_folder(self):
+        try:
+            paths = []
+            if shutil.which("kdialog") and not self._is_packaged_appimage():
+                paths = self._run_dialog_command(["kdialog", "--title", "Select Character Card Forge Data Folder", "--getexistingdirectory", str(USER_DATA_ROOT)], "kdialog_folder") or []
+            if not paths and shutil.which("zenity") and not self._is_packaged_appimage():
+                paths = self._run_dialog_command(["zenity", "--file-selection", "--directory", "--title", "Select Character Card Forge Data Folder"], "zenity_folder") or []
+            if not paths:
+                window = webview.windows[0] if webview.windows else None
+                if window and hasattr(webview, "FOLDER_DIALOG"):
+                    result = window.create_file_dialog(webview.FOLDER_DIALOG)
+                    if isinstance(result, (list, tuple)):
+                        paths = [str(x) for x in result if str(x).strip()]
+                    elif result:
+                        paths = [str(result)]
+            if not paths:
+                return {"ok": False, "cancelled": True}
+            return {"ok": True, "path": str(Path(paths[0]).expanduser().resolve())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def save_settings(self, settings):
-        self.settings = self._normalise_settings({**self.settings, **(settings or {})})
+        incoming = dict(settings or {})
+        requested_data_root = str(incoming.get("dataFilesFolder") or "").strip()
+        data_root_result = None
+        if requested_data_root:
+            try:
+                requested_path = Path(requested_data_root).expanduser().resolve()
+                if requested_path != USER_DATA_ROOT.resolve():
+                    data_root_result = self._copy_user_data_to(requested_path)
+            except Exception as e:
+                data_root_result = {"ok": False, "error": f"Could not process data folder: {e}"}
+        self.settings = self._normalise_settings({**self.settings, **incoming})
+        self.settings["dataFilesFolder"] = str(USER_DATA_ROOT if not data_root_result or not data_root_result.get("ok") else Path(requested_data_root).expanduser().resolve())
         self._save_json(SETTINGS_FILE, self.settings)
-        return {"ok": True, "settings": self.settings}
+        result = {"ok": True, "settings": self.settings}
+        if data_root_result:
+            result["dataFolder"] = data_root_result
+            result["restartRequired"] = bool(data_root_result.get("restartRequired"))
+        return result
 
     def save_template(self, template):
         if not isinstance(template, dict) or "sections" not in template:
@@ -1802,6 +1914,40 @@ class Api:
             }
         return {"ok": True, "estimatedInputTokens": estimated, "maxInputTokens": limit}
 
+    def _allowed_tags_from_settings(self, settings=None):
+        settings = settings or self.settings or {}
+        raw = settings.get("allowedTags") or ""
+        if isinstance(raw, list):
+            parts = raw
+        else:
+            parts = re.split(r"[,\n]+", str(raw or ""))
+        out = []
+        seen = set()
+        for item in parts:
+            tag = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(item or "").strip().lower()).strip("-")
+            if tag and tag not in seen:
+                seen.add(tag)
+                out.append(tag)
+        return out
+
+    def _apply_restricted_tags_to_output(self, output, template=None, settings=None):
+        settings = settings or self.settings or {}
+        if not settings.get("restrictTags"):
+            return output
+        allowed = self._allowed_tags_from_settings(settings)
+        if not allowed:
+            return output
+        current = self._extract_tags_from_output(output, template or self.template)
+        allowed_set = {t.lower() for t in allowed}
+        filtered = []
+        seen = set()
+        for tag in current:
+            key = str(tag or "").strip().lower()
+            if key in allowed_set and key not in seen:
+                seen.add(key)
+                filtered.append(key)
+        return self._replace_tags_section(output, filtered, template or self.template)
+
     def build_prompt(self, concept, template=None, settings=None, chunk=None):
         template = template or self.template
         settings = self._normalise_settings({**self.settings, **(settings or {})})
@@ -1818,7 +1964,14 @@ class Api:
         lines.append("Follow the user-configured template exactly. Do not invent disabled sections.")
         lines.append("All primary characters and romantic/sexual participants must be 18+.")
         lines.append("If a source concept conflicts with the age rule, age characters up and adjust the setting.")
-        if settings.get("cardMode") == "multi":
+        if settings.get("cardMode") == "split_cards":
+            lines.append("CARD MODE: SPLIT INTO MULTIPLE CARDS — CURRENT PASS IS ONE CHARACTER ONLY.")
+            lines.append("Generate exactly one importable character card for the focused main character named in the concept instructions for this pass.")
+            lines.append("The focused character is the card's {{char}}. Do not make the card a group/multi-character card.")
+            lines.append("Other important characters from the original concept must be kept as Lorebook Entries or background/supporting cast references so {{char}} can still remember and refer to them.")
+            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, and Stable Diffusion Prompt must all focus on the focused character only.")
+            lines.append("Tags should describe the focused character/card, not the whole group, unless the Tags section is disabled.")
+        elif settings.get("cardMode") == "multi":
             count = int(settings.get("multiCharacterCount") or 2)
             lines.append("CARD MODE: MULTI-CHARACTER SINGLE CARD.")
             lines.append(f"Create one importable character card that contains approximately {count} primary characters in the same card.")
@@ -1877,6 +2030,11 @@ class Api:
             desc = section.get("description", "")
             if desc:
                 lines.append(desc)
+            if section.get("id") == "tags" and settings.get("restrictTags"):
+                allowed_tags = self._allowed_tags_from_settings(settings)
+                if allowed_tags:
+                    lines.append("RESTRICTED TAG MODE: choose tags ONLY from this allowed list. Do not invent new tags.")
+                    lines.append("Allowed tags: " + ", ".join(allowed_tags))
             if section.get("id") == "stable_diffusion":
                 lines.append("Return only these labels and their comma-separated prompt text: Positive Prompt: ... and Negative Prompt: ...")
                 lines.append("Do not echo helper text, ordering guidance, field descriptions, or explanations inside the Stable Diffusion Prompt section.")
@@ -2185,7 +2343,7 @@ class Api:
             "Compact Lite generation for an 8k-context model. Return only the requested card sections.",
             "Use separator line ------------------------------------------------ before every section.",
             "All characters and sexual/romantic participants are 18+ fictional adults.",
-            "Card mode: " + ("MULTI-CHARACTER SINGLE CARD" if settings.get("cardMode") == "multi" else "SINGLE CHARACTER CARD"),
+            "Card mode: " + ("SPLIT INTO MULTIPLE CARDS — ONE FOCUSED CHARACTER FOR THIS PASS" if settings.get("cardMode") == "split_cards" else ("MULTI-CHARACTER SINGLE CARD" if settings.get("cardMode") == "multi" else "SINGLE CHARACTER CARD")),
             "Requested sections this pass: " + chunk_sections.get(chunk, chunk_sections["core"]),
             "First Message style: " + style_text,
             f"Alternative First Messages requested: {alt_count}",
@@ -2570,6 +2728,121 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _fallback_split_character_names(self, concept, settings):
+        names = []
+        pattern = re.compile(r"(?im)^\s*(?:character\s*\d+|char\s*\d+|name)\s*[:\-]\s*([^\n,;]{2,80})")
+        for m in pattern.finditer(concept or ""):
+            name = re.sub(r"[^A-Za-z0-9_ '\-]", "", m.group(1)).strip()
+            if name and name.lower() not in {n.lower() for n in names}:
+                names.append(name)
+        count = max(2, min(12, int(settings.get("multiCharacterCount") or 2)))
+        while len(names) < count:
+            names.append(f"Character {len(names) + 1}")
+        return names[:count]
+
+    def identify_split_characters(self, concept, settings=None):
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        fallback = self._fallback_split_character_names(concept, merged)
+        validation = self._validate_text_api_settings(merged)
+        if not validation.get("ok"):
+            return {"ok": True, "characters": fallback, "fallback": True, "notes": validation.get("error", "")}
+        prompt = "\n".join([
+            "Identify the main characters that should each receive their own separate character card.",
+            "Return strict JSON only: {\"characters\":[\"Name 1\",\"Name 2\"]}.",
+            "Include only primary/main roleplay characters, not background-only side characters.",
+            "If names are unknown, use short labels like Character 1, Character 2.",
+            f"Maximum characters: {max(2, min(12, int(merged.get('multiCharacterCount') or 2)))}",
+            "CONCEPT:",
+            (concept or "").strip(),
+        ])
+        try:
+            model = (merged.get("aiSuggestionModel") or merged.get("model") or "").strip()
+            raw = self._chat_once(prompt, {**merged, "streamAi": False, "_streamTarget": ""}, model, "split_character_identification")
+            parsed = self._loads_model_json(raw)
+            chars = parsed.get("characters") if isinstance(parsed, dict) else []
+            out = []
+            for item in chars or []:
+                name = str(item or "").strip()[:80]
+                if name and name.casefold() not in {n.casefold() for n in out}:
+                    out.append(name)
+            if not out:
+                out = fallback
+            return {"ok": True, "characters": out[:12], "fallback": False}
+        except Exception as e:
+            return {"ok": True, "characters": fallback, "fallback": True, "notes": str(e)}
+
+    def _split_card_focus_concept(self, original_concept, focus_name, all_names, qa_answers=""):
+        other_names = [n for n in all_names if n != focus_name]
+        instructions = [
+            "SPLIT-CARD GENERATION PASS",
+            f"Focused main character for this card: {focus_name}",
+            f"This pass must generate one single-character card for {focus_name} only.",
+            "The focused character is {{char}} and must be treated as the main playable character.",
+            "Do not create a group card and do not include other primary characters as co-protagonists in the main Description/Personality sections.",
+            "Other named characters from the original concept should appear as lorebook entries, relationship context, background references, or supporting cast so the focused character can still reference them.",
+        ]
+        if other_names:
+            instructions.append("Other characters to preserve as lorebook/supporting references: " + ", ".join(other_names))
+        if qa_answers:
+            instructions.append("Shared Q&A context may contain information about all characters. Apply only the parts relevant to the focused character, and convert other character details into lore/background references.")
+        return "\n".join(instructions) + "\n\nORIGINAL MULTI-CHARACTER CONCEPT:\n" + (original_concept or "").strip() + (("\n\nPRE-GENERATION Q&A NOTES:\n" + qa_answers.strip()) if qa_answers else "")
+
+    def _extract_output_name(self, output, fallback="Character"):
+        try:
+            name = self._extract_name(output)
+            if name:
+                return name
+        except Exception:
+            pass
+        return fallback or "Character"
+
+    def generate_split_cards(self, concept, template, settings, qa_answers=""):
+        self._reset_cancel()
+        if not concept or not concept.strip():
+            return {"ok": False, "error": "Enter a character concept first."}
+        merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        merged_settings["cardMode"] = "split_cards"
+        self.save_settings(merged_settings)
+        template = self._normalise_template(template)
+        self.save_template(template)
+        settings_check = self._validate_text_api_settings(merged_settings)
+        if not settings_check.get("ok"):
+            return settings_check
+        ident = self.identify_split_characters(concept, merged_settings)
+        names = ident.get("characters") or self._fallback_split_character_names(concept, merged_settings)
+        cards = []
+        try:
+            for idx, focus in enumerate(names):
+                self._raise_if_cancelled()
+                per_settings = {**merged_settings, "cardMode": "split_cards", "_streamTarget": ""}
+                per_qa = (qa_answers or "").strip()
+                if template.get("qa", {}).get("enabled") and not per_qa:
+                    q_concept = self._split_card_focus_concept(concept, focus, names)
+                    per_qa = self._generate_template_qa(q_concept, template, per_settings)
+                focus_concept = self._split_card_focus_concept(concept, focus, names, per_qa)
+                self._reset_backup_info()
+                output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(focus_concept, template, per_settings)), template, per_settings)
+                validation = self.validate_output_against_template(output, template, per_settings)
+                repair_info = {"repaired": False, "missing": []}
+                if not validation.get("ok"):
+                    output, repair_info = self._repair_missing_output(output, focus_concept, template, per_settings, validation.get("missing", []))
+                    output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, per_settings)
+                    validation = self.validate_output_against_template(output, template, per_settings)
+                cards.append({
+                    "name": self._extract_output_name(output, focus),
+                    "focusName": focus,
+                    "output": output,
+                    "qaAnswers": per_qa,
+                    "emotionImages": [],
+                    "generatedImages": [],
+                    "cardImagePath": "",
+                    "validation": validation,
+                    "repair": repair_info,
+                })
+            return {"ok": True, "cards": cards, "characters": names, "identification": ident}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "cards": cards}
+
     def generate_with_qa_answers(self, concept, template, settings, qa_answers=""):
         self._reset_cancel()
         if not concept or not concept.strip():
@@ -2589,7 +2862,7 @@ class Api:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings))
+            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -2600,7 +2873,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
-                output = self._clean_generated_output(output)
+                output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -2628,7 +2901,7 @@ class Api:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings))
+            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -2639,7 +2912,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
-                output = self._clean_generated_output(output)
+                output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -2671,7 +2944,7 @@ class Api:
             "Revise the existing fictional character card according to the user's follow-up request.",
             "Return the complete revised card, not a diff or commentary.",
             "Keep the same section order and do not add disabled sections.",
-            ("Card mode: MULTI-CHARACTER SINGLE CARD. Preserve all primary characters inside one {{char}} card; do not split into multiple cards or multi-chat." if merged_settings.get("cardMode") == "multi" else "Card mode: SINGLE CHARACTER CARD."),
+            ("Card mode: SPLIT CARDS. Revise only the currently focused character card. Keep other original characters as lorebook/background references, not co-protagonists." if merged_settings.get("cardMode") == "split_cards" else ("Card mode: MULTI-CHARACTER SINGLE CARD. Preserve all primary characters inside one {{char}} card; do not split into multiple cards or multi-chat." if merged_settings.get("cardMode") == "multi" else "Card mode: SINGLE CHARACTER CARD.")),
             "Preserve good content unless the follow-up request changes it.",
             f"Enabled section order: {', '.join(enabled_sections)}",
             f"First Message style currently selected: {style_text}",
@@ -2705,7 +2978,7 @@ class Api:
                     return check
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._clean_generated_output(self._chat(prompt, output_settings))
+            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._chat(prompt, output_settings)), template, merged_settings)
             info = self._get_backup_info()
             if info.get("used"):
                 info["phase"] = "followup_revision"
