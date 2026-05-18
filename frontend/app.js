@@ -29,6 +29,8 @@ let outputEditorSaveTimer = null;
 let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
+let conceptImportFile = null;
+let conceptImportUrlValue = "";
 let currentLoadedType = "";
 let characterOutputTabs = [];
 let activeOutputTabIndex = 0;
@@ -486,6 +488,7 @@ function bindSubTabs() {
 }
 
 async function init() {
+  installConceptImportModalDelegatedHandlers();
   bindTabs();
   bindSubTabs();
   const state = await window.pywebview.api.get_state();
@@ -553,28 +556,33 @@ function hydrateSettings() {
 }
 
 
+function cleanOutputTabName(value) {
+  let name = String(value || '').trim().replace(/^[-*•\s]+/, '').replace(/^["“”]+|["“”]+$/g, '');
+  if (!name) return '';
+  const beforeParen = name.split(/\s*\(/)[0].trim();
+  if (beforeParen && beforeParen.length <= 80) name = beforeParen;
+  name = name.split(/\s+(?:often|usually|sometimes|also|aka|a\.k\.a\.|known as|who )\b/i)[0].trim();
+  name = name.split(/\s*[,;]\s*/)[0].trim();
+  return name.slice(0, 80);
+}
+
 function extractOutputNameForTab(output) {
   const text = String(output || '');
-  const m = text.match(new RegExp('(?:^|\\n)\\s*(?:-{3,}\\s*)?Name\\s*:?\\s*\\n\\s*([^\\n]+)', 'i')) || text.match(new RegExp('(?:^|\\n)\\s*Name\\s*[:：]\\s*([^\\n]+)', 'i'));
-  return m ? m[1].trim().slice(0, 80) : '';
+  const m = text.match(new RegExp('(?:^|\n)\s*(?:-{3,}\s*)?Name\s*:?\s*\n\s*([^\n]+)', 'i')) || text.match(new RegExp('(?:^|\n)\s*Name\s*[:：]\s*([^\n]+)', 'i'));
+  return m ? cleanOutputTabName(m[1]) : '';
 }
 
 function applyLoadedState(state) {
   currentLoadedType = String(state?.loadedType || "");
-  if (state.settings) {
-    settings = state.settings;
-    if (!['chara_v2_png','chara_v2_json','markdown'].includes(settings.exportFormat)) settings.exportFormat = 'chara_v2_png';
-    hydrateSettings();
-    updateCardModeHint();
-    renderStyles();
-    renderEmotionOptions();
-  }
-  if (state.template) {
-    template = state.template;
-    activeTemplateName = (state.settings && state.settings.activeTemplateName) || activeTemplateName || 'Default';
-    renderTemplateSelector();
-    renderTemplate();
-  }
+  // Settings are global app preferences, not per-card workspace state.
+  // Older saved projects may contain a snapshot of settings, but loading a
+  // character must not revert the user's current model/API/export/browser
+  // settings. Keep the current global settings object and only restore card
+  // content/workspace fields below.
+  if (!settings) settings = collectSettings();
+  // Templates are also treated as the currently selected global prompt setup.
+  // A loaded card can still show/edit its generated text without replacing the
+  // user's active template or activeTemplateName.
   if (typeof state.concept === 'string') {
     $('#conceptText').value = state.concept;
   }
@@ -1371,15 +1379,20 @@ function bindActions() {
   $('#savedFileInput').addEventListener('change', handleSavedFileSelected);
   $('#builderCardFileInput')?.addEventListener('change', handleBuilderCardFileSelected);
   $('#conceptCardFileInput')?.addEventListener('change', handleConceptCardFileSelected);
+  $('#conceptImportFileInput')?.addEventListener('change', handleConceptImportFileSelected);
+  $('#openConceptImportModalBtn')?.addEventListener('click', openConceptImportModal);
+  $('#closeConceptImportModalBtn')?.addEventListener('click', closeConceptImportModal);
+  $('#clearConceptImportSourceBtn')?.addEventListener('click', clearConceptImportSource);
+  $('#conceptImportAsMainBtn')?.addEventListener('click', () => runConceptImport('main'));
+  $('#conceptImportAsBuildersBtn')?.addEventListener('click', () => runConceptImport('builders'));
 
   bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles });
   bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles });
   bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles });
-  bindDropZone('builderCardDropZoneMain', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
   bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
-  bindDropZone('conceptCardDropZoneMain', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles });
   bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles });
   bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles });
+  bindConceptImportDropZone();
   enhanceBuilderAiButtons();
   populateBuilderPresets();
   populateAiRandomThemes();
@@ -2792,6 +2805,7 @@ function collectWorkspacePayload() {
     builderState: collectBuilderWorkspaceState(),
     qnaAnswers: lastQnaAnswers || ($('#qaAnswersText')?.value || ''),
     emotionImages: emotionImageState || [],
+    generatedImages: (characterOutputTabs[activeOutputTabIndex]?.generatedImages) || [],
     visionDescription: $('#visionDescription')?.value || '',
     conceptAttachments: conceptAttachments || [],
     cardImagePath: settings.cardImagePath || $('#cardImagePath')?.value || '',
@@ -4503,6 +4517,253 @@ async function loadSavedCardOrProjectFromUrl() {
   }
 }
 
+
+function syncConceptImportUrlFromInput(value = null) {
+  const input = $('#conceptImportUrl');
+  const raw = value !== null ? value : (input ? input.value : '');
+  conceptImportUrlValue = String(raw || '').trim();
+  if (input && value !== null) input.value = String(raw || '');
+  return conceptImportUrlValue;
+}
+
+function updateConceptImportSelected() {
+  const holder = $('#conceptImportSelected');
+  if (!holder) return;
+  const url = syncConceptImportUrlFromInput();
+  const file = conceptImportFile;
+  if (file) {
+    holder.textContent = `Selected file: ${file.name || 'file'}${url && isProbablyUrl(url) ? ' + URL also entered; URL will be used first.' : ''}`;
+  } else if (url) {
+    holder.textContent = isProbablyUrl(url) ? `Selected URL: ${url}` : `Selected file/path text: ${url}`;
+  } else {
+    holder.textContent = 'No file or URL selected.';
+  }
+}
+
+function openConceptImportModal() {
+  const modal = $('#conceptImportModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  } else {
+    setStatus('Import Card/Image popup could not be found in the page.', 'error');
+  }
+  syncConceptImportUrlFromInput();
+  updateConceptImportSelected();
+}
+
+function closeConceptImportModal() {
+  const modal = $('#conceptImportModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function clearConceptImportSource() {
+  conceptImportFile = null;
+  conceptImportUrlValue = '';
+  const fileInput = $('#conceptImportFileInput');
+  if (fileInput) fileInput.value = '';
+  const urlInput = $('#conceptImportUrl');
+  if (urlInput) urlInput.value = '';
+  updateConceptImportSelected();
+}
+
+// Backwards-compatible names for older bindings.
+function clearConceptImportFile() { clearConceptImportSource(); }
+function clearConceptImportUrl() { clearConceptImportSource(); }
+
+function setConceptImportFile(file) {
+  if (!file) return;
+  conceptImportFile = file;
+  // File inputs do not expose full paths in WebView, so show the filename in the shared source box.
+  // The actual File object remains the source of truth for import.
+  const input = $('#conceptImportUrl');
+  if (input && !isProbablyUrl(input.value || '')) input.value = file.name || '';
+  conceptImportUrlValue = '';
+  updateConceptImportSelected();
+}
+
+function bindConceptImportDropZone() {
+  const zone = $('#conceptImportDropZone');
+  if (!zone || zone.dataset.ccfConceptImportBound) return;
+  zone.dataset.ccfConceptImportBound = '1';
+  zone.addEventListener('click', (e) => {
+    e.preventDefault();
+    openBrowserFileInput('conceptImportFileInput', 'card or image');
+  });
+  zone.addEventListener('dragenter', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', (e) => { e.preventDefault(); zone.classList.remove('dragover'); });
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    zone.classList.remove('dragover');
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) { setStatus('No dropped file was detected.', 'error'); return; }
+    setConceptImportFile(file);
+  });
+  const urlInput = $('#conceptImportUrl');
+  if (urlInput && !urlInput.dataset.ccfBoundUrlInput) {
+    urlInput.dataset.ccfBoundUrlInput = '1';
+    ['input','change','keyup','blur'].forEach(evt => urlInput.addEventListener(evt, () => {
+      if (isProbablyUrl(urlInput.value || '') || !(conceptImportFile && urlInput.value === conceptImportFile.name)) {
+        conceptImportUrlValue = String(urlInput.value || '').trim();
+      }
+      updateConceptImportSelected();
+    }));
+    urlInput.addEventListener('paste', (e) => {
+      const pasted = e.clipboardData?.getData('text') || '';
+      if (pasted.trim()) conceptImportUrlValue = pasted.trim();
+      setTimeout(() => { syncConceptImportUrlFromInput(); updateConceptImportSelected(); }, 0);
+      setTimeout(() => { syncConceptImportUrlFromInput(); updateConceptImportSelected(); }, 50);
+    });
+  }
+}
+
+function handleConceptImportFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  setConceptImportFile(file);
+}
+
+function conceptImportSourceUrl() {
+  const current = syncConceptImportUrlFromInput();
+  if (current && isProbablyUrl(current)) return current;
+  if (conceptImportUrlValue && isProbablyUrl(conceptImportUrlValue)) return conceptImportUrlValue;
+  return '';
+}
+
+function conceptImportAnalyzeEnabled() {
+  return !!$('#conceptImportAnalyzeBefore')?.checked;
+}
+
+function isImageLikeName(value) {
+  return /\.(png|jpe?g|webp)(?:[?#].*)?$/i.test(String(value || ''));
+}
+
+async function setCardImageFromUrlForImport(url) {
+  if (!url || !isImageLikeName(url)) return '';
+  if ($('#cardImagePath')) $('#cardImagePath').value = url;
+  setVisionImagePath(url);
+  settings = collectSettings();
+  settings.cardImagePath = url;
+  settings.visionImagePath = url;
+  await window.pywebview.api.save_settings(settings);
+  updateImportedCardToolsHint();
+  return url;
+}
+
+async function runAnalyzeForImportedImage(imagePath, { toBuilders = false } = {}) {
+  const path = (imagePath || $('#cardImagePath')?.value || getVisionImagePath() || '').trim();
+  if (!path) throw new Error('Analyze before import is enabled, but no imported image/card image was available.');
+  setVisionImagePath(path);
+  settings = collectSettings();
+  settings.visionImagePath = path;
+  await window.pywebview.api.save_settings(settings);
+  const settingsError = validateVisionApiSettings(settings);
+  if (settingsError) {
+    switchToSettingsTab();
+    throw new Error(settingsError);
+  }
+  setBusy(toBuilders ? 'ANALYZE BEFORE IMPORT — analyzing image and filling builders…' : 'ANALYZE BEFORE IMPORT — analyzing image…');
+  const res = await window.pywebview.api.analyze_vision_image(path, settings);
+  if (!res.ok) throw new Error(res.error || 'Vision analysis failed.');
+  if (!(res.description || '').trim()) throw new Error('Vision model returned an empty description.');
+  if ($('#visionDescription')) $('#visionDescription').value = res.description || '';
+  if (res.imagePath) setVisionImagePath(res.imagePath);
+  if (toBuilders) await transferConceptToBuilders();
+  return res;
+}
+
+async function tryImportImageOnlyForAnalyze({ url = '', file = null, toBuilders = false } = {}) {
+  if (!conceptImportAnalyzeEnabled()) return false;
+  let imagePath = '';
+  if (url && isImageLikeName(url)) {
+    imagePath = await setCardImageFromUrlForImport(url);
+  } else if (file && isImageLikeName(file.name || '')) {
+    const dataUrl = await fileToDataUrl(file);
+    const saved = await window.pywebview.api.save_uploaded_image(file.name, dataUrl, 'card');
+    if (!saved.ok) throw new Error(saved.error || 'Image import failed.');
+    imagePath = saved.path;
+    if ($('#cardImagePath')) $('#cardImagePath').value = imagePath;
+    setVisionImagePath(imagePath);
+  }
+  if (!imagePath) return false;
+  await runAnalyzeForImportedImage(imagePath, { toBuilders });
+  return true;
+}
+
+async function runConceptImport(target) {
+  if (isInterfaceLocked()) return;
+  syncConceptImportUrlFromInput();
+  updateConceptImportSelected();
+  const url = conceptImportSourceUrl();
+  const file = conceptImportFile;
+  if (url && !isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// URL.', 'error'); return; }
+  if (!url && !file) { setStatus('Choose a file or enter a URL first.', 'error'); return; }
+  const analyze = conceptImportAnalyzeEnabled();
+  const toBuilders = target === 'builders';
+  if (toBuilders && !confirmLoadCardToBuildersWarning()) return;
+  if (!toBuilders && !confirmLoadCardToMainConceptWarning()) return;
+  settings = collectSettings();
+  if (toBuilders) {
+    const missing = validateTextApiSettings(settings);
+    if (missing) { setStatus(missing, 'error'); switchToSettingsTab(); return; }
+  }
+  try {
+    setBusy(toBuilders ? 'IMPORT CARD / IMAGE — importing into builders…' : 'IMPORT CARD / IMAGE — importing into Main Concept…');
+    let res = null;
+    let imageForAnalysis = '';
+    if (url) {
+      if (isImageLikeName(url)) imageForAnalysis = await setCardImageFromUrlForImport(url);
+      if (toBuilders) {
+        const catalog = collectCompactBuilderFieldCatalog();
+        res = await window.pywebview.api.card_url_to_builders(url, catalog, settings);
+      } else {
+        res = await window.pywebview.api.card_url_to_main_concept(url, settings);
+      }
+      if (res?.ok) {
+        if (toBuilders) await applyCardToBuildersResult(res, url);
+        else await applyCardToMainConceptResult(res, url);
+        if (url && isImageLikeName(url)) imageForAnalysis = url;
+      }
+    } else if (file) {
+      const dataUrl = await fileToDataUrl(file);
+      if (toBuilders) {
+        const catalog = collectCompactBuilderFieldCatalog();
+        res = await window.pywebview.api.card_upload_to_builders(file.name, dataUrl, catalog, settings);
+      } else {
+        res = await window.pywebview.api.card_upload_to_main_concept(file.name, dataUrl, settings);
+      }
+      if (res?.ok) {
+        if (toBuilders) await applyCardToBuildersResult(res, file.name);
+        else await applyCardToMainConceptResult(res, file.name);
+        imageForAnalysis = res.imagePath || ($('#cardImagePath')?.value || '').trim();
+      }
+    }
+
+    if (!res?.ok) {
+      const recovered = await tryImportImageOnlyForAnalyze({ url, file, toBuilders });
+      if (!recovered) throw new Error(res?.error || 'Import failed. If this is only an image, enable Analyze before import.');
+    } else if (analyze) {
+      imageForAnalysis = imageForAnalysis || ($('#cardImagePath')?.value || '').trim() || (url && isImageLikeName(url) ? url : '');
+      await runAnalyzeForImportedImage(imageForAnalysis, { toBuilders });
+    }
+
+    closeConceptImportModal();
+    updateAvailability();
+    setStatus(toBuilders ? 'Import complete. Builders updated.' : 'Import complete. Main Concept updated.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+    updateAvailability();
+  }
+}
+
 function confirmLoadCardToMainConceptWarning() {
   const currentConcept = ($('#conceptText')?.value || '').trim();
   const warning = [
@@ -4769,4 +5030,98 @@ function escapeText(value) {
   return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
+
+function installConceptImportModalDelegatedHandlers() {
+  if (window.__ccfConceptImportModalDelegated) return;
+  window.__ccfConceptImportModalDelegated = true;
+  document.addEventListener('click', (event) => {
+    const openBtn = event.target?.closest?.('#openConceptImportModalBtn');
+    if (openBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      openConceptImportModal();
+      return;
+    }
+    const closeBtn = event.target?.closest?.('#closeConceptImportModalBtn');
+    if (closeBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeConceptImportModal();
+      return;
+    }
+    const clearBtn = event.target?.closest?.('#clearConceptImportSourceBtn');
+    if (clearBtn) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearConceptImportSource();
+      return;
+    }
+    const zone = event.target?.closest?.('#conceptImportDropZone');
+    if (zone) {
+      event.preventDefault();
+      event.stopPropagation();
+      openBrowserFileInput('conceptImportFileInput', 'card or image');
+      return;
+    }
+    const importMain = event.target?.closest?.('#conceptImportAsMainBtn');
+    if (importMain) {
+      event.preventDefault();
+      event.stopPropagation();
+      runConceptImport('main');
+      return;
+    }
+    const importBuilders = event.target?.closest?.('#conceptImportAsBuildersBtn');
+    if (importBuilders) {
+      event.preventDefault();
+      event.stopPropagation();
+      runConceptImport('builders');
+      return;
+    }
+    if (event.target?.id === 'conceptImportModal') {
+      event.preventDefault();
+      closeConceptImportModal();
+    }
+  }, true);
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('#conceptImportModal')?.classList.contains('hidden')) {
+      closeConceptImportModal();
+    }
+  }, true);
+
+  document.addEventListener('input', (event) => {
+    if (event.target?.id === 'conceptImportUrl') {
+      syncConceptImportUrlFromInput();
+      updateConceptImportSelected();
+    }
+  }, true);
+  document.addEventListener('change', (event) => {
+    if (event.target?.id === 'conceptImportUrl') {
+      syncConceptImportUrlFromInput();
+      updateConceptImportSelected();
+    }
+  }, true);
+  document.addEventListener('paste', (event) => {
+    if (event.target?.id === 'conceptImportUrl') {
+      const pasted = event.clipboardData?.getData('text') || '';
+      if (pasted.trim()) conceptImportUrlValue = pasted.trim();
+      setTimeout(() => { syncConceptImportUrlFromInput(); updateConceptImportSelected(); }, 0);
+      setTimeout(() => { syncConceptImportUrlFromInput(); updateConceptImportSelected(); }, 60);
+    }
+  }, true);
+
+  document.addEventListener('dragover', (event) => {
+    if (event.target?.closest?.('#conceptImportDropZone')) event.preventDefault();
+  }, true);
+  document.addEventListener('drop', (event) => {
+    if (!event.target?.closest?.('#conceptImportDropZone')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) { setStatus('No dropped file was detected.', 'error'); return; }
+    setConceptImportFile(file);
+  }, true);
+}
+
+installConceptImportModalDelegatedHandlers();
 window.addEventListener('pywebviewready', init);

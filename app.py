@@ -698,6 +698,22 @@ class Api:
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE browser_cards ADD COLUMN {col} {ddl}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_browser_cards_project_hash ON browser_cards(project_hash)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS workspace_assets (
+                    project_path TEXT NOT NULL,
+                    asset_key TEXT NOT NULL,
+                    asset_type TEXT NOT NULL DEFAULT '',
+                    filename TEXT NOT NULL DEFAULT '',
+                    mime_type TEXT NOT NULL DEFAULT '',
+                    source_path TEXT NOT NULL DEFAULT '',
+                    data_text TEXT NOT NULL DEFAULT '',
+                    data_blob BLOB,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(project_path, asset_key)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_workspace_assets_project ON workspace_assets(project_path)")
 
             # Migrate old settings virtual folders into DB. This is idempotent.
             folders = self.settings.get("browserVirtualFolders") if isinstance(self.settings.get("browserVirtualFolders"), list) else []
@@ -845,6 +861,217 @@ class Api:
             return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()
         except Exception:
             return ""
+
+    def _asset_data_url_to_blob(self, data_url):
+        try:
+            text = str(data_url or "")
+            m = re.match(r"^data:([^;,]+)?(?:;charset=[^;,]+)?;base64,(.*)$", text, re.I | re.S)
+            if not m:
+                return "", None
+            mime = (m.group(1) or "application/octet-stream").strip()
+            blob = base64.b64decode(re.sub(r"\s+", "", m.group(2) or ""), validate=False)
+            return mime, blob
+        except Exception:
+            return "", None
+
+    def _blob_to_data_url(self, mime, blob):
+        try:
+            if blob is None:
+                return ""
+            return f"data:{mime or 'application/octet-stream'};base64," + base64.b64encode(blob).decode("ascii")
+        except Exception:
+            return ""
+
+    def _store_workspace_asset(self, conn, project_path, asset_key, asset_type, *, filename='', mime_type='', source_path='', data_text='', data_blob=None, metadata=None):
+        conn.execute(
+            """
+            INSERT INTO workspace_assets(project_path, asset_key, asset_type, filename, mime_type, source_path, data_text, data_blob, metadata_json, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(project_path, asset_key) DO UPDATE SET
+                asset_type=excluded.asset_type,
+                filename=excluded.filename,
+                mime_type=excluded.mime_type,
+                source_path=excluded.source_path,
+                data_text=excluded.data_text,
+                data_blob=excluded.data_blob,
+                metadata_json=excluded.metadata_json,
+                created_at=CURRENT_TIMESTAMP
+            """,
+            (str(project_path), str(asset_key), str(asset_type), str(filename or ''), str(mime_type or ''), str(source_path or ''), str(data_text or ''), data_blob, json.dumps(metadata or {}, ensure_ascii=False)),
+        )
+
+    def _read_file_asset_blob(self, path):
+        try:
+            p = Path(str(path or ""))
+            if not p.exists() or not p.is_file():
+                return "", None, ""
+            mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+            return mime, p.read_bytes(), p.name
+        except Exception:
+            return "", None, ""
+
+    def _save_workspace_assets_to_db(self, project_path, workspace, image_path=''):
+        """Persist restore-critical workspace assets into SQLite and replace old asset rows.
+
+        Project JSON remains a lightweight fallback/manifest; binary image previews,
+        emotion/generated image data, and attachment extracted text live in SQLite so
+        temp folders can be safely cleaned.
+        """
+        self._init_library_db()
+        project_key = str(Path(project_path).resolve())
+        workspace = workspace or {}
+        with self._library_connect() as conn:
+            conn.execute("DELETE FROM workspace_assets WHERE project_path=?", (project_key,))
+            self._store_workspace_asset(conn, project_key, "workspace_payload", "json", data_text=json.dumps(workspace, ensure_ascii=False), metadata={"kind":"workspace"})
+            if image_path:
+                mime, blob, filename = self._read_file_asset_blob(image_path)
+                if blob:
+                    self._store_workspace_asset(conn, project_key, "selected_card_image", "image", filename=filename, mime_type=mime, source_path=image_path, data_blob=blob, metadata={"role":"selected_card_image"})
+            def store_image_list(prefix, images):
+                if not isinstance(images, list):
+                    return
+                for idx, item in enumerate(images):
+                    if not isinstance(item, dict):
+                        continue
+                    key = f"{prefix}_{idx:04d}"
+                    meta = {k:v for k,v in item.items() if k not in {"dataUrl"}}
+                    data_url = item.get("dataUrl") or ""
+                    mime, blob = self._asset_data_url_to_blob(data_url)
+                    filename = Path(str(item.get("path") or item.get("filename") or key)).name
+                    if not blob and item.get("path"):
+                        mime, blob, filename = self._read_file_asset_blob(item.get("path"))
+                    if blob:
+                        self._store_workspace_asset(conn, project_key, key, prefix, filename=filename, mime_type=mime, source_path=item.get("path") or "", data_blob=blob, metadata=meta)
+            store_image_list("generated_image", workspace.get("generatedImages") or [])
+            store_image_list("emotion_image", workspace.get("emotionImages") or [])
+            tabs = workspace.get("characterTabs") if isinstance(workspace.get("characterTabs"), list) else []
+            for t_idx, tab in enumerate(tabs):
+                if not isinstance(tab, dict):
+                    continue
+                for idx, item in enumerate(tab.get("generatedImages") or []):
+                    if isinstance(item, dict):
+                        mime, blob = self._asset_data_url_to_blob(item.get("dataUrl") or "")
+                        filename = Path(str(item.get("path") or f"tab{t_idx}_generated_{idx}.png")).name
+                        if not blob and item.get("path"):
+                            mime, blob, filename = self._read_file_asset_blob(item.get("path"))
+                        if blob:
+                            meta = {k:v for k,v in item.items() if k != "dataUrl"}
+                            meta["tabIndex"] = t_idx
+                            self._store_workspace_asset(conn, project_key, f"tab_{t_idx:03d}_generated_{idx:04d}", "tab_generated_image", filename=filename, mime_type=mime, source_path=item.get("path") or "", data_blob=blob, metadata=meta)
+                for idx, item in enumerate(tab.get("emotionImages") or []):
+                    if isinstance(item, dict):
+                        mime, blob = self._asset_data_url_to_blob(item.get("dataUrl") or "")
+                        filename = Path(str(item.get("path") or f"tab{t_idx}_emotion_{idx}.png")).name
+                        if not blob and item.get("path"):
+                            mime, blob, filename = self._read_file_asset_blob(item.get("path"))
+                        if blob:
+                            meta = {k:v for k,v in item.items() if k != "dataUrl"}
+                            meta["tabIndex"] = t_idx
+                            self._store_workspace_asset(conn, project_key, f"tab_{t_idx:03d}_emotion_{idx:04d}", "tab_emotion_image", filename=filename, mime_type=mime, source_path=item.get("path") or "", data_blob=blob, metadata=meta)
+            attachments = workspace.get("conceptAttachments") if isinstance(workspace.get("conceptAttachments"), list) else []
+            for idx, att in enumerate(attachments):
+                if not isinstance(att, dict):
+                    continue
+                text = att.get("text") or att.get("extractedText") or att.get("content") or att.get("preview") or ""
+                self._store_workspace_asset(conn, project_key, f"attachment_{idx:04d}", "attachment_text", filename=att.get("name") or att.get("filename") or "", source_path=att.get("path") or att.get("source") or "", data_text=text, metadata=att)
+            conn.commit()
+
+    def _load_workspace_assets_from_db(self, project_path):
+        self._init_library_db()
+        key = str(Path(project_path).resolve())
+        with self._library_connect() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM workspace_assets WHERE project_path=? ORDER BY asset_key", (key,)).fetchall()]
+        return rows
+
+    def _hydrate_workspace_from_db_assets(self, project_path, loaded):
+        """Merge SQLite workspace assets into a loaded project, with old file JSON as fallback."""
+        try:
+            rows = self._load_workspace_assets_from_db(project_path)
+        except Exception:
+            rows = []
+        if not rows:
+            return loaded
+        generated = []
+        emotions = []
+        attachments_by_idx = {}
+        tabs = loaded.get("characterTabs") if isinstance(loaded.get("characterTabs"), list) else []
+        for r in rows:
+            key = r.get("asset_key") or ""
+            atype = r.get("asset_type") or ""
+            try:
+                meta = json.loads(r.get("metadata_json") or "{}")
+            except Exception:
+                meta = {}
+            data_url = self._blob_to_data_url(r.get("mime_type"), r.get("data_blob"))
+            if atype == "image" and key == "selected_card_image" and data_url:
+                loaded["imageDataUrl"] = data_url
+                # Keep the original source path if present; old project fallback still works.
+                loaded["imagePath"] = loaded.get("imagePath") or r.get("source_path") or ""
+            elif atype == "generated_image" and data_url:
+                item = dict(meta or {})
+                item["dataUrl"] = data_url
+                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                generated.append(item)
+            elif atype == "emotion_image" and data_url:
+                item = dict(meta or {})
+                item["dataUrl"] = data_url
+                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                emotions.append(item)
+            elif atype == "attachment_text":
+                try:
+                    idx = int(key.split("_")[-1])
+                except Exception:
+                    idx = len(attachments_by_idx)
+                item = dict(meta or {})
+                text = r.get("data_text") or item.get("text") or item.get("extractedText") or ""
+                item["text"] = text
+                item["extractedText"] = text
+                item["preview"] = item.get("preview") or text[:1000]
+                attachments_by_idx[idx] = item
+            elif atype in {"tab_generated_image", "tab_emotion_image"} and data_url:
+                t_idx = int(meta.get("tabIndex") or 0)
+                while len(tabs) <= t_idx:
+                    tabs.append({"name": f"Character {len(tabs)+1}", "output":"", "qaAnswers":"", "emotionImages":[], "generatedImages":[], "cardImagePath":""})
+                item = dict(meta or {})
+                item["dataUrl"] = data_url
+                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                if atype == "tab_generated_image":
+                    tabs[t_idx].setdefault("generatedImages", []).append(item)
+                else:
+                    tabs[t_idx].setdefault("emotionImages", []).append(item)
+        if generated:
+            loaded["generatedImages"] = generated
+        if emotions:
+            loaded["emotionImages"] = emotions
+        if attachments_by_idx:
+            loaded["conceptAttachments"] = [attachments_by_idx[i] for i in sorted(attachments_by_idx)]
+        if tabs:
+            loaded["characterTabs"] = tabs
+        return loaded
+
+    def _cleanup_temp_workspace_dirs(self, keep_paths=None):
+        """Delete temp/cache files after SQLite persistence. Old project files remain fallback."""
+        keep = {str(Path(p).resolve()) for p in (keep_paths or []) if p}
+        roots = [GENERATED_IMAGES_DIR, VISION_IMAGES_DIR, CONCEPT_ATTACHMENTS_DIR, IMPORT_UPLOADS_DIR]
+        for root in roots:
+            try:
+                root = Path(root)
+                if not root.exists():
+                    continue
+                for child in list(root.iterdir()):
+                    try:
+                        cpath = str(child.resolve())
+                        if cpath in keep:
+                            continue
+                        if child.is_dir():
+                            shutil.rmtree(child, ignore_errors=True)
+                        else:
+                            child.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                _safe_mkdir(root)
+            except Exception:
+                pass
 
     def _latest_card_png_for_folder(self, folder, name):
         folder = Path(folder)
@@ -3988,7 +4215,7 @@ class Api:
         project = payload.get("project", payload) if isinstance(payload, dict) else {}
         output = project.get("output") or project.get("raw_card") or ""
         workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
-        return {
+        loaded = {
             "ok": True,
             "loadedType": "project",
             "concept": project.get("concept", ""),
@@ -4005,11 +4232,17 @@ class Api:
             "tags": project.get("tags") or workspace.get("tags") or self._extract_tags_from_output(output, project.get("template") or self.template),
             "virtualFolderId": str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or ""),
             "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
+            "generatedImages": project.get("generatedImages") or workspace.get("generatedImages") or [],
+            "characterTabs": project.get("characterTabs") or workspace.get("characterTabs") or [],
             "emotionManifest": project.get("emotionManifest") or workspace.get("emotionManifest") or "",
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
             "conceptAttachments": project.get("conceptAttachments") or workspace.get("conceptAttachments") or [],
-            "message": "Loaded full Character Card Forge project with concept, template, settings, builders, Q&A, emotion images, and output.",
+            "message": "Loaded full Character Card Forge project content. Global Settings were kept unchanged.",
         }
+        project_path = project.get("projectPath") or ""
+        if project_path:
+            loaded = self._hydrate_workspace_from_db_assets(project_path, loaded)
+        return loaded
 
     def _maybe_load_companion_project(self, path):
         folder = path.parent
@@ -4939,6 +5172,8 @@ class Api:
                 "builderState": workspace.get("builderState") or {},
                 "qnaAnswers": workspace.get("qnaAnswers") or "",
                 "emotionImages": workspace.get("emotionImages") or [],
+                "generatedImages": workspace.get("generatedImages") or [],
+                "characterTabs": workspace.get("characterTabs") or [],
                 "emotionManifest": workspace.get("emotionManifest") or "",
                 "visionDescription": workspace.get("visionDescription") or "",
                 "conceptAttachments": workspace.get("conceptAttachments") or [],
@@ -4946,6 +5181,14 @@ class Api:
             }
         }
         latest_project.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            self._save_workspace_assets_to_db(latest_project, workspace, image_path=image_path)
+            # Once SQLite has the restore-critical assets, temp/cache folders can be cleaned.
+            # Keep the selected card image path if it lives in one of these folders so immediate
+            # export after save still works; older project files remain the fallback for old entries.
+            self._cleanup_temp_workspace_dirs(keep_paths=[image_path])
+        except Exception as e:
+            self._log_event("workspace_asset_db_save_failed", {"project": str(latest_project), "error": str(e)})
         # Also keep a timestamped project snapshot on first generation/export moments.
         snapshot = folder / f"{self._safe_slug(safe_name)}_{stamp}_ccf_project.json"
         if not snapshot.exists():
@@ -5813,11 +6056,54 @@ class Api:
                 out = m.group(1).strip()
         return out
 
+    def _clean_character_name_value(self, value):
+        """Keep the Name section/export/tab name to the actual display name only."""
+        name = str(value or "").strip().strip('"“”')
+        if not name:
+            return ""
+        name = re.sub(r"^[-*•\s]+", "", name).strip()
+        before_paren = re.split(r"\s*\(", name, maxsplit=1)[0].strip()
+        if before_paren and 1 <= len(before_paren) <= 80:
+            name = before_paren
+        name = re.split(r"\s+(?:often|usually|sometimes|also|aka|a\.k\.a\.|known as|who )\b", name, maxsplit=1, flags=re.I)[0].strip()
+        name = re.split(r"\s*[,;]\s*", name, maxsplit=1)[0].strip()
+        return name[:80] or str(value or "").strip()[:80]
+
+    def _clean_name_section(self, output):
+        output = output or ""
+        lines = output.splitlines()
+        for i, line in enumerate(lines):
+            try:
+                heading = self._canonical_heading_with_template(line, self.template)
+            except Exception:
+                heading = None
+            if heading != "name":
+                continue
+            for j in range(i + 1, len(lines)):
+                if not lines[j].strip():
+                    continue
+                try:
+                    next_heading = self._canonical_heading_with_template(lines[j], self.template)
+                except Exception:
+                    next_heading = None
+                if next_heading:
+                    return output
+                cleaned = self._clean_character_name_value(lines[j])
+                if cleaned and cleaned != lines[j].strip():
+                    lines[j] = cleaned
+                    return "\n".join(lines)
+                return output
+        def repl(m):
+            cleaned = self._clean_character_name_value(m.group(2))
+            return m.group(1) + cleaned
+        new_output, count = re.subn(r"(?im)^(\s*Name\s*[:：-]\s*)(.+)$", repl, output, count=1)
+        return new_output if count else output
+
     def _clean_generated_output(self, output):
         """Final output cleanup for known prompt/template leakage without removing features."""
         if not output:
             return output
-        text = str(output)
+        text = self._clean_name_section(str(output))
         template = self.template or DEFAULT_TEMPLATE
         parsed = self._parse_sections(text, template)
         sd_body = parsed.get("stable_diffusion") or self._section(text, "Stable Diffusion Prompt")
@@ -6411,10 +6697,10 @@ class Api:
     def _extract_name(self, text):
         m = re.search(r"(?im)^Name\s*\n+([^\n#]+)", text)
         if m:
-            return m.group(1).strip()[:80]
+            return self._clean_character_name_value(m.group(1)) or "Character Card"
         m = re.search(r"(?im)^Name\s*[:\-]\s*(.+)$", text)
         if m:
-            return m.group(1).strip()[:80]
+            return self._clean_character_name_value(m.group(1)) or "Character Card"
         return "Character Card"
 
     def _canonical_heading(self, line):

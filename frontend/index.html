@@ -37,7 +37,7 @@
         <div id="concept-main" class="subtab-panel active" data-subtab-panel="concept">
           <div class="concept-dashboard">
             <div class="concept-primary-panel card">
-              <div class="card-title"><div><h3>Main Concept</h3><p>Write the core idea here. Attachments and import tools now sit beside it so you do not have to scroll past the whole loader arc.</p></div></div>
+              <div class="card-title"><div><h3>Main Concept</h3><p>Write the core idea here. Use Import Card/Image for existing cards, images, URLs, and optional vision analysis.</p></div><div class="actions"><button id="openConceptImportModalBtn" type="button">Import Card/Image</button></div></div>
               <textarea id="conceptText" class="concept" placeholder="Example: A confident gyaru university student who works part-time at a train museum and teases {{user}} about knowing less than her..."></textarea>
             </div>
             <aside class="concept-side-panel">
@@ -50,12 +50,6 @@
                 <summary>Transfer Concept to Builders</summary>
                 <p>Use the full text model to read Main Concept + Character Description and fill Character, Personality, and Scene Builder fields. Builder fields take priority during generation.</p>
                 <div class="actions"><button id="transferToBuildersMainBtn" type="button" class="primary">Transfer to Builders</button></div>
-              </details>
-              <details class="card wide compact-details">
-                <summary>Load Existing Card / Image</summary>
-                <p>Import a V2/V3 PNG/JSON/TXT card into Builders, load it into Main Concept, or analyze an image directly into Builders.</p>
-                <div class="actions"><button id="loadCardToBuildersMainBtn" type="button">Load Card to Builders</button><button id="loadCardToBuildersUrlMainBtn" type="button">Builders URL</button><button id="loadCardToConceptMainBtn" type="button">Load Card to Main Concept</button><button id="loadCardToConceptUrlMainBtn" type="button">Concept URL</button><button id="analyzeImageToBuildersMainBtn" type="button">Analyze Image → Builders</button></div>
-                <div id="builderCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to fill the Builders, or click to browse</div><div id="conceptCardDropZoneMain" class="drop-zone compact">Drop an existing V2/V3 character card here to load only into Main Concept</div>
               </details>
             </aside>
           </div>
@@ -395,6 +389,26 @@
   </div>
   <template id="sectionTemplate"><div class="section-card card" data-section-id=""><div class="section-top"><input class="section-enabled" type="checkbox" /><input class="section-title" /><button class="move-up">↑</button><button class="move-down">↓</button><button class="add-field">Add Field</button><button class="delete-section danger-ghost">Delete</button></div><textarea class="section-desc" placeholder="Section instructions / description"></textarea><div class="fields"></div></div></template>
   <template id="fieldTemplate"><div class="field-row" data-field-id=""><input class="field-enabled" type="checkbox" /><input class="field-label" placeholder="Field label" /><input class="field-hint" placeholder="Hint / rule" /><button class="field-up">↑</button><button class="field-down">↓</button><button class="delete-field danger-ghost">×</button></div></template>
+  <div id="conceptImportModal" class="modal-backdrop hidden">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Import Card / Image</h3>
+          <p>Load one V2/V3 PNG/JSON card, image, or URL, then import it into Main Concept or Builders.</p>
+        </div>
+        <button id="closeConceptImportModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div id="conceptImportDropZone" class="drop-zone">Drop a PNG / JSON character card or image here, or click to browse</div>
+      <div id="conceptImportSelected" class="small muted">No file or URL selected.</div>
+      <label>Card / Image URL or selected file<input id="conceptImportUrl" placeholder="https://example.com/character-card.png or selected file name" /></label>
+      <div class="actions"><button id="clearConceptImportSourceBtn" type="button" class="danger-ghost">Clear</button></div>
+      <label class="toggle-inline"><input id="conceptImportAnalyzeBefore" type="checkbox" /> Analyze before import</label>
+      <p class="small muted">Analyze before import runs the Vision model using the imported image/card image. For Main Concept it fills Character Description / Vision Description too. For Builders it analyzes the image and transfers that description into Builder fields.</p>
+      <div class="actions modal-actions"><button id="conceptImportAsMainBtn" type="button" class="primary">Import as Main Concept</button><button id="conceptImportAsBuildersBtn" type="button">Import into Builders</button></div>
+    </div>
+  </div>
+
+  <input id="conceptImportFileInput" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" hidden />
   <input id="visionFileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden />
   <input id="cardImageFileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden />
   <input id="savedFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
