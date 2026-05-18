@@ -397,6 +397,8 @@ DEFAULT_SETTINGS = {
     "mode": "full",
     "frontend": "front_porch",
     "firstMessageStyle": "cinematic",
+    "firstMessageCustomStyle": "",
+    "firstMessageCustomInstructions": "",
     "alternateFirstMessages": 2,
     "exportFormat": "chara_v2_png",
     "cardImagePath": "",
@@ -408,6 +410,8 @@ DEFAULT_SETTINGS = {
     "sdSampler": "Euler a",
     "emotionImageEmotions": ["neutral"],
     "alternateFirstMessageStyles": [],
+    "alternateFirstMessageCustomStyles": [],
+    "alternateFirstMessageInstructions": [],
     "cardMode": "single",
     "multiCharacterCount": 2,
     "sharedScenePolicy": "ai_reconcile",
@@ -1515,14 +1519,26 @@ class Api:
         if not isinstance(emo, list):
             emo = DEFAULT_SETTINGS["emotionImageEmotions"]
         settings["emotionImageEmotions"] = [e for e in emo if e in EMOTION_OPTIONS]
+        style_key = str(settings.get("firstMessageStyle") or "cinematic").strip()
+        if style_key not in FIRST_MESSAGE_STYLES and style_key != "custom":
+            style_key = "cinematic"
+        settings["firstMessageStyle"] = style_key
+        settings["firstMessageCustomStyle"] = str(settings.get("firstMessageCustomStyle") or "").strip()[:120]
+        settings["firstMessageCustomInstructions"] = str(settings.get("firstMessageCustomInstructions") or "").strip()[:2000]
         alt_styles = settings.get("alternateFirstMessageStyles", [])
         if not isinstance(alt_styles, list):
             alt_styles = []
         cleaned_styles = []
         for s in alt_styles:
             s = str(s or "").strip()
-            cleaned_styles.append(s if s in FIRST_MESSAGE_STYLES else "")
+            cleaned_styles.append(s if (s in FIRST_MESSAGE_STYLES or s == "custom") else "")
         settings["alternateFirstMessageStyles"] = cleaned_styles
+        def _clean_text_list(value, max_len):
+            if not isinstance(value, list):
+                value = []
+            return [str(x or "").strip()[:max_len] for x in value]
+        settings["alternateFirstMessageCustomStyles"] = _clean_text_list(settings.get("alternateFirstMessageCustomStyles", []), 120)
+        settings["alternateFirstMessageInstructions"] = _clean_text_list(settings.get("alternateFirstMessageInstructions", []), 2000)
         mode = str(settings.get("cardMode") or "single").strip().lower()
         settings["cardMode"] = "split_cards" if mode in {"split_cards", "split-cards", "multi_split", "split"} else ("multi" if mode in {"multi", "multi_character", "multi-character"} else "single")
         try:
@@ -2176,6 +2192,36 @@ class Api:
                 filtered.append(key)
         return self._replace_tags_section(output, filtered, template or self.template)
 
+    def _first_message_style_text(self, settings):
+        style_key = str((settings or {}).get("firstMessageStyle") or "cinematic").strip()
+        if style_key == "custom":
+            name = str((settings or {}).get("firstMessageCustomStyle") or "Custom").strip() or "Custom"
+            base = f"Custom style: {name}"
+        else:
+            base = FIRST_MESSAGE_STYLES.get(style_key, FIRST_MESSAGE_STYLES["cinematic"])
+        instructions = str((settings or {}).get("firstMessageCustomInstructions") or "").strip()
+        if instructions:
+            base += f"\nCustom first-message instructions: {instructions}"
+        return base
+
+    def _alt_first_message_style_text(self, settings, idx, fallback_style_text):
+        settings = settings or {}
+        alt_styles = settings.get("alternateFirstMessageStyles") or []
+        alt_custom_styles = settings.get("alternateFirstMessageCustomStyles") or []
+        alt_instructions = settings.get("alternateFirstMessageInstructions") or []
+        alt_key = alt_styles[idx] if idx < len(alt_styles) else ""
+        if alt_key == "custom":
+            name = str(alt_custom_styles[idx] if idx < len(alt_custom_styles) else "").strip() or "Custom"
+            text = f"Custom style: {name}"
+        elif alt_key:
+            text = FIRST_MESSAGE_STYLES.get(alt_key, fallback_style_text)
+        else:
+            text = fallback_style_text
+        instructions = str(alt_instructions[idx] if idx < len(alt_instructions) else "").strip()
+        if instructions:
+            text += f"\nCustom instructions for this alternative greeting: {instructions}"
+        return text
+
     def build_prompt(self, concept, template=None, settings=None, chunk=None):
         template = template or self.template
         settings = self._normalise_settings({**self.settings, **(settings or {})})
@@ -2184,9 +2230,7 @@ class Api:
             sec.get("id") == "alternate_first_messages" and sec.get("enabled", True)
             for sec in template.get("sections", [])
         )
-        style_key = settings.get("firstMessageStyle", "cinematic")
-        style_text = FIRST_MESSAGE_STYLES.get(style_key, FIRST_MESSAGE_STYLES["cinematic"])
-        alt_styles = settings.get("alternateFirstMessageStyles", []) or []
+        style_text = self._first_message_style_text(settings)
         lines = []
         lines.append("You are a fictional character generator and formatter.")
         lines.append("Follow the user-configured template exactly. Do not invent disabled sections.")
@@ -2227,9 +2271,8 @@ class Api:
         lines.append(f"FIRST MESSAGE STYLE REQUIREMENT: use this style for the main First Message: {style_text}")
         if alt_count > 0:
             for idx in range(alt_count):
-                alt_key = alt_styles[idx] if idx < len(alt_styles) else ""
-                alt_text = FIRST_MESSAGE_STYLES.get(alt_key, style_text)
-                lines.append(f"ALTERNATIVE FIRST MESSAGE {idx + 1} STYLE: {alt_text}")
+                alt_text = self._alt_first_message_style_text(settings, idx, style_text)
+                lines.append(f"ALTERNATIVE FIRST MESSAGE {idx + 1} STYLE / INSTRUCTIONS: {alt_text}")
         if alt_count > 0 and alt_section_enabled:
             lines.append(f"ALTERNATIVE FIRST MESSAGE REQUIREMENT: generate exactly {alt_count} additional/alternative first messages in their own clearly labelled section. Do not skip them.")
         elif alt_count > 0 and not alt_section_enabled:
@@ -2267,7 +2310,7 @@ class Api:
                 lines.append("Return only these labels and their comma-separated prompt text: Positive Prompt: ... and Negative Prompt: ...")
                 lines.append("Do not echo helper text, ordering guidance, field descriptions, or explanations inside the Stable Diffusion Prompt section.")
             if section.get("id") == "first_message":
-                lines.append(f"First message style: {style_text}")
+                lines.append(f"First message style/instructions: {style_text}")
             if section.get("id") == "example_dialogues":
                 lines.append("IMPORTANT: Use exactly ONE <START> marker total, placed at the very beginning of this section.")
                 lines.append("After that single <START>, write one continuous example conversation with each speaker on a separate line, such as {{user}}: ... and {{char}}: ...")
@@ -2277,9 +2320,8 @@ class Api:
                     lines.append(f"Generate exactly {alt_count} alternative first messages in addition to the main First Message.")
                     lines.append("Inside this section, label each item exactly as: Alternative First Message 1, Alternative First Message 2, etc.")
                     for idx in range(alt_count):
-                        alt_key = alt_styles[idx] if idx < len(alt_styles) else ""
-                        alt_text = FIRST_MESSAGE_STYLES.get(alt_key, style_text)
-                        lines.append(f"Alternative First Message {idx + 1} style/tone: {alt_text}")
+                        alt_text = self._alt_first_message_style_text(settings, idx, style_text)
+                        lines.append(f"Alternative First Message {idx + 1} style/instructions: {alt_text}")
                     lines.append("Each alternative must be a complete opening message, not a short summary.")
                     lines.append("Do not repeat the main First Message inside this section, and do not put alternatives inside the main First Message section.")
                 else:
@@ -2561,7 +2603,7 @@ class Api:
         template = template or self.template
         settings = self._normalise_settings({**self.settings, **(settings or {})})
         alt_count = int(settings.get("alternateFirstMessages") or 0)
-        style_text = FIRST_MESSAGE_STYLES.get(settings.get("firstMessageStyle", "cinematic"), FIRST_MESSAGE_STYLES["cinematic"])
+        style_text = self._first_message_style_text(settings)
         chunk_sections = {
             "core": "Name, Description, Personality, Sexual Traits, Background",
             "scene": "Scenario, First Message, Alternative First Messages, Example Dialogues",
@@ -3167,13 +3209,10 @@ class Api:
         if not settings_check.get("ok"):
             return settings_check
         enabled_sections = [s.get("title", "Untitled Section") for s in template.get("sections", []) if s.get("enabled", True)]
-        style_key = merged_settings.get("firstMessageStyle", "cinematic")
-        style_text = FIRST_MESSAGE_STYLES.get(style_key, FIRST_MESSAGE_STYLES["cinematic"])
-        alt_styles = merged_settings.get("alternateFirstMessageStyles", []) or []
+        style_text = self._first_message_style_text(merged_settings)
         alt_style_lines = []
         for idx in range(int(merged_settings.get("alternateFirstMessages") or 0)):
-            alt_key = alt_styles[idx] if idx < len(alt_styles) else ""
-            alt_style_lines.append(f"Alternative First Message {idx + 1} style/tone: {FIRST_MESSAGE_STYLES.get(alt_key, style_text)}")
+            alt_style_lines.append(f"Alternative First Message {idx + 1} style/instructions: {self._alt_first_message_style_text(merged_settings, idx, style_text)}")
         prompt = "\n".join([
             "Revise the existing fictional character card according to the user's follow-up request.",
             "Return the complete revised card, not a diff or commentary.",
@@ -3181,7 +3220,7 @@ class Api:
             ("Card mode: SPLIT CARDS. Revise only the currently focused character card. Keep other original characters as lorebook/background references, not co-protagonists." if merged_settings.get("cardMode") == "split_cards" else ("Card mode: MULTI-CHARACTER SINGLE CARD. Preserve all primary characters inside one {{char}} card; do not split into multiple cards or multi-chat." if merged_settings.get("cardMode") == "multi" else "Card mode: SINGLE CHARACTER CARD.")),
             "Preserve good content unless the follow-up request changes it.",
             f"Enabled section order: {', '.join(enabled_sections)}",
-            f"First Message style currently selected: {style_text}",
+            f"First Message style/instructions currently selected: {style_text}",
             f"Alternative First Messages requested by settings: {int(merged_settings.get('alternateFirstMessages') or 0)}",
             "\n".join(alt_style_lines),
             "If the follow-up explicitly asks for a different number of additional/alternative greetings, obey that explicit request. Otherwise preserve the configured count.",

@@ -205,15 +205,33 @@
             <div class="card"><label>First Message Style</label><select id="firstStyle"></select></div>
             <div class="card mini-card"><label>Alternative First Messages</label><input id="altCount" type="number" min="0" max="10" value="2" /></div>
           </div>
-          <div id="altStylePanel" class="card wide alt-style-panel"><div class="card-title"><div><h3>Optional Alternative First Message Styles</h3><p>Leave an alternative style as “same as main” unless you want that greeting to use a different tone.</p></div></div><div id="altStyleRows" class="alt-style-rows"></div></div>
+          <div id="firstMessageOptionsPanel" class="card wide first-message-options-panel"><div class="card-title"><div><h3>First Message Customization</h3><p>Choose a preset style, or use Custom to name your own style and add separate greeting instructions.</p></div></div><div class="first-message-custom-grid"><label>Custom Style Name<input id="firstCustomStyle" placeholder="Cold, reunion, jealous, two months later..." /></label><label>Custom First Message Instructions<textarea id="firstCustomInstructions" placeholder="Extra instructions for the main greeting only. Example: This greeting happens 2 months later after the first greeting."></textarea></label></div></div>
+          <div id="altStylePanel" class="card wide alt-style-panel"><div class="card-title"><div><h3>Optional Alternative First Message Styles</h3><p>Each alternative can use a preset/custom style and separate instructions, such as a later time skip, colder mood, or different scene angle.</p></div></div><div id="altStyleRows" class="alt-style-rows"></div></div>
           <div class="card wide preset-card">
             <div class="card-title"><div><h3>Builder Presets</h3><p>Prefill Character, Personality, and Scene Builder fields with a starting archetype. Apply one, or let the AI make a coherent randomized variation from that preset, then fine-tune anything you want.</p></div><div class="actions"><button id="applyPresetBtn" type="button" class="primary">Apply Preset</button><button id="applyPresetBuildBtn" type="button">Apply + Build Builder Text</button></div></div>
             <div class="preset-grid">
-              <label>Preset<select id="builderPresetSelect"></select></label>
+              <label>Preset<select id="builderPresetSelect">
+                <option value="ntr_gyaru">NTR Gyaru Temptation</option>
+                <option value="slutty_roommate">Shameless Slutty Roommate</option>
+                <option value="wholesome_childhood_friend">Wholesome Childhood Friend Romance</option>
+                <option value="office_affair">Office Affair / Forbidden Workplace</option>
+                <option value="share_house_harem">Share House / Multi-Girl Chaos</option>
+                <option value="tsundere_rival">Tsundere Rival / Bratty Slow Burn</option>
+              </select></label>
               <label>Apply Mode<select id="builderPresetMode"><option value="merge">Merge into current builder fields</option><option value="replace">Replace builder fields first</option></select></label>
             </div>
             <div class="preset-ai-row">
-              <label>AI Random Theme<select id="aiRandomThemeSelect"></select></label>
+              <label>AI Random Theme<select id="aiRandomThemeSelect">
+                <option value="ntr">NTR / Forbidden Temptation</option>
+                <option value="slutty">Slutty / Promiscuous Character</option>
+                <option value="romance">Romance / Slow Burn</option>
+                <option value="workplace">Workplace / Office Drama</option>
+                <option value="sharehouse">Share House / Group Chaos</option>
+                <option value="gyaru">Gyaru / Social Butterfly</option>
+                <option value="dark">Dark Romance / Corruption</option>
+                <option value="wildcard">Wildcard Mix</option>
+                <option value="custom">Custom…</option>
+              </select></label>
               <label id="aiRandomCustomThemeWrap" class="conditional hidden">Custom AI Theme<input id="aiRandomCustomTheme" placeholder="Example: shy married neighbor, yandere office rival, corrupted magical girl, train nerd romance..." /></label>
               <button id="aiRandomPresetBtn" type="button" class="magic-action">🪄 AI Randomize Theme</button>
               <button id="aiRandomPresetBuildBtn" type="button">🪄 AI Randomize + Build</button>

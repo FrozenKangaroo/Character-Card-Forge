@@ -508,6 +508,9 @@ async function init() {
   renderConceptAttachments();
   showRandomTip();
   bindActions();
+  setTimeout(() => { populateBuilderPresets(); populateAiRandomThemes(); ensureBuilderPresetDropdowns(); updateAiRandomThemeCustom(); }, 0);
+  setTimeout(ensureBuilderPresetDropdowns, 250);
+  setTimeout(ensureBuilderPresetDropdowns, 1000);
   updateAvailability();
   startDebugLogAutoRefresh();
 }
@@ -548,6 +551,8 @@ function hydrateSettings() {
   $('#exportFormat').value = exportFormat;
   $('#cardImagePath').value = settings.cardImagePath || '';
   $('#altCount').value = settings.alternateFirstMessages ?? 2;
+  const firstCustomStyle = $('#firstCustomStyle'); if (firstCustomStyle) firstCustomStyle.value = settings.firstMessageCustomStyle || '';
+  const firstCustomInstructions = $('#firstCustomInstructions'); if (firstCustomInstructions) firstCustomInstructions.value = settings.firstMessageCustomInstructions || '';
   browserTagMerges = cleanBrowserTagMerges(settings.browserTagMerges || {});
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
   browserShowSubfolders = !!settings.browserShowSubfolders;
@@ -761,8 +766,12 @@ function collectSettings() {
     exportFormat: $('#exportFormat').value || 'chara_v2_png',
     cardImagePath: $('#cardImagePath').value.trim(),
     firstMessageStyle: $('#firstStyle').value,
+    firstMessageCustomStyle: ($('#firstCustomStyle') ? $('#firstCustomStyle').value.trim() : ''),
+    firstMessageCustomInstructions: ($('#firstCustomInstructions') ? $('#firstCustomInstructions').value.trim() : ''),
     alternateFirstMessages: Number($('#altCount').value || 0),
     alternateFirstMessageStyles: $$(`[data-alt-style-index]`).map(el => el.value),
+    alternateFirstMessageCustomStyles: $$(`[data-alt-custom-style-index]`).map(el => el.value.trim()),
+    alternateFirstMessageInstructions: $$(`[data-alt-instructions-index]`).map(el => el.value.trim()),
     emotionImageEmotions: $$('#emotionOptions input:checked').map(el => el.value),
     browserTagMerges: browserTagMerges || {},
     browserVirtualFolders: browserVirtualFolders || [],
@@ -809,16 +818,35 @@ function switchToSettingsTab() {
   if (tab) tab.classList.add('active');
 }
 
+function firstMessageStyleLabel(key, label) {
+  if (key === 'custom') return 'Custom style…';
+  return key.replaceAll('_', ' ') + ' — ' + String(label || '').split(':')[0];
+}
+
+function updateFirstMessageCustomVisibility() {
+  const panel = $('#firstMessageOptionsPanel');
+  if (!panel) return;
+  const isCustom = ($('#firstStyle')?.value || '') === 'custom';
+  panel.classList.toggle('custom-style-active', isCustom);
+}
+
 function renderStyles() {
   const select = $('#firstStyle');
+  if (!select) return;
   select.innerHTML = '';
-  for (const [key, label] of Object.entries(styles)) {
+  for (const [key, label] of Object.entries(styles || {})) {
     const opt = document.createElement('option');
     opt.value = key;
-    opt.textContent = key.replaceAll('_', ' ') + ' — ' + label.split(':')[0];
+    opt.textContent = firstMessageStyleLabel(key, label);
     select.appendChild(opt);
   }
+  const custom = document.createElement('option');
+  custom.value = 'custom';
+  custom.textContent = 'Custom style…';
+  select.appendChild(custom);
   select.value = settings.firstMessageStyle || 'cinematic';
+  if (!select.value) select.value = 'cinematic';
+  updateFirstMessageCustomVisibility();
   renderAltStyleRows();
 }
 
@@ -828,24 +856,50 @@ function renderAltStyleRows() {
   holder.innerHTML = '';
   const count = Number($('#altCount')?.value || settings.alternateFirstMessages || 0);
   const selected = settings.alternateFirstMessageStyles || [];
+  const customStyles = settings.alternateFirstMessageCustomStyles || [];
+  const instructions = settings.alternateFirstMessageInstructions || [];
   for (let i = 0; i < count; i++) {
-    const row = document.createElement('label');
-    row.className = 'alt-style-row';
+    const row = document.createElement('div');
+    row.className = 'alt-style-row alt-style-grid';
+    const label = document.createElement('label');
+    label.textContent = `Alternative First Message ${i + 1} Style`;
     const select = document.createElement('select');
     select.dataset.altStyleIndex = String(i);
     const same = document.createElement('option');
     same.value = '';
-    same.textContent = `Alternative ${i + 1}: same as main`;
+    same.textContent = `Same as main`;
     select.appendChild(same);
-    for (const [key, label] of Object.entries(styles)) {
+    for (const [key, value] of Object.entries(styles || {})) {
       const opt = document.createElement('option');
       opt.value = key;
-      opt.textContent = key.replaceAll('_', ' ') + ' — ' + label.split(':')[0];
+      opt.textContent = firstMessageStyleLabel(key, value);
       select.appendChild(opt);
     }
+    const custom = document.createElement('option');
+    custom.value = 'custom';
+    custom.textContent = 'Custom style…';
+    select.appendChild(custom);
     select.value = selected[i] || '';
-    row.appendChild(document.createTextNode(`Alternative First Message ${i + 1}`));
-    row.appendChild(select);
+    label.appendChild(select);
+    row.appendChild(label);
+
+    const customLabel = document.createElement('label');
+    customLabel.textContent = 'Custom Style Name';
+    const customInput = document.createElement('input');
+    customInput.dataset.altCustomStyleIndex = String(i);
+    customInput.placeholder = 'Cold, time skip, jealous...';
+    customInput.value = customStyles[i] || '';
+    customLabel.appendChild(customInput);
+    row.appendChild(customLabel);
+
+    const instLabel = document.createElement('label');
+    instLabel.textContent = 'Custom Instructions';
+    const inst = document.createElement('textarea');
+    inst.dataset.altInstructionsIndex = String(i);
+    inst.placeholder = 'Example: This greeting happens two months later after the first greeting.';
+    inst.value = instructions[i] || '';
+    instLabel.appendChild(inst);
+    row.appendChild(instLabel);
     holder.appendChild(row);
   }
 }
@@ -1283,6 +1337,11 @@ function bindActions() {
   });
   $('#scanFrontPorchBtn')?.addEventListener('click', scanFrontPorchFolder);
   $('#fetchSdModelsBtn')?.addEventListener('click', fetchStableDiffusionModels);
+  $('#firstStyle')?.addEventListener('change', () => { settings = collectSettings(); updateFirstMessageCustomVisibility(); updateAvailability(); });
+  $('#firstCustomStyle')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
+  $('#firstCustomInstructions')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
+  $('#altStyleRows')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
+  $('#altStyleRows')?.addEventListener('change', () => { settings = collectSettings(); updateAvailability(); });
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
   $('#cardMode').addEventListener('change', () => { settings = collectSettings(); if ($('#cardMode').value === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); } updateCardModeHint(); updateAvailability(); });
   $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
@@ -1396,7 +1455,14 @@ function bindActions() {
   enhanceBuilderAiButtons();
   populateBuilderPresets();
   populateAiRandomThemes();
+  ensureBuilderPresetDropdowns();
+  setTimeout(ensureBuilderPresetDropdowns, 100);
+  setTimeout(ensureBuilderPresetDropdowns, 500);
   $('#aiRandomThemeSelect')?.addEventListener('change', updateAiRandomThemeCustom);
+  $('#aiRandomThemeSelect')?.addEventListener('focus', ensureBuilderPresetDropdowns);
+  $('#aiRandomThemeSelect')?.addEventListener('click', ensureBuilderPresetDropdowns);
+  $('#builderPresetSelect')?.addEventListener('focus', ensureBuilderPresetDropdowns);
+  $('#builderPresetSelect')?.addEventListener('click', ensureBuilderPresetDropdowns);
   $('#aiRandomCustomTheme')?.addEventListener('input', () => { /* kept live for randomize */ });
   updateAiRandomThemeCustom();
   $('#builderPresetSelect')?.addEventListener('change', updateBuilderPresetPreview);
@@ -1486,19 +1552,81 @@ const BUILDER_PRESETS = {
 function populateAiRandomThemes() {
   const select = $('#aiRandomThemeSelect');
   if (!select) return;
+  const previous = select.value || 'wildcard';
+  let themes = {
+    ntr: { name: 'NTR / Forbidden Temptation', prompt: 'Create a random adult NTR or forbidden-temptation route.', tags: ['ntr'] },
+    slutty: { name: 'Slutty / Promiscuous Character', prompt: 'Create a random adult sexually confident or promiscuous character.', tags: ['slutty'] },
+    romance: { name: 'Romance / Slow Burn', prompt: 'Create a random adult romance or slow-burn character.', tags: ['romance'] },
+    workplace: { name: 'Workplace / Office Drama', prompt: 'Create a random adult workplace scenario.', tags: ['workplace'] },
+    sharehouse: { name: 'Share House / Group Chaos', prompt: 'Create a random adult share-house, roommate, or multi-character setup.', tags: ['sharehouse'] },
+    gyaru: { name: 'Gyaru / Social Butterfly', prompt: 'Create a random adult gyaru-inspired character.', tags: ['gyaru'] },
+    dark: { name: 'Dark Romance / Corruption', prompt: 'Create a random adult dark-romance or corruption-focused route.', tags: ['dark'] },
+    wildcard: { name: 'Wildcard Mix', prompt: 'Create a coherent random adult character-card setup.', tags: ['random'] },
+    custom: { name: 'Custom…', prompt: '', tags: ['custom'] }
+  };
+  try {
+    if (typeof AI_RANDOM_THEMES !== 'undefined' && Object.keys(AI_RANDOM_THEMES || {}).length) themes = AI_RANDOM_THEMES;
+  } catch (_) {}
   select.innerHTML = '';
-  Object.entries(AI_RANDOM_THEMES).forEach(([key, theme]) => {
+  Object.entries(themes).forEach(([key, theme]) => {
     const opt = document.createElement('option');
     opt.value = key;
-    opt.textContent = theme.name;
+    opt.textContent = theme.name || key;
     select.appendChild(opt);
   });
+  if ([...select.options].some(o => o.value === previous)) select.value = previous;
+  else if ([...select.options].some(o => o.value === 'wildcard')) select.value = 'wildcard';
 }
 
 function updateAiRandomThemeCustom() {
   const wrap = $('#aiRandomCustomThemeWrap');
   const isCustom = ($('#aiRandomThemeSelect')?.value || '') === 'custom';
   if (wrap) wrap.classList.toggle('hidden', !isCustom);
+}
+
+function selectLooksFallbackOnly(select, fallbackValues = []) {
+  if (!select) return true;
+  const values = [...select.options].map(o => o.value);
+  if (!values.length) return true;
+  if (values.length <= fallbackValues.length && values.every(v => fallbackValues.includes(v))) return true;
+  return false;
+}
+
+function ensureBuilderPresetDropdowns() {
+  const presetSelect = $('#builderPresetSelect');
+  if (presetSelect && selectLooksFallbackOnly(presetSelect, ['custom_blank'])) {
+    try { populateBuilderPresets(); } catch (e) { console.warn('Could not populate builder presets', e); }
+    if (selectLooksFallbackOnly(presetSelect, ['custom_blank'])) {
+      presetSelect.innerHTML = `
+        <option value="ntr_gyaru">NTR Gyaru Temptation</option>
+        <option value="slutty_roommate">Shameless Slutty Roommate</option>
+        <option value="wholesome_childhood_friend">Wholesome Childhood Friend Romance</option>
+        <option value="office_affair">Office Affair / Forbidden Workplace</option>
+        <option value="share_house_harem">Share House / Multi-Girl Chaos</option>
+        <option value="tsundere_rival">Tsundere Rival / Bratty Slow Burn</option>
+      `;
+    }
+  }
+  const themeSelect = $('#aiRandomThemeSelect');
+  if (themeSelect && selectLooksFallbackOnly(themeSelect, ['wildcard', 'custom'])) {
+    try { populateAiRandomThemes(); } catch (e) { console.warn('Could not populate AI random themes', e); }
+    if (selectLooksFallbackOnly(themeSelect, ['wildcard', 'custom'])) {
+      themeSelect.innerHTML = `
+        <option value="ntr">NTR / Forbidden Temptation</option>
+        <option value="slutty">Slutty / Promiscuous Character</option>
+        <option value="romance">Romance / Slow Burn</option>
+        <option value="workplace">Workplace / Office Drama</option>
+        <option value="sharehouse">Share House / Group Chaos</option>
+        <option value="gyaru">Gyaru / Social Butterfly</option>
+        <option value="dark">Dark Romance / Corruption</option>
+        <option value="wildcard">Wildcard Mix</option>
+        <option value="custom">Custom…</option>
+      `;
+      themeSelect.value = 'wildcard';
+    }
+  }
+  try { updateBuilderPresetPreview(); } catch (e) {}
+  try { updateAiRandomThemeCustom(); } catch (e) {}
 }
 
 function getSelectedAiRandomTheme() {
@@ -1514,19 +1642,33 @@ function getSelectedAiRandomTheme() {
       }
     };
   }
-  return { key, preset: AI_RANDOM_THEMES[key] || AI_RANDOM_THEMES.wildcard };
+  const themes = (typeof AI_RANDOM_THEMES !== 'undefined' && Object.keys(AI_RANDOM_THEMES || {}).length) ? AI_RANDOM_THEMES : { wildcard: { name: 'Wildcard / Surprise Me', prompt: 'Create a coherent random adult character-card setup.', tags: ['random'] } };
+  return { key, preset: themes[key] || themes.wildcard };
 }
 
 function populateBuilderPresets() {
   const select = $('#builderPresetSelect');
   if (!select) return;
-  select.innerHTML = Object.entries(BUILDER_PRESETS).map(([key, preset]) => `<option value="${key}">${preset.name}</option>`).join('');
+  const previous = select.value || 'custom_blank';
+  let presets = { custom_blank: { name: 'Blank / Manual', description: 'Start from blank builder fields.', tags: [], fields: {} } };
+  try {
+    if (typeof BUILDER_PRESETS !== 'undefined' && Object.keys(BUILDER_PRESETS || {}).length) presets = BUILDER_PRESETS;
+  } catch (_) {}
+  select.innerHTML = '';
+  Object.entries(presets).forEach(([key, preset]) => {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = preset.name || key;
+    select.appendChild(opt);
+  });
+  if ([...select.options].some(o => o.value === previous)) select.value = previous;
   updateBuilderPresetPreview();
 }
 
 function updateBuilderPresetPreview() {
   const key = $('#builderPresetSelect')?.value;
-  const preset = BUILDER_PRESETS[key];
+  const presets = (typeof BUILDER_PRESETS !== 'undefined' && Object.keys(BUILDER_PRESETS || {}).length) ? BUILDER_PRESETS : { custom_blank: { name: 'Blank / Manual', description: 'Start from blank builder fields.', tags: [], fields: {} } };
+  const preset = presets[key] || presets[Object.keys(presets)[0]];
   const desc = $('#builderPresetDescription');
   const tags = $('#builderPresetTags');
   if (!preset) return;
@@ -1557,8 +1699,9 @@ function setBuilderFieldValue(id, value) {
 }
 
 function applyBuilderPreset({ build = false } = {}) {
-  const key = $('#builderPresetSelect')?.value || Object.keys(BUILDER_PRESETS)[0];
-  const preset = BUILDER_PRESETS[key];
+  const presets = (typeof BUILDER_PRESETS !== 'undefined' && Object.keys(BUILDER_PRESETS || {}).length) ? BUILDER_PRESETS : { custom_blank: { name: 'Blank / Manual', description: 'Start from blank builder fields.', tags: [], fields: {} } };
+  const key = $('#builderPresetSelect')?.value || Object.keys(presets)[0];
+  const preset = presets[key];
   if (!preset) return;
   const mode = $('#builderPresetMode')?.value || 'merge';
   if (mode === 'replace') {
