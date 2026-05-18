@@ -7,6 +7,7 @@ import time
 import uuid
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
 import mimetypes
 import threading
@@ -2765,9 +2766,14 @@ class Api:
                 name = str(item or "").strip()[:80]
                 if name and name.casefold() not in {n.casefold() for n in out}:
                     out.append(name)
+            if len(out) < 2 and str(merged.get("sharedScenePolicy") or "") == "split_cards":
+                # Split mode should not silently collapse back to one card. If the
+                # identifier under-detects, use the fallback labels so the user can
+                # still get separate passes instead of one combined card.
+                out = fallback
             if not out:
                 out = fallback
-            return {"ok": True, "characters": out[:12], "fallback": False}
+            return {"ok": True, "characters": out[:max_chars], "fallback": False, "notes": str(parsed.get("notes") or "") if isinstance(parsed, dict) else ""}
         except Exception as e:
             return {"ok": True, "characters": fallback, "fallback": True, "notes": str(e)}
 
@@ -2802,6 +2808,7 @@ class Api:
             return {"ok": False, "error": "Enter a character concept first."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
         merged_settings["cardMode"] = "split_cards"
+        merged_settings["sharedScenePolicy"] = "split_cards"
         self.save_settings(merged_settings)
         template = self._normalise_template(template)
         self.save_template(template)
@@ -3266,6 +3273,108 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def _looks_like_url(self, value):
+        try:
+            parsed = urllib.parse.urlparse(str(value or "").strip())
+            return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+        except Exception:
+            return False
+
+    def _filename_from_url_response(self, url, headers=None, fallback="download"):
+        headers = headers or {}
+        cd = headers.get("Content-Disposition") or headers.get("content-disposition") or ""
+        m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', cd, re.I)
+        if m:
+            name = urllib.parse.unquote(m.group(1).strip().strip('"'))
+        else:
+            parsed = urllib.parse.urlparse(url)
+            name = urllib.parse.unquote(Path(parsed.path or "").name or fallback)
+        name = name.split("?")[0].split("#")[0].strip() or fallback
+        return self._safe_upload_name(name, fallback)
+
+    def _extension_from_content_type(self, content_type, fallback=""):
+        ct = str(content_type or "").split(";", 1)[0].strip().lower()
+        return {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "application/json": ".json",
+            "text/json": ".json",
+            "text/plain": ".txt",
+            "text/markdown": ".md",
+            "application/x-markdown": ".md",
+        }.get(ct, fallback or "")
+
+    def _download_url_to_file(self, url, *, folder=None, allowed_suffixes=None, fallback_name="download", max_bytes=80 * 1024 * 1024, prefix="url"):
+        url = str(url or "").strip()
+        if not self._looks_like_url(url):
+            return {"ok": False, "error": "Enter a valid http:// or https:// URL."}
+        folder = Path(folder or IMPORT_UPLOADS_DIR)
+        _safe_mkdir(folder)
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("User-Agent", f"{APP_NAME}/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                content_length = resp.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        if int(content_length) > max_bytes:
+                            return {"ok": False, "error": f"URL file is too large ({int(content_length)} bytes)."}
+                    except Exception:
+                        pass
+                raw = resp.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    return {"ok": False, "error": f"URL file is too large. Limit is {max_bytes // (1024 * 1024)} MB."}
+                final_url = resp.geturl() or url
+                filename = self._filename_from_url_response(final_url, resp.headers, fallback_name)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not download URL: {e}"}
+        if not raw:
+            return {"ok": False, "error": "Downloaded file was empty."}
+        suffix = Path(filename).suffix.lower()
+        if not suffix:
+            suffix = self._extension_from_content_type(content_type, "")
+            filename = filename + suffix if suffix else filename
+        if allowed_suffixes and suffix not in set(allowed_suffixes):
+            guessed = self._extension_from_content_type(content_type, suffix)
+            if guessed and guessed in set(allowed_suffixes):
+                suffix = guessed
+                filename = str(Path(filename).with_suffix(guessed))
+            else:
+                allowed = ", ".join(sorted(allowed_suffixes))
+                return {"ok": False, "error": f"URL file type is not supported ({suffix or content_type or 'unknown'}). Allowed: {allowed}."}
+        safe = self._safe_upload_name(filename, fallback_name + (suffix or ""))
+        path = folder / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{prefix}_{safe}"
+        path.write_bytes(raw)
+        return {"ok": True, "path": str(path), "filename": safe, "url": url, "contentType": content_type, "bytes": len(raw)}
+
+    def save_image_from_url(self, url, kind="card"):
+        folder = VISION_IMAGES_DIR if str(kind).lower() == "vision" else CARD_IMAGES_DIR
+        res = self._download_url_to_file(url, folder=folder, allowed_suffixes={".png", ".jpg", ".jpeg", ".webp"}, fallback_name="image", max_bytes=40 * 1024 * 1024, prefix="url_image")
+        if not res.get("ok"):
+            return res
+        path = Path(res["path"])
+        try:
+            with Image.open(path) as img:
+                img.verify()
+        except Exception as e:
+            path.unlink(missing_ok=True)
+            return {"ok": False, "error": f"Downloaded URL is not a valid image: {e}"}
+        return {"ok": True, "path": str(path), "filename": res.get("filename"), "sourceUrl": url, "contentType": res.get("contentType", "")}
+
+    def load_import_url(self, url):
+        res = self._download_url_to_file(url, folder=IMPORT_UPLOADS_DIR, allowed_suffixes={".json", ".png", ".md", ".txt"}, fallback_name="character_card", max_bytes=90 * 1024 * 1024, prefix="url_card")
+        if not res.get("ok"):
+            return res
+        loaded = self._load_import_path(Path(res["path"]))
+        if loaded.get("ok"):
+            loaded["uploadedPath"] = res["path"]
+            loaded["sourceUrl"] = url
+            loaded["message"] = loaded.get("message") or "Loaded character card/project from URL."
+        return loaded
+
     def save_uploaded_image(self, filename, data_url, kind="card"):
         try:
             filename = self._safe_name_with_extension(filename, "image.png", data_url, "image")
@@ -3352,6 +3461,44 @@ class Api:
         except Exception as e:
             self._log_event("card_upload_to_builders_error", {"error": str(e)})
             return {"ok": False, "error": f"Load card to builders failed: {e}"}
+
+    def card_url_to_builders(self, url, field_catalog, settings=None):
+        """Load an existing character card/project from URL and convert it into Builder fields."""
+        try:
+            loaded = self.load_import_url(url)
+            if not loaded.get("ok"):
+                return loaded
+            output = str(loaded.get("output") or "").strip()
+            concept = str(loaded.get("concept") or "").strip()
+            if not output and not concept:
+                return {"ok": False, "error": "The URL card loaded, but it did not contain readable card text to transfer into builders."}
+            source_text = output or concept
+            self._log_event("card_url_to_builders_loaded", {
+                "url": url,
+                "loadedType": loaded.get("loadedType"),
+                "output_chars": len(output),
+                "concept_chars": len(concept),
+                "field_count": len(field_catalog or []),
+            })
+            transfer = self.ai_transfer_to_builders(source_text[:30000], "", field_catalog or [], settings or self.settings)
+            if transfer.get("ok"):
+                transfer["loadedType"] = loaded.get("loadedType", "card")
+                transfer["sourcePath"] = loaded.get("sourcePath") or loaded.get("uploadedPath") or url
+                transfer["uploadedPath"] = loaded.get("uploadedPath", "")
+                transfer["sourceUrl"] = url
+                transfer["sourceOutput"] = output
+                main_concept = self._unmatched_card_context_for_main_concept(source_text)
+                if transfer.get("sideCharacterNotes"):
+                    side_block = "SIDE CHARACTERS / LOREBOOK-ONLY CHARACTERS:\n" + str(transfer.get("sideCharacterNotes") or "").strip()
+                    main_concept = (main_concept + "\n\n" + side_block).strip() if main_concept else side_block
+                transfer["mainConcept"] = main_concept
+                transfer["imagePath"] = loaded.get("imagePath", "")
+                transfer["embeddedImagePaths"] = loaded.get("embeddedImagePaths", [])
+                transfer["message"] = "Loaded existing card URL into builders."
+            return transfer
+        except Exception as e:
+            self._log_event("card_url_to_builders_error", {"url": url, "error": str(e)})
+            return {"ok": False, "error": f"Load card URL to builders failed: {e}"}
 
     def pick_card_to_builders(self, field_catalog, settings=None):
         """Native file-picker variant of Load Card to Builders.
@@ -3444,6 +3591,26 @@ class Api:
         except Exception as e:
             self._log_event("card_upload_to_main_concept_error", {"error": str(e)})
             return {"ok": False, "error": f"Load card to Main Concept failed: {e}"}
+
+    def card_url_to_main_concept(self, url, settings=None):
+        """Load an existing card/project URL directly into Main Concept without AI."""
+        try:
+            loaded = self.load_import_url(url)
+            if not loaded.get("ok"):
+                return loaded
+            result = self._loaded_card_to_main_concept_result(loaded, loaded.get("uploadedPath") or url)
+            if result.get("ok"):
+                result["sourceUrl"] = url
+            self._log_event("card_url_to_main_concept_loaded", {
+                "url": url,
+                "loadedType": loaded.get("loadedType"),
+                "main_concept_chars": len(result.get("mainConcept") or "") if result.get("ok") else 0,
+                "embedded_images": len(loaded.get("embeddedImagePaths", []) or []),
+            })
+            return result
+        except Exception as e:
+            self._log_event("card_url_to_main_concept_error", {"url": url, "error": str(e)})
+            return {"ok": False, "error": f"Load card URL to Main Concept failed: {e}"}
 
     def pick_card_to_main_concept(self, settings=None):
         """Native file-picker card load directly to Main Concept, avoiding AI entirely."""
@@ -3602,6 +3769,25 @@ class Api:
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def save_concept_attachment_url(self, url):
+        try:
+            res = self._download_url_to_file(url, folder=CONCEPT_ATTACHMENTS_DIR, allowed_suffixes={".txt", ".srt", ".vtt", ".md", ".pdf"}, fallback_name="attachment", max_bytes=40 * 1024 * 1024, prefix="url_attachment")
+            if not res.get("ok"):
+                return res
+            path = Path(res["path"])
+            # Reuse the same extraction logic by converting the downloaded file path result.
+            result = self._concept_attachment_from_path(path)
+            if result.get("ok"):
+                result["sourceUrl"] = url
+                # _concept_attachment_from_path copies the file again; remove first downloaded temp to avoid duplicate clutter.
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return result
+        except Exception as e:
+            return {"ok": False, "error": f"Could not attach URL: {e}"}
 
     def select_import_file(self):
         """Legacy import entry point kept for older UI paths.
@@ -5053,6 +5239,13 @@ class Api:
         image_path = (image_path or merged_settings.get("visionImagePath") or "").strip()
         if not image_path:
             return {"ok": False, "error": "Select an image first."}
+        downloaded_from_url = ""
+        if self._looks_like_url(image_path):
+            dl = self.save_image_from_url(image_path, "vision")
+            if not dl.get("ok"):
+                return dl
+            downloaded_from_url = image_path
+            image_path = dl.get("path") or ""
         path = Path(image_path)
         if not path.exists():
             return {"ok": False, "error": f"Image not found: {image_path}"}
@@ -5309,7 +5502,7 @@ class Api:
             return {"ok": False, "error": "Vision analysis produced no usable description after cleanup. Try a different vision model or enter the visual description manually."}
 
         self._log_event("vision_analyze_response", {"retry_used": retry_used, "description": description})
-        return {"ok": True, "description": description, "imagePath": str(path), "retryUsed": retry_used}
+        return {"ok": True, "description": description, "imagePath": str(path), "sourceUrl": downloaded_from_url, "retryUsed": retry_used}
 
 
     def _normalise_sd_prompt_items(self, text, *, max_items=90, max_chars=1200):

@@ -405,6 +405,16 @@ function openBrowserFileInput(inputId, label = 'file') {
   }
 }
 
+function promptForUrl(label = 'URL') {
+  const url = window.prompt(`Paste ${label}:`);
+  if (url === null) return '';
+  return String(url || '').trim();
+}
+
+function isProbablyUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
 function updateAvailability() {
   const output = hasOutput();
   const sdReady = hasStableDiffusionPrompt();
@@ -705,6 +715,8 @@ function cleanModelName(value) {
 }
 
 function collectSettings() {
+  const selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
+  const selectedCardMode = selectedSharedScenePolicy === 'split_cards' ? 'split_cards' : $('#cardMode').value;
   return {
     apiBaseUrl: $('#apiBaseUrl').value.trim(),
     apiKey: $('#apiKey').value.trim(),
@@ -734,9 +746,9 @@ function collectSettings() {
     sdCfgScale: Number($('#sdCfgScale').value || 7),
     sdSampler: $('#sdSampler').value.trim() || 'Euler a',
     mode: $('#modeSelect').value,
-    cardMode: $('#cardMode').value,
+    cardMode: selectedCardMode,
     multiCharacterCount: Number($('#multiCharacterCount').value || 2),
-    sharedScenePolicy: ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile'),
+    sharedScenePolicy: selectedSharedScenePolicy,
     frontend: 'front_porch',
     exportFormat: $('#exportFormat').value || 'chara_v2_png',
     cardImagePath: $('#cardImagePath').value.trim(),
@@ -1266,7 +1278,7 @@ function bindActions() {
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
   $('#cardMode').addEventListener('change', () => { settings = collectSettings(); if ($('#cardMode').value === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); } updateCardModeHint(); updateAvailability(); });
   $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
-  $('#sharedScenePolicy')?.addEventListener('change', () => { settings = collectSettings(); updateAvailability(); });
+  $('#sharedScenePolicy')?.addEventListener('change', () => { if ($('#sharedScenePolicy')?.value === 'split_cards' && $('#cardMode')) $('#cardMode').value = 'split_cards'; settings = collectSettings(); updateAvailability(); updateMultiBuilderSelectors(false); });
   $('#builderGenerateBtn')?.addEventListener('click', generateBuilderDescription);
   $('#builderAppendConceptBtn')?.addEventListener('click', appendBuilderToConcept);
   $('#builderClearBtn')?.addEventListener('click', clearCharacterBuilder);
@@ -1282,6 +1294,7 @@ function bindActions() {
   $$('.multi-builder-character-select').forEach(el => el.addEventListener('change', () => switchMultiBuilderCharacter(el.value)));
   $$('.multi-builder-character-label').forEach(el => el.addEventListener('input', () => { if (!isMultiBuilderMode()) return; $$('.multi-builder-character-label').forEach(other => { if (other !== el) other.value = el.value; }); multiBuilderStates[multiBuilderSelectedIndex] = { ...(multiBuilderStates[multiBuilderSelectedIndex] || {}), ...readBuilderDomState(), multiCharacterName: el.value || '' }; updateMultiBuilderSelectors(false); }));
   $('#selectVisionImageBtn').addEventListener('click', () => openBrowserFileInput('visionFileInput', 'vision image'));
+  $('#visionImageUrlBtn')?.addEventListener('click', () => selectVisionImageUrl({ analyze: false }));
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
@@ -1324,15 +1337,21 @@ function bindActions() {
   $('#transferToBuildersMainBtn')?.addEventListener('click', transferConceptToBuilders);
   $('#loadCardToBuildersMainBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
   $('#loadCardToBuildersModeBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
+  $('#loadCardToBuildersUrlMainBtn')?.addEventListener('click', loadCardToBuildersUrl);
+  $('#loadCardToBuildersUrlModeBtn')?.addEventListener('click', loadCardToBuildersUrl);
   $('#loadCardToConceptMainBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
   $('#loadCardToConceptModeBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
+  $('#loadCardToConceptUrlMainBtn')?.addEventListener('click', loadCardToMainConceptUrl);
+  $('#loadCardToConceptUrlModeBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#reviseBtn').addEventListener('click', reviseCard);
   $('#loadSavedBtn').addEventListener('click', () => openBrowserFileInput('savedFileInput', 'saved card/project'));
+  $('#loadSavedUrlBtn')?.addEventListener('click', loadSavedCardOrProjectFromUrl);
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
   $('#clearLogBtn').addEventListener('click', clearDebugLog);
   $('#copyBtn').addEventListener('click', copyOutput);
   $('#exportBtn').addEventListener('click', exportCard);
   $('#selectImageBtn').addEventListener('click', () => openBrowserFileInput('cardImageFileInput', 'card image'));
+  $('#cardImageUrlBtn')?.addEventListener('click', importCardImageUrl);
   $('#generateImagesBtn').addEventListener('click', generateSdImages);
   $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
   $('#generateSdPromptFromOutputBtn')?.addEventListener('click', generateSdPromptFromLoadedOutput);
@@ -1343,6 +1362,7 @@ function bindActions() {
   $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
   $('#attachConceptFilesBtn').addEventListener('click', () => openBrowserFileInput('conceptAttachmentInput', 'attachment'));
+  $('#attachConceptUrlBtn')?.addEventListener('click', attachConceptUrl);
   $('#clearConceptAttachmentsBtn').addEventListener('click', clearConceptAttachments);
   // Hidden file inputs remain as an emergency browser fallback, but normal flow uses KDE/Zenity native dialogs from the backend.
   $('#conceptAttachmentInput').addEventListener('change', handleConceptAttachmentFiles);
@@ -2053,6 +2073,22 @@ async function importVisionFiles(files) {
     setBusy('');
     setVisionImagePath(getVisionImagePath());
     updateAvailability();
+  }
+}
+
+async function selectVisionImageUrl({ analyze = false } = {}) {
+  if (isInterfaceLocked()) return;
+  const url = promptForUrl('image URL');
+  if (!url) return;
+  if (!isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// image URL.', 'error'); return; }
+  setVisionImagePath(url);
+  settings = collectSettings();
+  settings.visionImagePath = url;
+  await window.pywebview.api.save_settings(settings);
+  if (analyze) {
+    await analyzeVisionImage();
+  } else {
+    setStatus('Vision image URL set. Click Analyze Image when ready.', 'ok');
   }
 }
 
@@ -4042,7 +4078,8 @@ async function generateCard() {
       currentBrowserDescription = '';
       updateAvailability();
       const count = characterOutputTabs.length;
-      setStatus(`Split-card generation complete: ${count} card${count === 1 ? '' : 's'} generated. Current tab autosaving…`, 'ok');
+      const foundNames = Array.isArray(res.characters) && res.characters.length ? ` Identified: ${res.characters.join(', ')}.` : '';
+      setStatus(`Split-card generation complete: ${count} card${count === 1 ? '' : 's'} generated.${foundNames} Current tab autosaving…`, 'ok');
       await saveCurrentWorkspace('silent');
       return;
     }
@@ -4175,6 +4212,28 @@ async function importCardImageFiles(files) {
     if (hasOutput()) await saveCurrentWorkspace('silent');
     updateImportedCardToolsHint();
     setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function importCardImageUrl() {
+  if (isInterfaceLocked()) return;
+  const url = promptForUrl('card image URL');
+  if (!url) return;
+  if (!isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// image URL.', 'error'); return; }
+  setBusy('IMPORTING CARD IMAGE FROM URL…');
+  try {
+    const res = await window.pywebview.api.save_image_from_url(url, 'card');
+    if (!res.ok) throw new Error(res.error || 'Card image URL import failed.');
+    $('#cardImagePath').value = res.path;
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateImportedCardToolsHint();
+    setStatus('Selected card image from URL: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -4415,6 +4474,35 @@ async function importSavedFiles(files) {
 }
 
 
+async function loadSavedCardOrProjectFromUrl() {
+  if (isInterfaceLocked()) return;
+  const url = promptForUrl('character card / project URL');
+  if (!url) return;
+  if (!isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// card URL.', 'error'); return; }
+  setBusy('LOADING SAVED CARD / PROJECT FROM URL…');
+  setStatus('Downloading saved character card or project from URL…', '');
+  try {
+    const res = await window.pywebview.api.load_import_url(url);
+    if (!res.ok) throw new Error(res.error || 'Load URL failed.');
+    applyLoadedState(res);
+    updateAvailability();
+    let statusMessage = res.message || 'Loaded saved card/project from URL.';
+    if (!/project/i.test(String(res.loadedType || ''))) {
+      const imported = await importCurrentOutputToBrowser(false);
+      if (imported?.ok) statusMessage += ' Imported into Character Browser.';
+    }
+    setStatus(statusMessage, 'ok');
+    $$('.nav').forEach(b => b.classList.remove('active'));
+    $$('.tab').forEach(t => t.classList.remove('active'));
+    $('[data-tab="output"]').classList.add('active');
+    $('#output').classList.add('active');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 function confirmLoadCardToMainConceptWarning() {
   const currentConcept = ($('#conceptText')?.value || '').trim();
   const warning = [
@@ -4454,6 +4542,26 @@ async function loadCardToMainConceptNative() {
       return;
     }
     await applyCardToMainConceptResult(res, res.sourcePath || 'selected card');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+    updateAvailability();
+  }
+}
+
+async function loadCardToMainConceptUrl() {
+  if (isInterfaceLocked()) return;
+  if (!confirmLoadCardToMainConceptWarning()) return;
+  const url = promptForUrl('V2/V3 character card URL');
+  if (!url) return;
+  if (!isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// card URL.', 'error'); return; }
+  settings = collectSettings();
+  setBusy('LOAD CARD URL TO MAIN CONCEPT — downloading V2/V3 card…');
+  setStatus('Downloading existing character card URL directly into Main Concept…', '');
+  try {
+    const res = await window.pywebview.api.card_url_to_main_concept(url, settings);
+    await applyCardToMainConceptResult(res, url);
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -4539,6 +4647,33 @@ async function loadCardToBuildersNative() {
       return;
     }
     await applyCardToBuildersResult(res, res.sourcePath || 'selected card');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+    updateAvailability();
+  }
+}
+
+async function loadCardToBuildersUrl() {
+  if (isInterfaceLocked()) return;
+  if (!confirmLoadCardToBuildersWarning()) return;
+  const url = promptForUrl('V2/V3 character card URL');
+  if (!url) return;
+  if (!isProbablyUrl(url)) { setStatus('Enter a valid http:// or https:// card URL.', 'error'); return; }
+  settings = collectSettings();
+  const missing = validateTextApiSettings(settings);
+  if (missing) {
+    setStatus(missing, 'error');
+    switchToSettingsTab();
+    return;
+  }
+  setBusy('LOAD CARD URL TO BUILDERS — downloading V2/V3 card and filling builder fields…');
+  setStatus('Downloading existing character card URL into the builders…', '');
+  try {
+    const catalog = collectCompactBuilderFieldCatalog();
+    const res = await window.pywebview.api.card_url_to_builders(url, catalog, settings);
+    await applyCardToBuildersResult(res, url);
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {

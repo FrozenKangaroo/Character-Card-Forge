@@ -426,3 +426,12 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Split-card generation identifies main characters and generates one focused single-character card per character.
 - During each split-card pass, the focused character becomes the main card character, while other characters are preserved as lorebook/background/supporting references.
 - Output areas now support character tabs, so Q&A Answers, Full Text Output, Emotion Images, and Quick Save / Image can be switched per generated card.
+
+
+## Version 1.0.0
+
+- Added URL imports for existing Character Card V2/V3 PNG/JSON/TXT/MD cards.
+- Added URL support for loading cards into Main Concept and Builders.
+- Added URL support for vision/image analysis workflows.
+- Added URL support for card images used by PNG export / import card tools.
+- Added URL attachment support for concept files.
