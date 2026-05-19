@@ -19,20 +19,20 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      # We install create-dmg via Homebrew, and pyinstaller via pip
       - name: Install Dependencies
         run: |
+          brew install create-dmg
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller create-dmg
+          pip install pyinstaller
 
       - name: Build Standalone Mac Executable
         run: |
-          # Compiles your app.py into an standalone macOS App Bundle
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
 
       - name: Package into DMG Container
         run: |
-          # Creates a polished installer DMG from the compiled app bundle
           mkdir -p dist/dmg
           create-dmg \
             --volname "Character Card Forge" \
