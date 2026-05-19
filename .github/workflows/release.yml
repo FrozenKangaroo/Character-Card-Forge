@@ -9,18 +9,25 @@ on:
 jobs:
   release:
     runs-on: macos-latest # GitHub boots up a real Mac in the cloud for you!
-    
+
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
 
+          # ... (checkout step remains the same)
+
+       Tar node version cleanly
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-size: 20
+          node-version: 20 # Fixed keyword from node-size
 
+      # Changed from npm ci to npm i to handle missing lockfile gracefully
       - name: Install Project Dependencies
-        run: npm ci
+        run: npm install
+
+      # ... (the rest of the script remains the same)
+
 
       - name: Build macOS DMG Container
         run: npm run dist -- --mac dmg
