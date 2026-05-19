@@ -1,37 +1,28 @@
 name: Build and Release Companion App
 
-# This tells GitHub to run the build automatically every time you push a version tag
 on:
   push:
     tags:
-      - 'v*' # Triggers on v1.0.0, v1.0.1, etc.
+      - 'v*'
 
 jobs:
   release:
-    runs-on: macos-latest # GitHub boots up a real Mac in the cloud for you!
-
+    runs-on: macos-latest
+    
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
 
-          # ... (checkout step remains the same)
-
-       Tar node version cleanly
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20 # Fixed keyword from node-size
+          node-version: 20
 
-      # Changed from npm ci to npm i to handle missing lockfile gracefully
       - name: Install Project Dependencies
         run: npm install
 
-      # ... (the rest of the script remains the same)
-
-
       - name: Build macOS DMG Container
         run: npm run dist -- --mac dmg
-        # (This triggers electron-builder to output a perfect .dmg file)
 
       - name: Upload DMG to GitHub Releases
         uses: softprops/action-gh-release@v2
