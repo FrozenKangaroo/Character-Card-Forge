@@ -5160,7 +5160,11 @@ class Api:
         output = workspace.get("output") or ""
         if not output.strip():
             return {"ok": False, "error": "Nothing to save yet. Generate or load a card first."}
-        safe_name = workspace.get("name") or self._extract_name(output) or "Character Card"
+        extracted_name = self._extract_name(output) or "Character Card"
+        workspace_name = workspace.get("name") or ""
+        safe_name = extracted_name if self._is_generic_character_name(workspace_name) else self._clean_character_name_value(workspace_name)
+        if self._is_generic_character_name(safe_name):
+            safe_name = extracted_name
         stamp = time.strftime("%Y%m%d-%H%M%S")
         folder = self._character_export_dir(safe_name)
         settings = self._normalise_settings(workspace.get("settings") or self.settings)
@@ -6119,6 +6123,14 @@ class Api:
                 out = m.group(1).strip()
         return out
 
+    def _looks_like_divider_line(self, value):
+        raw = str(value or "").strip()
+        return bool(raw) and bool(re.fullmatch(r"[-_=*~]{3,}", raw))
+
+    def _is_generic_character_name(self, value):
+        cleaned = self._clean_character_name_value(value) if value else ""
+        return cleaned.casefold() in {"", "character", "characters", "character card", "new character", "untitled", "unknown"}
+
     def _clean_character_name_value(self, value):
         """Keep the Name section/export/tab name to the actual display name only."""
         name = str(value or "").strip().strip('"“”')
@@ -6143,7 +6155,7 @@ class Api:
             if heading != "name":
                 continue
             for j in range(i + 1, len(lines)):
-                if not lines[j].strip():
+                if not lines[j].strip() or self._looks_like_divider_line(lines[j]):
                     continue
                 try:
                     next_heading = self._canonical_heading_with_template(lines[j], self.template)
@@ -6796,12 +6808,50 @@ class Api:
         return {"ok": True, "path": str(path), "folder": str(export_folder), "projectPath": str(project_path)}
 
     def _extract_name(self, text):
-        m = re.search(r"(?im)^Name\s*\n+([^\n#]+)", text)
+        """Extract the actual character display name from generated/raw card text."""
+        text = str(text or "")
+        if not text.strip():
+            return "Character Card"
+
+        # Prefer line-based parsing so divider-heavy output like:
+        # ----- / Name / blank / Sayuri / -----
+        # cannot accidentally fall back to the generic Character tab name.
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            raw = line.strip()
+            if not raw or self._looks_like_divider_line(raw):
+                continue
+            colon = re.match(r"(?i)^\s*name\s*[:：-]\s*(.+?)\s*$", raw)
+            if colon:
+                name = self._clean_character_name_value(colon.group(1))
+                if name and not self._is_generic_character_name(name):
+                    return name
+            heading = raw.strip("#*` ").strip()
+            if re.fullmatch(r"(?i)name", heading):
+                for cand in lines[i + 1:]:
+                    value = cand.strip()
+                    if not value or self._looks_like_divider_line(value):
+                        continue
+                    # Stop if the next real line is another heading.
+                    next_heading = value.strip("#*` ").strip()
+                    if re.fullmatch(r"(?i)(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt)", next_heading):
+                        break
+                    name = self._clean_character_name_value(value)
+                    if name and not self._is_generic_character_name(name):
+                        return name
+                    break
+
+        # Regex fallbacks for compact card formats.
+        m = re.search(r"(?im)^\s*Name\s*[:：-]\s*(.+)$", text)
         if m:
-            return self._clean_character_name_value(m.group(1)) or "Character Card"
-        m = re.search(r"(?im)^Name\s*[:\-]\s*(.+)$", text)
+            name = self._clean_character_name_value(m.group(1))
+            if name:
+                return name
+        m = re.search(r"(?ims)^\s*Name\s*$\s*([^\n#-][^\n]*)", text)
         if m:
-            return self._clean_character_name_value(m.group(1)) or "Character Card"
+            name = self._clean_character_name_value(m.group(1))
+            if name:
+                return name
         return "Character Card"
 
     def _canonical_heading(self, line):

@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+# This grants the runner permission to create and write to the Releases page
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: macos-latest
@@ -19,7 +23,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # We install create-dmg via Homebrew, and pyinstaller via pip
       - name: Install Dependencies
         run: |
           brew install create-dmg

@@ -126,15 +126,20 @@ function renderCharacterOutputTabs() {
 }
 
 function setCharacterOutputTabs(cards) {
-  characterOutputTabs = (cards || []).map((card, idx) => ({
-    name: card.name || card.focusName || `Character ${idx + 1}`,
-    focusName: card.focusName || card.name || `Character ${idx + 1}`,
-    output: card.output || '',
-    qaAnswers: card.qaAnswers || '',
-    emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
-    generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
-    cardImagePath: card.cardImagePath || '',
-  }));
+  characterOutputTabs = (cards || []).map((card, idx) => {
+    const extractedName = extractOutputNameForTab(card.output || '');
+    const originalName = card.name || card.focusName || `Character ${idx + 1}`;
+    const finalName = isGenericOutputName(originalName) && extractedName ? extractedName : cleanOutputTabName(originalName) || extractedName || `Character ${idx + 1}`;
+    return {
+      name: finalName,
+      focusName: card.focusName || finalName,
+      output: card.output || '',
+      qaAnswers: card.qaAnswers || '',
+      emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
+      generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
+      cardImagePath: card.cardImagePath || '',
+    };
+  });
   if (!characterOutputTabs.length) characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
   activeOutputTabIndex = 0;
   renderCharacterOutputTabs();
@@ -571,10 +576,46 @@ function cleanOutputTabName(value) {
   return name.slice(0, 80);
 }
 
+function isDividerLine(value) {
+  const raw = String(value || '').trim();
+  return !!raw && /^[-_=*~]{3,}$/.test(raw);
+}
+
+function isGenericOutputName(value) {
+  const cleaned = cleanOutputTabName(value).toLowerCase();
+  return !cleaned || ['character', 'characters', 'character card', 'new character', 'untitled', 'unknown'].includes(cleaned);
+}
+
 function extractOutputNameForTab(output) {
   const text = String(output || '');
-  const m = text.match(new RegExp('(?:^|\n)\s*(?:-{3,}\s*)?Name\s*:?\s*\n\s*([^\n]+)', 'i')) || text.match(new RegExp('(?:^|\n)\s*Name\s*[:：]\s*([^\n]+)', 'i'));
-  return m ? cleanOutputTabName(m[1]) : '';
+  const lines = text.split(/\r?\n/);
+  const stopHeadings = /^(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt)$/i;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = String(lines[i] || '').trim();
+    if (!raw || isDividerLine(raw)) continue;
+    const inline = raw.match(/^name\s*[:：-]\s*(.+)$/i);
+    if (inline) {
+      const name = cleanOutputTabName(inline[1]);
+      if (name && !isGenericOutputName(name)) return name;
+    }
+    const heading = raw.replace(/^[#*`\s]+|[#*`\s]+$/g, '').trim();
+    if (/^name$/i.test(heading)) {
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cand = String(lines[j] || '').trim();
+        if (!cand || isDividerLine(cand)) continue;
+        const nextHeading = cand.replace(/^[#*`\s]+|[#*`\s]+$/g, '').trim();
+        if (stopHeadings.test(nextHeading)) break;
+        const name = cleanOutputTabName(cand);
+        if (name && !isGenericOutputName(name)) return name;
+        break;
+      }
+    }
+  }
+
+  const inline = text.match(/^\s*Name\s*[:：-]\s*(.+)$/im);
+  if (inline) return cleanOutputTabName(inline[1]);
+  return '';
 }
 
 function applyLoadedState(state) {
