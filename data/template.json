@@ -139,7 +139,7 @@
       "title": "State Tracking",
       "enabled": false,
       "category": "front_porch",
-      "description": "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon.",
+      "description": "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Optional day_of_week/start_day_of_week: 0 legacy/unset, or 1 Monday through 7 Sunday. Late Afternoon is normalized to Afternoon.",
       "fields": [
         {
           "id": "emotion",
@@ -176,6 +176,12 @@
           "label": "Time of Day",
           "enabled": true,
           "hint": "Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon."
+        },
+        {
+          "id": "day_of_week",
+          "label": "Day of Week",
+          "enabled": true,
+          "hint": "Optional Front Porch schema v28 weekday anchor: 0 legacy/unset, 1 Monday, 2 Tuesday, 3 Wednesday, 4 Thursday, 5 Friday, 6 Saturday, 7 Sunday."
         }
       ]
     },

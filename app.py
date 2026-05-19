@@ -273,7 +273,7 @@ def _merge_front_porch_state_tracking_section(template):
     for section in sections:
         if not isinstance(section, dict) or str(section.get("id") or "").strip() != "state_tracking":
             continue
-        desired_description = "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon."
+        desired_description = "Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Optional day_of_week/start_day_of_week: 0 legacy/unset, or 1 Monday through 7 Sunday. Late Afternoon is normalized to Afternoon."
         if str(section.get("description") or "") != desired_description:
             old = str(section.get("description") or "")
             section["description"] = _upgrade_front_porch_prompt_text(old)
@@ -296,28 +296,41 @@ def _merge_front_porch_state_tracking_section(template):
             ("long_term_bond", "Long-Term Bond", "Front Porch range: -300 to 300."),
             ("trust_level", "Trust Level", "Front Porch range: -100 to 100."),
             ("time_of_day", "Time of Day", "Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon."),
+            ("day_of_week", "Day of Week", "Optional Front Porch schema v28 weekday anchor: 0 legacy/unset, 1 Monday, 2 Tuesday, 3 Wednesday, 4 Thursday, 5 Friday, 6 Saturday, 7 Sunday."),
         ]
+        desired_ids = {fid for fid, _, _ in desired_fields}
         new_fields = []
         for fid, label, hint in desired_fields:
             existing = field_map.get(fid)
             if isinstance(existing, dict):
-                if str(existing.get("label") or "") != label:
-                    existing["label"] = label
+                item = dict(existing)
+                if str(item.get("label") or "") != label:
+                    item["label"] = label
                     changed = True
-                new_hint = _upgrade_front_porch_prompt_text(str(existing.get("hint") or ""))
-                if not new_hint or fid in {"short_term_bond", "long_term_bond", "trust_level", "time_of_day"}:
+                new_hint = _upgrade_front_porch_prompt_text(str(item.get("hint") or ""))
+                if not new_hint or fid in {"short_term_bond", "long_term_bond", "trust_level", "time_of_day", "day_of_week"}:
                     new_hint = hint
-                if str(existing.get("hint") or "") != new_hint:
-                    existing["hint"] = new_hint
+                if str(item.get("hint") or "") != new_hint:
+                    item["hint"] = new_hint
                     changed = True
-                if "enabled" not in existing:
-                    existing["enabled"] = True
+                if "enabled" not in item:
+                    item["enabled"] = True
                     changed = True
-                new_fields.append(existing)
+                new_fields.append(item)
             else:
                 new_fields.append({"id": fid, "label": label, "enabled": True, "hint": hint})
                 changed = True
-        if len(new_fields) != len(fields) or any(a is not b for a,b in zip(new_fields,fields[:len(new_fields)])):
+        # Preserve any custom fields the user added after the required Front Porch fields.
+        for item in fields:
+            if isinstance(item, dict) and str(item.get("id") or "") not in desired_ids:
+                upgraded = dict(item)
+                if "hint" in upgraded:
+                    new_hint = _upgrade_front_porch_prompt_text(str(upgraded.get("hint") or ""))
+                    if new_hint != upgraded.get("hint"):
+                        upgraded["hint"] = new_hint
+                        changed = True
+                new_fields.append(upgraded)
+        if section.get("fields") != new_fields:
             section["fields"] = new_fields
             changed = True
         break
@@ -532,7 +545,7 @@ DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and
                'title': 'State Tracking',
                'enabled': False,
                'category': 'front_porch',
-               'description': 'Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Late Afternoon is normalized to Afternoon.',
+               'description': 'Optional Front Porch realism/state values. Bond ranges: short/long -300..300; trust -100..100. Valid time_of_day: morning, noon, afternoon, evening, night. Optional day_of_week/start_day_of_week: 0 legacy/unset, or 1 Monday through 7 Sunday. Late Afternoon is normalized to Afternoon.',
                'fields': [{'id': 'emotion',
                            'label': 'Starting Emotion',
                            'enabled': True,
@@ -556,7 +569,11 @@ DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and
                           {'id': 'time_of_day',
                            'label': 'Time of Day',
                            'enabled': True,
-                           'hint': 'Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon.'}]},
+                           'hint': 'Use morning, noon, afternoon, evening, or night. Late Afternoon is exported as afternoon.'},
+                          {'id': 'day_of_week',
+                           'label': 'Day of Week',
+                           'enabled': True,
+                           'hint': 'Optional Front Porch schema v28 weekday anchor: 0 legacy/unset, 1 Monday, 2 Tuesday, 3 Wednesday, 4 Thursday, 5 Friday, 6 Saturday, 7 Sunday.'}]},
               {'id': 'stable_diffusion',
                'title': 'Stable Diffusion Prompt',
                'enabled': False,
@@ -1295,6 +1312,13 @@ class Api:
         qa["sections"] = cleaned_sections
         qa["questions"] = [q["text"] for s in cleaned_sections if s.get("enabled", True) for q in s.get("questions", []) if q.get("enabled", True) and q.get("text")]
         template["qa"] = qa
+        # Force Front Porch template migrations whenever a template is loaded/saved.
+        # This catches existing active/custom templates that were created before
+        # start_day_of_week/day_of_week support and preserves any custom fields.
+        try:
+            template, _ = _merge_front_porch_state_tracking_section(template)
+        except Exception:
+            pass
         return template
 
     def _log_event(self, event, payload=None):
@@ -6570,6 +6594,36 @@ class Api:
                 return json.dumps(value, ensure_ascii=False)
         return json.dumps(value, ensure_ascii=False)
 
+    def _sqlite_table_columns(self, cursor, table_name):
+        try:
+            return {str(row[1]) for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        except Exception:
+            return set()
+
+    def _normalize_front_porch_start_day_of_week(self, value):
+        # Front Porch schema v28: 0 = legacy/unset, 1 = Monday ... 7 = Sunday.
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return 0
+        raw = re.sub(r"[^a-z0-9]+", " ", raw).strip()
+        aliases = {
+            "legacy": 0, "unset": 0, "unknown": 0, "none": 0,
+            "monday": 1, "mon": 1,
+            "tuesday": 2, "tue": 2, "tues": 2,
+            "wednesday": 3, "wed": 3,
+            "thursday": 4, "thu": 4, "thur": 4, "thurs": 4,
+            "friday": 5, "fri": 5,
+            "saturday": 6, "sat": 6,
+            "sunday": 7, "sun": 7,
+        }
+        if raw in aliases:
+            return aliases[raw]
+        try:
+            ivalue = int(raw)
+        except Exception:
+            ivalue = 0
+        return max(0, min(7, ivalue))
+
     def export_to_front_porch(self, output, image_path=None, settings=None, project_path=None):
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or load a character first."}
@@ -6627,30 +6681,38 @@ class Api:
                 json.dumps(lorebook, ensure_ascii=False), now, now
             ))
             session_id = str(ms + 1)
-            cur.execute("""
-                INSERT INTO sessions (
-                    id, character_id, group_id, name, description, author_note, author_note_depth,
-                    summary, summary_last_index, parent_session, fork_index, affection_score, relationship_tier,
-                    long_term_score, long_term_tier, turns_since_long_term_check, short_term_deltas_summary,
-                    realism_enabled, short_term_mood, mood_decay_counter, character_emotion, emotion_intensity,
-                    time_of_day, day_count, nsfw_cooldown_enabled, passage_of_time_enabled, arousal_level,
-                    cooldown_turns_remaining, trust_level, active_fixation, fixation_lifespan, spatial_stance,
-                    trust_repair_pending, chaos_mode_enabled, chaos_pressure, evolved_personality, evolved_scenario,
-                    evolution_count, group_evolved_personalities, group_evolved_scenarios, generation_settings,
-                    created_at, updated_at, deleted_at, user_persona_id
-                ) VALUES (?, ?, NULL, NULL, NULL, '', 4, NULL, NULL, NULL, NULL, ?, 0, ?, 0, 0, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, 0, 0, ?, '', 0, '', 0, ?, 0, '', '', 0, '{}', '{}', NULL, ?, ?, NULL, NULL)
-            """, (
-                session_id, char_id,
-                int(fp.get("short_term_bond") or 0), int(fp.get("long_term_bond") or 0),
-                1 if fp.get("enabled", True) else 0,
-                str(fp.get("character_emotion") or ""), str(fp.get("emotion_intensity") or ""),
+            session_columns = [
+                "id", "character_id", "group_id", "name", "description", "author_note", "author_note_depth",
+                "summary", "summary_last_index", "parent_session", "fork_index", "affection_score", "relationship_tier",
+                "long_term_score", "long_term_tier", "turns_since_long_term_check", "short_term_deltas_summary",
+                "realism_enabled", "short_term_mood", "mood_decay_counter", "character_emotion", "emotion_intensity",
+                "time_of_day", "day_count", "nsfw_cooldown_enabled", "passage_of_time_enabled", "arousal_level",
+                "cooldown_turns_remaining", "trust_level", "active_fixation", "fixation_lifespan", "spatial_stance",
+                "trust_repair_pending", "chaos_mode_enabled", "chaos_pressure", "evolved_personality", "evolved_scenario",
+                "evolution_count", "group_evolved_personalities", "group_evolved_scenarios", "generation_settings",
+                "created_at", "updated_at", "deleted_at", "user_persona_id"
+            ]
+            session_values = [
+                session_id, char_id, None, None, None, "", 4,
+                None, None, None, None, int(fp.get("short_term_bond") or 0), 0,
+                int(fp.get("long_term_bond") or 0), 0, 0, 0,
+                1 if fp.get("enabled", True) else 0, 0, 0, str(fp.get("character_emotion") or ""), str(fp.get("emotion_intensity") or ""),
                 self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon"), int(fp.get("day_count") or 1),
                 1 if fp.get("nsfw_cooldown_enabled", True) else 0,
-                1 if fp.get("passage_of_time_enabled", True) else 0,
-                int(fp.get("trust_level") or 0),
-                1 if fp.get("chaos_mode_enabled", True) else 0,
-                now, now
-            ))
+                1 if fp.get("passage_of_time_enabled", True) else 0, 0,
+                0, int(fp.get("trust_level") or 0), "", 0, "",
+                0, 1 if fp.get("chaos_mode_enabled", True) else 0, 0, "", "",
+                0, "{}", "{}", None,
+                now, now, None, None
+            ]
+            sessions_columns_available = self._sqlite_table_columns(cur, "sessions")
+            if "start_day_of_week" in sessions_columns_available and "start_day_of_week" not in session_columns:
+                # Front Porch schema v28. It is safe to leave this as 0 (legacy/unset),
+                # but include it when available so our export understands the new schema.
+                session_columns.append("start_day_of_week")
+                session_values.append(self._normalize_front_porch_start_day_of_week(fp.get("start_day_of_week") or 0))
+            placeholders = ", ".join(["?"] * len(session_columns))
+            cur.execute(f"INSERT INTO sessions ({', '.join(session_columns)}) VALUES ({placeholders})", session_values)
             if first_mes:
                 cur.execute("""
                     INSERT INTO messages (id, session_id, position, sender, is_user, character_id, swipes, swipe_index, swipe_durations, metadata, swipe_metadata, updated_at, deleted_at)
@@ -6997,6 +7059,7 @@ class Api:
         fp["trust_level"] = self._clamp_int_value(fp.get("trust_level"), 0, -100, 100)
         fp["day_count"] = max(1, self._parse_int_value(fp.get("day_count"), 1))
         fp["time_of_day"] = self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon")
+        fp["start_day_of_week"] = self._normalize_front_porch_start_day_of_week(fp.get("start_day_of_week") or fp.get("day_of_week") or 0)
         fp["character_emotion"] = str(fp.get("character_emotion") or "Neutral").strip() or "Neutral"
         fp["emotion_intensity"] = str(fp.get("emotion_intensity") or "moderate").strip().lower() or "moderate"
         fp["enabled"] = bool(fp.get("enabled", True))
@@ -7016,6 +7079,9 @@ class Api:
             key = re.sub(r"\s+", "_", key.strip().lower())
             key = key.replace("starting_emotion", "character_emotion")
             key = key.replace("current_objective", "current_task")
+            key = key.replace("weekday", "day_of_week")
+            key = key.replace("starting_weekday", "day_of_week")
+            key = key.replace("starting_day_of_week", "day_of_week")
             state[key] = val.strip()
         return state
 
@@ -7026,6 +7092,7 @@ class Api:
         # - Long-Term Bond: -300 to 300
         # - Trust Level: -100 to 100
         # Time of Day must be one of the valid Front Porch values; Late Afternoon is normalized to Afternoon.
+        # Day of Week / Start Day of Week: 0 legacy/unset, 1 Monday ... 7 Sunday.
         return self._normalise_front_porch_realism_engine({
             "enabled": True,
             "short_term_bond": state.get("short_term_bond"),
@@ -7033,6 +7100,7 @@ class Api:
             "trust_level": state.get("trust_level"),
             "day_count": state.get("day_number") or state.get("day_count"),
             "time_of_day": state.get("time_of_day") or "afternoon",
+            "start_day_of_week": state.get("start_day_of_week") or state.get("day_of_week") or state.get("weekday") or 0,
             "character_emotion": state.get("character_emotion") or "Neutral",
             "emotion_intensity": state.get("emotion_intensity") or "moderate",
             "nsfw_cooldown_enabled": True,
