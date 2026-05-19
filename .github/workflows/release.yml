@@ -13,20 +13,39 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
 
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 20
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Project Dependencies
-        run: npm install
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller create-dmg
 
-      - name: Build macOS DMG Container
-        run: npm run dist -- --mac dmg
+      - name: Build Standalone Mac Executable
+        run: |
+          # Compiles your app.py into an standalone macOS App Bundle
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
+
+      - name: Package into DMG Container
+        run: |
+          # Creates a polished installer DMG from the compiled app bundle
+          mkdir -p dist/dmg
+          create-dmg \
+            --volname "Character Card Forge" \
+            --window-size 500 300 \
+            --icon-size 100 \
+            --app-drop-link 350 115 \
+            --icon "Character-Card-Forge.app" 125 115 \
+            "dist/dmg/Character-Card-Forge.dmg" \
+            "dist/Character-Card-Forge.app"
 
       - name: Upload DMG to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          files: dist/dmg/*.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
