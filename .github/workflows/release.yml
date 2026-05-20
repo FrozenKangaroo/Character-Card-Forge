@@ -57,18 +57,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          # 1. Compile with explicit source-to-destination dot syntax anchors for data folders
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;./frontend" --add-data "data;./data" app.py
-
-          # 2. Avoid PowerShell's buggy Compress-Archive entirely.
-          # Use Windows' native tar tool (built into modern Windows runners) which perfectly handles folder structures.
+          # Added VERSION mapping to match local fix behavior
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;./frontend" --add-data "data;./data" --add-data "VERSION;." app.py
           cd dist
           tar -a -c -f Character-Card-Forge-Windows.zip Character-Card-Forge
 
       - name: Build Standalone Executable (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" app.py
+          # Added VERSION mapping to ensure Mac builds fetch correctly from bundle roots
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" --add-data "VERSION:." app.py
           mkdir -p dist/dmg
           create-dmg \
             --volname "Character Card Forge" \
@@ -82,14 +80,17 @@ jobs:
       - name: Build Standalone Executable (Linux AppImage)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # 1. Compile the full layout folder including asset data structures
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" app.py
+          # 1. Compile including the local VERSION data tracking flag
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" --add-data "VERSION:." app.py
 
           # 2. Grab the official deployment packager asset binary
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
 
-          # 3. Step inside the target workspace directory to construct package files
+          # 3. Mirroring the local fix: explicitly clone the VERSION tracking file straight into AppDir root namespace
+          cp VERSION dist/Character-Card-Forge/VERSION
+
+          # Step inside the directory structure workspace to establish system integrations
           cd dist/Character-Card-Forge
 
           cat << 'EOT' > character-card-forge.desktop
@@ -101,11 +102,10 @@ jobs:
           Categories=Utility;
           EOT
 
-          # Automatically scale the master asset logo down to 256x256 pixel parameters
           convert ../../icon.png -resize 256x256 character-card-forge.png
           ln -sf Character-Card-Forge AppRun
 
-          # 4. Drop back down to project root and wrap the entire layout directory
+          # 4. Drop back down to project root execution path and pack the target container
           cd ../../
           ./appimagetool-x86_64.AppImage dist/Character-Card-Forge dist/Character-Card-Forge-Linux.AppImage
 
