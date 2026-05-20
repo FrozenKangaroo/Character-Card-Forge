@@ -27,7 +27,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux-specific core GUI dependencies (Updated for Ubuntu 24.04 compatibility)
+      # Linux-specific core GUI dependencies
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -79,7 +79,11 @@ jobs:
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
+          
+          # Fixed: Create both applications and icons directories explicitly
           mkdir -p dist/appdir/usr/share/applications
+          mkdir -p dist/appdir/usr/share/icons
+          
           cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
           [Desktop Entry]
           Type=Application
@@ -88,6 +92,7 @@ jobs:
           Icon=character-card-forge
           Categories=Utility;
           EOT
+          
           touch dist/appdir/usr/share/icons/character-card-forge.png
           export OUTPUT="Character-Card-Forge-Linux.AppImage"
           ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --output appimage
