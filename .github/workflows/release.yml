@@ -27,7 +27,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux-specific core GUI dependencies
+      # Linux-specific core GUI dependencies + ImageMagick
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -37,7 +37,7 @@ jobs:
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
-            binutils wget
+            binutils wget imagemagick
 
       # Mac-specific dmg creator utility
       - name: Install Mac System Dependencies
@@ -83,8 +83,8 @@ jobs:
           mkdir -p dist/appdir/usr/share/applications
           mkdir -p dist/appdir/usr/share/icons/hicolor/256x256/apps
           
-          # Copy YOUR personal icon file into the deployment directory layout
-          cp icon.png dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png
+          # Automatically scale down the master icon to standard compliance specifications
+          convert icon.png -resize 256x256 dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png
           
           cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
           [Desktop Entry]
