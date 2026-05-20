@@ -27,7 +27,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux-specific core GUI dependencies + ImageMagick
+      # Linux dependencies + ImageMagick
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -39,12 +39,12 @@ jobs:
             libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
             binutils wget imagemagick
 
-      # Mac-specific dmg creator utility
+      # Mac DMG creator utility
       - name: Install Mac System Dependencies
         if: matrix.os == 'macos-latest'
         run: brew install create-dmg
 
-      # All platforms install requirements + packaging tool
+      # All platforms install dependencies
       - name: Install Python Package Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -56,13 +56,13 @@ jobs:
       - name: Build Standalone Executable (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;frontend" --add-data "data;data" app.py
           powershell Compress-Archive -Path "dist/Character-Card-Forge/*" -DestinationPath "dist/Character-Card-Forge-Windows.zip"
 
       - name: Build Standalone Executable (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" app.py
           mkdir -p dist/dmg
           create-dmg \
             --volname "Character Card Forge" \
@@ -76,17 +76,17 @@ jobs:
       - name: Build Standalone Executable (Linux AppImage)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
+          # 1. Build the full folder layout via PyInstaller with assets included
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" app.py
           
-          mkdir -p dist/appdir/usr/share/applications
-          mkdir -p dist/appdir/usr/share/icons/hicolor/256x256/apps
+          # 2. Get the official AppImage packaging tool
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
           
-          # Automatically scale down the master icon to standard compliance specifications
-          convert icon.png -resize 256x256 dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png
+          # 3. Move into the compiled bundle directory to set up the AppDir metadata
+          cd dist/Character-Card-Forge
           
-          cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
+          cat << 'EOT' > character-card-forge.desktop
           [Desktop Entry]
           Type=Application
           Name=Character Card Forge
@@ -95,9 +95,13 @@ jobs:
           Categories=Utility;
           EOT
           
-          export OUTPUT="Character-Card-Forge-Linux.AppImage"
-          ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --desktop-file dist/appdir/usr/share/applications/character-card-forge.desktop --icon-file dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png --output appimage
-          mv Character-Card-Forge*.AppImage dist/Character-Card-Forge-Linux.AppImage
+          # Handle the icon and create the entrypoint symlink
+          convert ../../icon.png -resize 256x256 character-card-forge.png
+          ln -sf Character-Card-Forge AppRun
+          
+          # 4. Step back out and package the ENTIRE folder bundle
+          cd ../../
+          ./appimagetool-x86_64.AppImage dist/Character-Card-Forge dist/Character-Card-Forge-Linux.AppImage
 
       # --- ARTIFACT UPLOAD PHASE ---
 
