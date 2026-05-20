@@ -80,9 +80,11 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
           
-          # Fixed: Create both applications and icons directories explicitly
           mkdir -p dist/appdir/usr/share/applications
-          mkdir -p dist/appdir/usr/share/icons
+          mkdir -p dist/appdir/usr/share/icons/hicolor/256x256/apps
+          
+          # Copy YOUR personal icon file into the deployment directory layout
+          cp icon.png dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png
           
           cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
           [Desktop Entry]
@@ -93,9 +95,8 @@ jobs:
           Categories=Utility;
           EOT
           
-          touch dist/appdir/usr/share/icons/character-card-forge.png
           export OUTPUT="Character-Card-Forge-Linux.AppImage"
-          ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --output appimage
+          ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --desktop-file dist/appdir/usr/share/applications/character-card-forge.desktop --icon-file dist/appdir/usr/share/icons/hicolor/256x256/apps/character-card-forge.png --output appimage
           mv Character-Card-Forge*.AppImage dist/Character-Card-Forge-Linux.AppImage
 
       # --- ARTIFACT UPLOAD PHASE ---
