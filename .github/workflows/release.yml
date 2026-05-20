@@ -27,7 +27,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux dependencies + ImageMagick + FUSE core engine compatibility
+      # Linux core dependencies + ImageMagick asset handling + FUSE runtime engine
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -39,25 +39,26 @@ jobs:
             libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
             binutils wget imagemagick libfuse2
 
-      # Mac DMG creator utility
+      # Mac DMG packaging tool engine
       - name: Install Mac System Dependencies
         if: matrix.os == 'macos-latest'
         run: brew install create-dmg
 
-      # All platforms install dependencies
+      # All systems install Python requirements and bundling toolkit
       - name: Install Python Package Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # --- COMPILATION PHASE ---
+      # --- COMPILATION & PACKAGING PHASE ---
 
       - name: Build Standalone Executable (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;frontend" --add-data "data;data" app.py
-          powershell Compress-Archive -Path "dist/Character-Card-Forge/*" -DestinationPath "dist/Character-Card-Forge-Windows.zip"
+          # Targeting the folder explicitly (no wildcard) preserves the subdirectories upon extraction
+          powershell Compress-Archive -Path "dist/Character-Card-Forge" -DestinationPath "dist/Character-Card-Forge-Windows.zip"
 
       - name: Build Standalone Executable (macOS)
         if: matrix.os == 'macos-latest'
@@ -76,16 +77,16 @@ jobs:
       - name: Build Standalone Executable (Linux AppImage)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # 1. Build the full folder layout via PyInstaller with assets included
+          # 1. Compile the full layout folder including asset data structures
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" app.py
-          
-          # 2. Get the official AppImage packaging tool
+
+          # 2. Grab the official deployment packager asset binary
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          
-          # 3. Move into the compiled bundle directory to set up the AppDir metadata
+
+          # 3. Step inside the target workspace directory to construct package files
           cd dist/Character-Card-Forge
-          
+
           cat << 'EOT' > character-card-forge.desktop
           [Desktop Entry]
           Type=Application
@@ -94,16 +95,16 @@ jobs:
           Icon=character-card-forge
           Categories=Utility;
           EOT
-          
-          # Handle the icon and create the entrypoint symlink
+
+          # Automatically scale the master asset logo down to 256x256 pixel parameters
           convert ../../icon.png -resize 256x256 character-card-forge.png
           ln -sf Character-Card-Forge AppRun
-          
-          # 4. Step back out and package the ENTIRE folder bundle
+
+          # 4. Drop back down to project root and wrap the entire layout directory
           cd ../../
           ./appimagetool-x86_64.AppImage dist/Character-Card-Forge dist/Character-Card-Forge-Linux.AppImage
 
-      # --- ARTIFACT UPLOAD PHASE ---
+      # --- AUTOMATED ARTIFACT DISTRIBUTION PHASE ---
 
       - name: Upload Windows Asset
         if: matrix.os == 'windows-latest'
