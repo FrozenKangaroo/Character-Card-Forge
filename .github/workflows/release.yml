@@ -27,13 +27,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux-specific core GUI dependencies (Required for pywebview/PyQt6 headless runs)
+      # Linux-specific core GUI dependencies (Updated for Ubuntu 24.04 compatibility)
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libegl1 libgl1-mesa-glx libxkbcommon-x11-0 \
+            libegl1 libgl1 libxkbcommon-x11-0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
@@ -76,14 +76,9 @@ jobs:
       - name: Build Standalone Executable (Linux AppImage)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # 1. Compile into a standard Linux binary layout
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
-          
-          # 2. Grab the official linuxdeploy tool to package into an AppImage container
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy-x86_64.AppImage
-          
-          # 3. Dummy setup minimal metadata file elements required by AppImage standard
           mkdir -p dist/appdir/usr/share/applications
           cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
           [Desktop Entry]
@@ -94,8 +89,6 @@ jobs:
           Categories=Utility;
           EOT
           touch dist/appdir/usr/share/icons/character-card-forge.png
-          
-          # 4. Trigger creation
           export OUTPUT="Character-Card-Forge-Linux.AppImage"
           ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --output appimage
           mv Character-Card-Forge*.AppImage dist/Character-Card-Forge-Linux.AppImage

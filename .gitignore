@@ -1,0 +1,18 @@
+# Ignore our automated deploy script
+release.sh
+
+# Python build and distribution artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS metadata junk
+.DS_Store
+Thumbs.db
