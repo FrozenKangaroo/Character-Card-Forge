@@ -17,7 +17,7 @@
         <button class="nav" data-tab="browser">Character Browser</button>
         <button class="nav" data-tab="output">Output / Editor</button>
       </nav>
-      <div class="hint-card" id="tipBox"><div class="tip-head"><strong>Tip</strong><button id="nextTipBtn" type="button" class="tip-next" title="Show another tip">↻</button></div><p id="tipText">Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div>
+      <div class="hint-card" id="tipBox"><div class="tip-head"><strong>Tip</strong><button id="nextTipBtn" type="button" class="tip-next" title="Show another tip">↻</button></div><p id="tipText">Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div><div id="appVersionText" class="app-version">Version 1.0.2</div>
     </aside>
 
     <main>
@@ -37,7 +37,7 @@
         <div id="concept-main" class="subtab-panel active" data-subtab-panel="concept">
           <div class="concept-dashboard">
             <div class="concept-primary-panel card">
-              <div class="card-title"><div><h3>Main Concept</h3><p>Write the core idea here. Use Import Card/Image for existing cards, images, URLs, and optional vision analysis.</p></div><div class="actions"><button id="openConceptImportModalBtn" type="button">Import Card/Image</button></div></div>
+              <div class="card-title"><div><h3>Main Concept</h3><p>Write the core idea here. Use Import Card/Image for existing cards, images, URLs, and optional vision analysis.</p></div><div class="actions"><button id="openIdeaGeneratorModalBtn" type="button">Idea Generator</button><button id="openConceptImportModalBtn" type="button">Import Card/Image</button></div></div>
               <textarea id="conceptText" class="concept" placeholder="Example: A confident gyaru university student who works part-time at a train museum and teases {{user}} about knowing less than her..."></textarea>
             </div>
             <aside class="concept-side-panel">
@@ -275,10 +275,10 @@
       <section id="settings" class="tab">
         <div class="page-head"><div><h2>Settings</h2><p>Configure AI endpoints, Stable Diffusion, Front Porch export, data storage, tag restrictions, and browser privacy.</p></div><button id="saveSettingsBtn">Save Settings</button></div>
         <div class="settings-grid">
-          <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label><label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label><label>Model<input id="model" placeholder="model-name" /></label><label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label><label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label><label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
+          <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label><label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label><label>Model<div class="model-picker"><input id="model" placeholder="model-name" autocomplete="off" /><button id="fetchModelTokensBtn" type="button">Fetch Tokens</button><div id="recentModelDropdown" class="model-suggestion-panel hidden"></div></div><small id="modelTokenHint" class="muted small">Recent models appear as you type. Nano-GPT token limits can be fetched automatically.</small></label><div id="modelTokenPanel" class="token-fetch-panel"><div id="modelTokenResultBox" class="small token-fetch-result muted">No token fetch run in this window yet.</div><div class="actions token-fetch-actions"><button id="showTokenDebugBtn" type="button">Show Token Debug Log</button><button id="copyTokenDebugBtn" type="button">Copy Token Debug</button></div></div><label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label><label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label><label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
           <label>Vision API Base URL<input id="visionApiBaseUrl" placeholder="Leave blank to use text API base URL" /></label><label>Vision API Key<input id="visionApiKey" type="password" placeholder="Leave blank to use text API key" /></label><label>Vision Model<input id="visionModel" placeholder="vision-model-name" /></label>
-          <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label><label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="1000000" step="1024" value="200000" /></label><label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label><label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label><label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label><label class="toggle-inline setting-toggle"><input id="streamAi" type="checkbox" /> Stream AI text into output boxes</label>
-          <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Data Folder<input id="frontPorchDataFolder" placeholder="Folder from Front Porch → Settings" /></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Front Porch Folder</button></div>
+          <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label><label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="5000000" step="1024" value="200000" /></label><label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label><label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label><label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label><label class="toggle-inline setting-toggle"><input id="streamAi" type="checkbox" /> Stream AI text into output boxes</label>
+          <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Export Target<select id="frontPorchExportTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Selected Target</button></div><label>Stable Front Porch Data Folder<input id="frontPorchStableDataFolder" placeholder="Stable Front Porch → Settings folder" /></label><div class="actions"><button id="scanFrontPorchStableBtn" type="button">Scan Stable</button></div><label>Beta Front Porch Data Folder<input id="frontPorchBetaDataFolder" placeholder="Beta Front Porch → Settings folder" /></label><div class="actions"><button id="scanFrontPorchBetaBtn" type="button">Scan Beta</button></div>
           <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label><div class="actions"><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div>
           <label class="toggle-inline setting-toggle"><input id="restrictTags" type="checkbox" /> Restrict AI tags to allowed list</label><label class="wide-setting">Allowed Tags<textarea id="allowedTags" placeholder="female, male, gyaru, romance, fantasy&#10;One tag per line or comma-separated."></textarea></label>
           <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
@@ -407,6 +407,45 @@
   </div>
   <template id="sectionTemplate"><div class="section-card card" data-section-id=""><div class="section-top"><input class="section-enabled" type="checkbox" /><input class="section-title" /><button class="move-up">↑</button><button class="move-down">↓</button><button class="add-field">Add Field</button><button class="delete-section danger-ghost">Delete</button></div><textarea class="section-desc" placeholder="Section instructions / description"></textarea><div class="fields"></div></div></template>
   <template id="fieldTemplate"><div class="field-row" data-field-id=""><input class="field-enabled" type="checkbox" /><input class="field-label" placeholder="Field label" /><input class="field-hint" placeholder="Hint / rule" /><button class="field-up">↑</button><button class="field-down">↓</button><button class="delete-field danger-ghost">×</button></div></template>
+  <div id="ideaGeneratorModal" class="modal-backdrop hidden">
+    <div class="modal-card idea-generator-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Idea Generator</h3>
+          <p>Pick broad ingredients and let the AI create a compact Main Concept seed. This does not generate the full card.</p>
+        </div>
+        <button id="closeIdeaGeneratorModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="idea-generator-grid">
+        <label>Gender<select id="ideaGender"><option value="">Any / unspecified</option><option value="female">Female</option><option value="male">Male</option><option value="nonbinary">Non-binary / androgynous</option><option value="multiple">Multiple characters / mixed cast</option></select></label>
+        <label>Archetype<input id="ideaArchetype" list="ideaArchetypeList" placeholder="gyaru, childhood friend, office lady..." /></label>
+        <label>Core Conflict<input id="ideaConflict" list="ideaConflictList" placeholder="jealousy, double life, forbidden attraction..." /></label>
+        <label>Setting<input id="ideaSetting" list="ideaSettingList" placeholder="share house, university, cafe..." /></label>
+        <label>Tone<input id="ideaTone" list="ideaToneList" placeholder="slow burn, dark drama, spicy comedy..." /></label>
+        <label>Occupation / Role<input id="ideaOccupation" list="ideaOccupationList" placeholder="teacher, detective, idol, bartender..." /></label>
+        <label>Relationship to {{user}}<input id="ideaRelationship" list="ideaRelationshipList" placeholder="coworker, spouse, roommate, ex-girlfriend..." /></label>
+        <label>Status / Social Position<input id="ideaStatus" list="ideaStatusList" placeholder="wealthy, poor, ojousama, homeless..." /></label>
+        <label>Personality<input id="ideaPersonality" list="ideaPersonalityList" placeholder="confident, jealous, otaku, loyal..." /></label>
+        <label>Subject Of<input id="ideaSubjectOf" list="ideaSubjectOfList" placeholder="betrayal, pregnancy, mind control..." /></label>
+        <label>Engages In<input id="ideaEngagesIn" list="ideaEngagesInList" placeholder="sports, cosplay, investigation..." /></label>
+        <label>Engages In (Sexual)<input id="ideaSexualEngagesIn" list="ideaSexualEngagesInList" placeholder="group sex, sexting, voyeurism..." /></label>
+      </div>
+      <label>Custom Instructions<textarea id="ideaCustomInstructions" class="vision-description" placeholder="Optional extra direction. Example: Make it a cozy mystery setup with romantic tension, not a full card. Keep it concise and playable."></textarea></label>
+      <div class="actions modal-actions"><button id="clearIdeaGeneratorBtn" type="button" class="danger-ghost">Clear</button><button id="generateIdeaBtn" type="button" class="primary">Generate Idea into Main Concept</button></div>
+      <datalist id="ideaArchetypeList"></datalist>
+      <datalist id="ideaConflictList"></datalist>
+      <datalist id="ideaSettingList"></datalist>
+      <datalist id="ideaToneList"></datalist>
+      <datalist id="ideaOccupationList"></datalist>
+      <datalist id="ideaRelationshipList"></datalist>
+      <datalist id="ideaStatusList"></datalist>
+      <datalist id="ideaPersonalityList"></datalist>
+      <datalist id="ideaSubjectOfList"></datalist>
+      <datalist id="ideaEngagesInList"></datalist>
+      <datalist id="ideaSexualEngagesInList"></datalist>
+    </div>
+  </div>
+
   <div id="conceptImportModal" class="modal-backdrop hidden">
     <div class="modal-card import-modal-card">
       <div class="modal-head">
@@ -433,6 +472,6 @@
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple hidden />
-  <script src="app.js"></script>
+  <script src="app.js?v=1.0.2"></script>
 </body>
 </html>

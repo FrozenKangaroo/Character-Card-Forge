@@ -29,6 +29,9 @@ let outputEditorSaveTimer = null;
 let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
+let recentModels = [];
+let appVersion = "1.0.2";
+let modelTokenFetchTimer = null;
 let conceptImportFile = null;
 let conceptImportUrlValue = "";
 let currentLoadedType = "";
@@ -63,6 +66,11 @@ function showRandomTip(forceDifferent = false) {
     while (next === current && guard++ < 8) next = NEW_USER_TIPS[Math.floor(Math.random() * NEW_USER_TIPS.length)];
   }
   tipText.textContent = next;
+}
+
+function updateAppVersionDisplay() {
+  const el = $('#appVersionText');
+  if (el) { const shown = (!appVersion || appVersion === 'unknown') ? '1.0.2' : appVersion; el.textContent = `Version ${shown}`; }
 }
 
 function setTextareaValue(id, value) {
@@ -292,7 +300,7 @@ function isAiActionElement(el) {
   if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
   if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
   const aiIds = new Set([
-    'generateBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeVisionToBuildersBtn',
+    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeVisionToBuildersBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
     'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
@@ -499,6 +507,9 @@ async function init() {
   const state = await window.pywebview.api.get_state();
   template = state.template;
   settings = state.settings;
+  appVersion = (state.version && state.version !== 'unknown') ? state.version : (appVersion && appVersion !== 'unknown' ? appVersion : '1.0.2');
+  updateAppVersionDisplay();
+  recentModels = normalizeRecentModels(settings.recentModels || []);
   styles = state.styles || {};
   emotionOptions = state.emotions || [];
   promptTemplates = state.templates || ["Default"];
@@ -518,12 +529,16 @@ async function init() {
   setTimeout(ensureBuilderPresetDropdowns, 1000);
   updateAvailability();
   startDebugLogAutoRefresh();
+  try { await writeClientDebugEvent('client_bridge_ready', { availableApiMethods: Object.keys(window.pywebview?.api || {}).sort().slice(0, 120) }); } catch (_) {}
 }
 
 function hydrateSettings() {
   $('#apiBaseUrl').value = settings.apiBaseUrl || '';
   $('#apiKey').value = settings.apiKey || '';
   $('#model').value = settings.model || '';
+  recentModels = normalizeRecentModels(settings.recentModels || recentModels || []);
+  renderRecentModelDropdown('', false);
+  updateModelTokenHint();
   const backupTextModel = $('#backupTextModel'); if (backupTextModel) backupTextModel.value = settings.backupTextModel || '';
   const backupTextMode = $('#backupTextMode'); if (backupTextMode) backupTextMode.value = settings.backupTextMode || 'same';
   const aiSuggestionModel = $('#aiSuggestionModel'); if (aiSuggestionModel) aiSuggestionModel.value = settings.aiSuggestionModel || '';
@@ -538,7 +553,10 @@ function hydrateSettings() {
   const apiTimeoutSeconds = $('#apiTimeoutSeconds'); if (apiTimeoutSeconds) apiTimeoutSeconds.value = settings.apiTimeoutSeconds ?? 300;
   const apiRetryCount = $('#apiRetryCount'); if (apiRetryCount) apiRetryCount.value = settings.apiRetryCount ?? 2;
   const streamAi = $('#streamAi'); if (streamAi) streamAi.checked = !!settings.streamAi;
-  const frontPorchDataFolder = $('#frontPorchDataFolder'); if (frontPorchDataFolder) frontPorchDataFolder.value = settings.frontPorchDataFolder || '';
+  const frontPorchTarget = $('#frontPorchExportTarget'); if (frontPorchTarget) frontPorchTarget.value = (settings.frontPorchExportTarget === 'beta' ? 'beta' : 'stable');
+  const legacyFrontPorchFolder = settings.frontPorchDataFolder || '';
+  const frontPorchStableDataFolder = $('#frontPorchStableDataFolder'); if (frontPorchStableDataFolder) frontPorchStableDataFolder.value = settings.frontPorchStableDataFolder || ((settings.frontPorchExportTarget !== 'beta') ? legacyFrontPorchFolder : '');
+  const frontPorchBetaDataFolder = $('#frontPorchBetaDataFolder'); if (frontPorchBetaDataFolder) frontPorchBetaDataFolder.value = settings.frontPorchBetaDataFolder || ((settings.frontPorchExportTarget === 'beta') ? legacyFrontPorchFolder : '');
   const dataFilesFolder = $('#dataFilesFolder'); if (dataFilesFolder) dataFilesFolder.value = settings.dataFilesFolder || settings?.paths?.userDataRoot || '';
   const restrictTags = $('#restrictTags'); if (restrictTags) restrictTags.checked = !!settings.restrictTags;
   const allowedTags = $('#allowedTags'); if (allowedTags) allowedTags.value = settings.allowedTags || '';
@@ -768,6 +786,278 @@ function cleanModelName(value) {
   return value;
 }
 
+function normalizeRecentModels(list = []) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(list) ? list : []).forEach(item => {
+    const name = cleanModelName(typeof item === 'string' ? item : (item?.name || item?.model || item?.id || ''));
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const entry = { name, lastUsed: Number(item?.lastUsed || item?.last_used || 0) || 0 };
+    const inTok = Number(item?.maxInputTokens || item?.max_input_tokens || 0);
+    const outTok = Number(item?.maxOutputTokens || item?.max_output_tokens || 0);
+    if (inTok > 0) entry.maxInputTokens = inTok;
+    if (outTok > 0) entry.maxOutputTokens = outTok;
+    out.push(entry);
+  });
+  out.sort((a,b) => (Number(b.lastUsed||0) - Number(a.lastUsed||0)) || a.name.localeCompare(b.name));
+  return out.slice(0, 30);
+}
+
+function touchRecentModel(name, tokenInfo = {}) {
+  name = cleanModelName(name);
+  if (!name) return;
+  const key = name.toLowerCase();
+  const now = Date.now() / 1000;
+  const existingItems = normalizeRecentModels(recentModels);
+  const previous = existingItems.find(item => item.name.toLowerCase() === key) || {};
+  const existing = existingItems.filter(item => item.name.toLowerCase() !== key);
+  const entry = { name, lastUsed: now };
+  const inTok = Number(tokenInfo.maxInputTokens || tokenInfo.max_input_tokens || previous.maxInputTokens || 0);
+  const outTok = Number(tokenInfo.maxOutputTokens || tokenInfo.max_output_tokens || previous.maxOutputTokens || 0);
+  if (inTok > 0) entry.maxInputTokens = inTok;
+  if (outTok > 0) entry.maxOutputTokens = outTok;
+  recentModels = normalizeRecentModels([entry, ...existing]);
+  renderRecentModelDropdown($('#model')?.value || '', false);
+}
+
+function currentModelTokenInfoFromFields() {
+  return {
+    maxInputTokens: Number($('#maxInputTokens')?.value || 0),
+    maxOutputTokens: Number($('#maxOutputTokens')?.value || 0),
+  };
+}
+
+async function rememberCurrentModel(saveNow = false) {
+  const name = cleanModelName($('#model')?.value || '');
+  if (!name) return;
+  const tokenInfo = currentModelTokenInfoFromFields();
+  touchRecentModel(name, tokenInfo);
+  const api = window.pywebview?.api || {};
+  if (saveNow && (api.remember_recent_model || api.rememberRecentModel || api.save_settings)) {
+    try {
+      settings = collectSettings();
+      const rememberFn = api.remember_recent_model || api.rememberRecentModel;
+      const res = rememberFn
+        ? await rememberFn(settings, name, tokenInfo)
+        : await api.save_settings(settings);
+      if (res?.settings) settings = res.settings;
+      recentModels = normalizeRecentModels(res?.recentModels || settings.recentModels || recentModels);
+      renderRecentModelDropdown($('#model')?.value || '', false);
+      updateModelTokenHint();
+    } catch (_) {}
+  }
+}
+
+function recentModelTokenInfo(name) {
+  const key = cleanModelName(name).toLowerCase();
+  return normalizeRecentModels(recentModels).find(item => item.name.toLowerCase() === key) || null;
+}
+
+function renderRecentModelDropdown(filter = '', show = true) {
+  const panel = $('#recentModelDropdown');
+  if (!panel) return;
+  const term = cleanModelName(filter).toLowerCase();
+  const items = normalizeRecentModels(recentModels)
+    .filter(item => !term || item.name.toLowerCase().includes(term))
+    .slice(0, 25);
+  panel.innerHTML = '';
+  if (!items.length || !show) {
+    panel.classList.add('hidden');
+    return;
+  }
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'model-suggestion-item';
+    div.innerHTML = `<div class="model-name">${escapeHtml(item.name)}</div><div class="model-meta">${item.maxInputTokens ? `Input ${item.maxInputTokens.toLocaleString()} tokens` : 'No token metadata yet'}${item.maxOutputTokens ? ` · Output ${item.maxOutputTokens.toLocaleString()}` : ''}</div>`;
+    div.addEventListener('mousedown', e => {
+      e.preventDefault();
+      $('#model').value = item.name;
+      if (item.maxInputTokens) $('#maxInputTokens').value = item.maxInputTokens;
+      if (item.maxOutputTokens) $('#maxOutputTokens').value = item.maxOutputTokens;
+      updateModelTokenHint(`Using recent model: ${item.name}`);
+      panel.classList.add('hidden');
+      settings = collectSettings();
+      try { window.pywebview.api.save_settings(settings); } catch (_) {}
+    });
+    panel.appendChild(div);
+  });
+  panel.classList.remove('hidden');
+}
+
+function updateModelTokenHint(text = '') {
+  const hint = $('#modelTokenHint');
+  if (!hint) return;
+  if (text) { hint.textContent = text; return; }
+  const info = recentModelTokenInfo($('#model')?.value || '');
+  if (info?.maxInputTokens || info?.maxOutputTokens) {
+    hint.textContent = `Remembered limits: ${info.maxInputTokens ? `${info.maxInputTokens.toLocaleString()} input` : 'unknown input'}${info.maxOutputTokens ? ` / ${info.maxOutputTokens.toLocaleString()} output` : ''} tokens.`;
+  } else {
+    hint.textContent = 'Recent models appear as you type. Nano-GPT token limits can be fetched automatically.';
+  }
+}
+
+function setModelTokenResult(text = '', kind = '') {
+  const box = $('#modelTokenResultBox');
+  if (!box) return;
+  box.textContent = text || 'No token fetch run in this window yet.';
+  box.classList.remove('ok', 'error', 'warning');
+  if (kind) box.classList.add(kind);
+}
+
+async function copyTokenDebugSummary() {
+  const logText = $('#debugLogText')?.value || '';
+  const boxText = $('#modelTokenResultBox')?.textContent || '';
+  const summary = [boxText, '', logText].filter(Boolean).join('\n');
+  try {
+    await navigator.clipboard.writeText(summary || 'No token debug text loaded yet.');
+    setStatus('Token debug copied to clipboard.', 'ok');
+  } catch (err) {
+    setStatus('Could not copy token debug: ' + (err?.message || String(err)), 'error');
+  }
+}
+
+async function showTokenDebugLog() {
+  // Switch visibly to Output / Editor → Debug Log, then force-read the backend log.
+  $$('.nav').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === 'output'));
+  $$('.tab').forEach(panel => panel.classList.toggle('active', panel.id === 'output'));
+  const group = $('.subtabs[data-subtab-group="output"]');
+  if (group) $$('.subtab', group).forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === 'output-debug'));
+  $$('[data-subtab-panel="output"]').forEach(panel => panel.classList.toggle('active', panel.id === 'output-debug'));
+  await refreshDebugLog(true);
+  const log = $('#debugLogText');
+  if (log) log.scrollTop = log.scrollHeight;
+  setStatus('Debug Log loaded. Latest token fetch entries are at the bottom.', 'ok');
+}
+
+function isNanoGptBaseUrl(value) {
+  return /nano[-.]?gpt/i.test(String(value || ''));
+}
+
+async function writeClientDebugEvent(event, payload = {}) {
+  try {
+    const api = window.pywebview?.api || {};
+    const fn = api.append_debug_event || api.appendDebugEvent;
+    if (!fn) return;
+    await fn(event, {
+      page: 'frontend',
+      version: appVersion,
+      ...(payload || {}),
+    });
+  } catch (_) {
+    // Debug logging must never break the user's action.
+  }
+}
+
+async function fetchModelTokenLimits(auto = false) {
+  const modelValue = ($('#model')?.value || '').trim();
+  const baseValue = ($('#apiBaseUrl')?.value || '').trim();
+  setModelTokenResult(auto ? `Auto-checking token limits for ${modelValue || '(blank model)'}…` : `Fetching token limits for ${modelValue || '(blank model)'}…`, 'warning');
+  await writeClientDebugEvent('client_model_token_fetch_invoked', {
+    auto,
+    hasModel: !!modelValue,
+    model: modelValue,
+    hasApiBaseUrl: !!baseValue,
+    apiBaseUrl: baseValue,
+    isNanoGptBaseUrl: isNanoGptBaseUrl(baseValue),
+  });
+  if (!modelValue || !baseValue) {
+    const reason = !modelValue && !baseValue ? 'missing model and API base URL' : (!modelValue ? 'missing model' : 'missing API base URL');
+    await writeClientDebugEvent('client_model_token_fetch_skipped', { auto, reason });
+    setModelTokenResult(`Cannot fetch token limits: ${reason}.`, 'error');
+    if (!auto) setStatus(`Cannot fetch token limits: ${reason}.`, 'error');
+    try { refreshDebugLog(true); } catch (_) {}
+    return;
+  }
+  if (auto && !isNanoGptBaseUrl(baseValue)) {
+    await writeClientDebugEvent('client_model_token_fetch_skipped', { auto, reason: 'auto fetch only runs for Nano-GPT base URLs', apiBaseUrl: baseValue });
+    setModelTokenResult('Auto token fetch skipped: API Base URL is not Nano-GPT.', 'warning');
+    try { refreshDebugLog(true); } catch (_) {}
+    return;
+  }
+  try {
+    await rememberCurrentModel(!auto);
+    if (!auto) setStatus('Fetching model token limits…', '');
+    const localSettings = { ...collectSettings(), model: modelValue };
+    const api = window.pywebview?.api || {};
+    const fn = api.fetch_model_token_limits || api.fetchModelTokenLimits;
+    if (!fn) {
+      await writeClientDebugEvent('client_model_token_fetch_backend_missing', {
+        availableApiMethods: Object.keys(api).sort().slice(0, 120),
+      });
+      setModelTokenResult('Backend token fetch method is missing. This usually means the running app/AppImage is still old.', 'error');
+      throw new Error('Model metadata fetch backend is not available. Restart the app after updating.');
+    }
+    await writeClientDebugEvent('client_model_token_fetch_backend_call_start', { auto, model: modelValue, apiBaseUrl: baseValue });
+    const res = await fn(localSettings);
+    await writeClientDebugEvent('client_model_token_fetch_backend_result', {
+      ok: !!res?.ok,
+      error: res?.error || '',
+      model: res?.model || '',
+      maxInputTokens: res?.maxInputTokens || 0,
+      maxOutputTokens: res?.maxOutputTokens || 0,
+      sourceEndpoint: res?.sourceEndpoint || '',
+      fetchMethod: res?.fetchMethod || '',
+      searchedEndpoints: Array.isArray(res?.searchedEndpoints) ? res.searchedEndpoints : [],
+      endpointErrors: Array.isArray(res?.endpointErrors) ? res.endpointErrors.slice(0, 8) : [],
+      fetchAttempts: Array.isArray(res?.fetchAttempts) ? res.fetchAttempts : [],
+      debugLogPath: res?.debugLogPath || '',
+    });
+    if (!res.ok) {
+      if (!auto) throw new Error(res.error || 'Could not fetch token limits.');
+      updateModelTokenHint(res.error || 'Could not fetch token limits automatically.');
+      return;
+    }
+    if (res.maxInputTokens) {
+      const inputEl = $('#maxInputTokens');
+      if (inputEl) {
+        inputEl.value = String(res.maxInputTokens);
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    if (res.maxOutputTokens) {
+      const outputEl = $('#maxOutputTokens');
+      if (outputEl) {
+        outputEl.value = String(res.maxOutputTokens);
+        outputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        outputEl.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+    touchRecentModel(res.model || modelValue, res);
+    settings = collectSettings();
+    try {
+      const saveRes = await window.pywebview.api.save_settings(settings);
+      if (saveRes?.settings) settings = saveRes.settings;
+    } catch (_) {}
+    recentModels = normalizeRecentModels(res.recentModels || settings.recentModels || recentModels);
+    const resultText = `Fetched limits for ${res.model || modelValue}: ${res.maxInputTokens ? res.maxInputTokens.toLocaleString() + ' input' : 'unknown input'}${res.maxOutputTokens ? ' / ' + res.maxOutputTokens.toLocaleString() + ' output' : ''} tokens.`;
+    updateModelTokenHint(resultText);
+    setModelTokenResult(resultText, 'ok');
+    const resultBox = $('#modelTokenResultBox');
+    if (resultBox) resultBox.title = res.debugLogPath ? `Debug log: ${res.debugLogPath}` : '';
+    await refreshDebugLog(true);
+    if (!auto) setStatus('Fetched model token limits and wrote diagnostics.', 'ok');
+  } catch (err) {
+    await writeClientDebugEvent('client_model_token_fetch_exception', {
+      auto,
+      message: err?.message || String(err),
+      stack: String(err?.stack || '').slice(0, 4000),
+    });
+    setModelTokenResult(err?.message || String(err), 'error');
+    if (!auto) setStatus(err.message || String(err), 'error');
+  } finally {
+    try { refreshDebugLog(true); } catch (_) {}
+  }
+}
+
+function scheduleAutoModelTokenFetch() {
+  clearTimeout(modelTokenFetchTimer);
+  modelTokenFetchTimer = setTimeout(() => fetchModelTokenLimits(true), 900);
+}
+
 function collectSettings() {
   const selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
   const selectedCardMode = selectedSharedScenePolicy === 'split_cards' ? 'split_cards' : $('#cardMode').value;
@@ -789,7 +1079,10 @@ function collectSettings() {
     apiTimeoutSeconds: Number(($('#apiTimeoutSeconds') ? $('#apiTimeoutSeconds').value : 300) || 300),
     apiRetryCount: Number(($('#apiRetryCount') ? $('#apiRetryCount').value : 2) || 2),
     streamAi: !!($('#streamAi') && $('#streamAi').checked),
-    frontPorchDataFolder: ($('#frontPorchDataFolder') ? $('#frontPorchDataFolder').value.trim() : ''),
+    frontPorchExportTarget: ($('#frontPorchExportTarget') ? $('#frontPorchExportTarget').value : 'stable'),
+    frontPorchStableDataFolder: ($('#frontPorchStableDataFolder') ? $('#frontPorchStableDataFolder').value.trim() : ''),
+    frontPorchBetaDataFolder: ($('#frontPorchBetaDataFolder') ? $('#frontPorchBetaDataFolder').value.trim() : ''),
+    frontPorchDataFolder: (($('#frontPorchExportTarget') && $('#frontPorchExportTarget').value === 'beta') ? ($('#frontPorchBetaDataFolder') ? $('#frontPorchBetaDataFolder').value.trim() : '') : ($('#frontPorchStableDataFolder') ? $('#frontPorchStableDataFolder').value.trim() : '')),
     dataFilesFolder: ($('#dataFilesFolder') ? $('#dataFilesFolder').value.trim() : ''),
     restrictTags: !!($('#restrictTags') && $('#restrictTags').checked),
     allowedTags: ($('#allowedTags') ? $('#allowedTags').value.trim() : ''),
@@ -817,6 +1110,7 @@ function collectSettings() {
     browserTagMerges: browserTagMerges || {},
     browserVirtualFolders: browserVirtualFolders || [],
     browserShowSubfolders: !!browserShowSubfolders,
+    recentModels: normalizeRecentModels(recentModels),
   };
 }
 
@@ -1354,6 +1648,7 @@ function bindActions() {
     renderTemplate();
   });
   $('#saveSettingsBtn').addEventListener('click', async () => {
+    touchRecentModel($('#model')?.value || '', currentModelTokenInfoFromFields());
     settings = collectSettings();
     const res = await window.pywebview.api.save_settings(settings);
     if (res?.settings) settings = res.settings;
@@ -1367,6 +1662,14 @@ function bindActions() {
       alert('Settings saved.');
     }
   });
+  $('#fetchModelTokensBtn')?.addEventListener('click', () => fetchModelTokenLimits(false));
+  $('#showTokenDebugBtn')?.addEventListener('click', showTokenDebugLog);
+  $('#copyTokenDebugBtn')?.addEventListener('click', copyTokenDebugSummary);
+  $('#model')?.addEventListener('focus', () => renderRecentModelDropdown($('#model').value, true));
+  $('#model')?.addEventListener('input', () => { renderRecentModelDropdown($('#model').value, true); updateModelTokenHint(); scheduleAutoModelTokenFetch(); });
+  $('#model')?.addEventListener('blur', () => { setTimeout(() => $('#recentModelDropdown')?.classList.add('hidden'), 180); touchRecentModel($('#model')?.value || '', currentModelTokenInfoFromFields()); settings = collectSettings(); try { window.pywebview.api.save_settings(settings); } catch (_) {} });
+  $('#apiBaseUrl')?.addEventListener('input', scheduleAutoModelTokenFetch);
+
   $('#selectDataFolderBtn')?.addEventListener('click', async () => {
     try {
       const res = await window.pywebview.api.select_data_folder();
@@ -1376,7 +1679,9 @@ function bindActions() {
       setStatus(err.message || String(err), 'error');
     }
   });
-  $('#scanFrontPorchBtn')?.addEventListener('click', scanFrontPorchFolder);
+  $('#scanFrontPorchBtn')?.addEventListener('click', () => scanFrontPorchFolder());
+  $('#scanFrontPorchStableBtn')?.addEventListener('click', () => scanFrontPorchFolder('stable'));
+  $('#scanFrontPorchBetaBtn')?.addEventListener('click', () => scanFrontPorchFolder('beta'));
   $('#fetchSdModelsBtn')?.addEventListener('click', fetchStableDiffusionModels);
   $('#firstStyle')?.addEventListener('change', () => { settings = collectSettings(); updateFirstMessageCustomVisibility(); updateAvailability(); });
   $('#firstCustomStyle')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
@@ -1409,6 +1714,13 @@ function bindActions() {
   $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#generateBtn').addEventListener('click', generateCard);
+  $('#openIdeaGeneratorModalBtn')?.addEventListener('click', openIdeaGeneratorModal);
+  $('#ideaGender')?.addEventListener('change', populateIdeaGeneratorOptions);
+  $('#closeIdeaGeneratorModalBtn')?.addEventListener('click', closeIdeaGeneratorModal);
+  $('#clearIdeaGeneratorBtn')?.addEventListener('click', clearIdeaGenerator);
+  $('#generateIdeaBtn')?.addEventListener('click', generateIdeaIntoMainConcept);
+  $('#ideaGeneratorModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'ideaGeneratorModal') closeIdeaGeneratorModal(); });
+  populateIdeaGeneratorOptions();
   $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
   $('#browserMultiDeleteBtn')?.addEventListener('click', deleteSelectedCharacterDirectories);
   $('#browserMultiExportPngBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_png'));
@@ -3425,8 +3737,9 @@ async function exportSelectedCharactersToFrontPorchBatch() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   settings = collectSettings();
-  if (!settings.frontPorchDataFolder) { setStatus('Set Front Porch Data Folder in Settings first.', 'error'); return; }
-  const okConfirm = confirm(`Export ${paths.length} selected character(s) to Front Porch AI?\n\nA database backup is created by the exporter. Close Front Porch before exporting if possible.`);
+  const fpTarget = currentFrontPorchTargetInfo();
+  if (!fpTarget.folder) { setStatus(`Set the ${fpTarget.label} Data Folder in Settings first.`, 'error'); return; }
+  const okConfirm = confirm(`Export ${paths.length} selected character(s) to ${fpTarget.label}?\n\nA database backup is created by the exporter. Close Front Porch before exporting if possible.`);
   if (!okConfirm) return;
   setBusy('BATCH EXPORTING TO FRONT PORCH AI…');
   let ok = 0;
@@ -3440,7 +3753,7 @@ async function exportSelectedCharactersToFrontPorchBatch() {
     } catch (_) { failed += 1; }
   }
   setBusy('');
-  setStatus(`Front Porch batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
+  setStatus(`${fpTarget.label} batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
 }
 
 function normaliseBrowserTag(tag) {
@@ -4195,14 +4508,21 @@ async function zipSelectedCharacterEmotions() {
 }
 
 
-async function scanFrontPorchFolder() {
+async function scanFrontPorchFolder(targetOverride = null) {
   settings = collectSettings();
-  setBusy('SCANNING FRONT PORCH FOLDER…');
+  const target = targetOverride || settings.frontPorchExportTarget || 'stable';
+  const scanSettings = { ...settings, frontPorchExportTarget: target };
+  scanSettings.frontPorchDataFolder = target === 'beta' ? (settings.frontPorchBetaDataFolder || '') : (settings.frontPorchStableDataFolder || '');
+  const label = target === 'beta' ? 'Beta Front Porch' : 'Stable Front Porch';
+  setBusy(`SCANNING ${label.toUpperCase()} FOLDER…`);
   try {
     await window.pywebview.api.save_settings(settings);
-    const res = await window.pywebview.api.scan_front_porch_folder(settings);
+    // Pass a single object through the PyWebView bridge. Older bridge builds can
+    // throw "takes 1 to 2 positional arguments but 3 were given" when a second
+    // positional target argument is supplied, so the target rides inside settings.
+    const res = await window.pywebview.api.scan_front_porch_folder(scanSettings);
     if (!res.ok) throw new Error(res.error || 'Could not find Front Porch database.');
-    setStatus(`Front Porch found: ${res.databaseName} — Characters folder: ${res.charactersDir}`, 'ok');
+    setStatus(`${res.targetLabel || label} found: ${res.databaseName} — Characters folder: ${res.charactersDir}`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -4210,25 +4530,38 @@ async function scanFrontPorchFolder() {
   }
 }
 
+function currentFrontPorchTargetInfo() {
+  const current = collectSettings();
+  const target = current.frontPorchExportTarget === 'beta' ? 'beta' : 'stable';
+  const folder = target === 'beta' ? current.frontPorchBetaDataFolder : current.frontPorchStableDataFolder;
+  return {
+    target,
+    folder: folder || '',
+    label: target === 'beta' ? 'Beta Front Porch' : 'Stable Front Porch',
+  };
+}
+
+
 async function exportSelectedCharacterToFrontPorch() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
   settings = collectSettings();
-  if (!settings.frontPorchDataFolder) {
-    setStatus('Set Front Porch Data Folder in Settings first. Use the folder shown in Front Porch → Settings.', 'error');
+  const fpTarget = currentFrontPorchTargetInfo();
+  if (!fpTarget.folder) {
+    setStatus(`Set the ${fpTarget.label} Data Folder in Settings first. Use the folder shown in that Front Porch version's Settings.`, 'error');
     $$('.nav').forEach(b => b.classList.remove('active'));
     $$('.tab').forEach(t => t.classList.remove('active'));
     $('[data-tab="settings"]').classList.add('active');
     $('#settings').classList.add('active');
     return;
   }
-  const ok = confirm('Export this saved character directly into Front Porch AI?\n\nThis will write to the Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A timestamped database backup will be created first. Close Front Porch before exporting if possible.');
+  const ok = confirm(`Export this saved character directly into ${fpTarget.label}?\n\nThis will write to the selected Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A timestamped database backup will be created first. Close Front Porch before exporting if possible.`);
   if (!ok) return;
   setBusy('EXPORTING TO FRONT PORCH AI…');
   try {
     await window.pywebview.api.save_settings(settings);
     const res = await window.pywebview.api.export_front_porch_from_project(selectedCharacterProjectPath);
     if (!res.ok) throw new Error(res.error || 'Front Porch export failed.');
-    setStatus(`Exported to Front Porch AI: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`, 'ok');
+    setStatus(`Exported to ${res.targetLabel || fpTarget.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -4246,6 +4579,309 @@ async function analyzeSelectedImageToBuilders() {
   }
 }
 
+
+const IDEA_OPTIONS = {
+  archetype: [
+    'gyaru','childhood friend','rich girl','older woman','shy nerd','tomboy','villainess','office lady','idol','cosplayer','delinquent','teacher','supernatural girl','online content creator','student','artist','model','beautician','cheerleader','adventurer','detective','magician','housewife','hostess','single parent','NEET','freelancer'
+  ],
+  conflict: [
+    'hiding a secret','fake confidence','forbidden attraction','jealousy','double life','debt/favor','rival becoming lover','public mask vs private self','loyalty tested','ambition vs love','corrupted innocence','obsession','cheating','taboo relationship','NTR tension','family pressure','identity reveal','dangerous rumor','blackmail','unspoken confession','career risk','class difference','supernatural curse','pregnancy'
+  ],
+  setting: [
+    'university','share house','high school','cafe','train trip','beach villa','convention','apartment neighbours','clubroom','classroom','family homestay','band tour','workplace','fantasy city','red light district','mystery cruise','love hotel','apartment','resort villa','office','train museum','dormitory','shopping district','small town','royal court','detective agency','hospital','bar','restaurant','live house','futuristic','sci-fi','space ship','space colony','another world'
+  ],
+  tone: [
+    'sweet romance','spicy comedy','dark drama','NTR tension','mystery','slow burn','corruption','taboo psychological','cozy domestic','angst','romantic comedy','melodrama','thriller','slice of life','forbidden romance','chaotic comedy','bittersweet','seductive noir','fantasy adventure','emotional healing'
+  ],
+  occupation: [
+    'artist','teacher','warrior','white-collar worker','healthcare professional','sex industry worker','student','religious role','blue collar worker','criminal','pink-collar worker','politician','royalty','scientist','psychic','writer','driver','model','noble','beautician','cheerleader','tailor','vendor','adventurer','archeologist','astronaut','barista','bartender','blacksmith','bounty hunter','captain','communications officer','cook','croupier','delivery worker','detective','dormitory manager','elevator operator','executioner','firefighter','fisherman','flight attendant','florist','fortune teller','freelancer','guide','hacker','hermit','historian','hostess','housewife','journalist','judge','landlord','lawyer','lifeguard','mages organization member','magician','mail carrier','massage therapist','merchant','NEET','news presenter','orphanage director','parent-teacher association member','part-time worker','peasant','professional athlete','professional matchmaker','receptionist','sailor','shopkeeper','single parent','television host','toymaker','unemployed','video game developer','volunteer worker','waitstaff','office lady','idol','cosplayer','online content creator'
+  ],
+  relationship: [
+    'grandchild','grandparent','offspring','parent','sibling','spouse','cousin','aunt','nephew','niece','uncle','friend','schoolmate','coworker','neighbor','boyfriend','girlfriend','ex-boyfriend','ex-girlfriend','secret boyfriend','secret girlfriend','domestic partner','employee','employer','betrothed','concubine','divorcee','kouhai','legal guardian','mistress','roommate','senpai','sex friend','childhood friend','rival','client','customer','landlord','tenant','classmate','clubmate','online friend','affair partner','personal slut','fucktoy','slave','step-sibling','bully'
+  ],
+  status: [
+    'homeless','ojousama','poor','wealthy','middle class','new money','old money','fallen noble','celebrity','local celebrity','outsider','transfer student','foreign exchange student','single parent','widow','divorcee','secretly rich','secretly poor','high-status family','disgraced family','underground celebrity','public figure'
+  ],
+  personality: [
+    'Immature','Confident','Smart','Dishonest','Otaku','Absentminded','Ambitious','Cautious','Emotional','Jealous','Kind','Lazy','Outgoing','Pervert','Pretending','Protective','Reserved','Secretive','Serious','Stoic','Stubborn','Uneducated','Violent','Wise','Adaptable','Airhead','Antisocial','Apathetic','Bookworm','Brave','Charismatic','Cinephile','Clumsy','Competitive','Coward','Creative','Cruel','Curious','Cynic','Docile','Dogmatic','Donkan','Effeminate','Energetic','Envious','Family Oriented','Fear of Commitment','Feminist','Flustered','Funny','Genre Savvy','Gloomy','Gossipy','Grumbler','Henpecked','Hetare','Homophobe','Honorable','Idealist','Idiot','Ignorant','Incorruptible','Insightful','Japanophile','Jock','Loner','Loyal','Lucky','Mature','Misandrist','Misanthrope','Mischievous','Misogynist','Money Lover','Naive','Nihilist','No Sense of Direction','Obedient','Observant','Obsessive','Old-fashioned','Optimist','Pacifist','Patriotic','Perfectionist','Pessimist','Primitive','Proactive','Promiscuous','Racist','Rebellious','Refined','Resilient','Romantic','Romantically Indecisive','Rude','Sensitive','Sharp-tongued','Short-tempered','Sleepyhead','Sociopath','Stylish','Superficial','Superstitious','Taciturn','Talkative','Thrifty','Timid','Tomboy','Transphobe','Unlucky','Vindictive','Whimsical','Womanizer'
+  ],
+  subjectOf: [
+    'Health Issues','Crime','Breakup','Flirting','Infidelity','Netorare','Mind Control','Confinement','Sexual Corruption','Porn Acting','Guilt','Grief','Teasing','Bullying','Arranged Marriage','Manipulation','Massage','Possession','Accident','Apotheosis','Arrest','Being in Heat','Betrayal','Blessing','Bounty','Bridal Carry','Catheter','Child Abandonment','Curse','Debt','Disappearance','Disaster','Discrimination','Disownment','Erotic Photography','Exile','Exorcism','Fixation with Former Lover','Forgotten','Human Subject Research','Impersonation','Inheritance','Interrogation','Memory Alteration','Nightmares','Petrification','Slavery','Stage Fright','Stalking','Survival','Tentacle Restraint','Termination of Employment','Time Loop','Turndown','Tutoring','Uncontrollable Superpowers','Unhealthy Relationship'
+  ],
+  engagesIn: [
+    'Sports','Crime','Breakup','Fake Relationship','Flirting','Infidelity','Discrimination','Performing Arts','Cosplay','Fighting','Filming','Mind Control','Drug Use','Bullying','Teasing','Betrayal','Childbirth','Cooking','Drinking','Vomiting on Others','Astral Projection','Blessing','Body Swap','Bondage','Bridal Carry','Child Abandonment','Cleaning','Coming Out','Competition','Computering','Confinement','Cursing','Daydreaming','Demonic Contract','Dimensional Travel','Disownment','Driving','Duel','Elopement','Escape From Confinement','Flying','Gambling','Gardening','Genetic Research','Graduation','Human Subject Research','Infiltration','Interrogation','Investigation','Invisibility','Job Hunting','Knitting','Learning of a Foreign Language','Letter Writing','Lock Picking','Medication','Meditation','Memory Alteration','Moving','Necrophilia','Nude Modeling','Online Chatting','Parachuting','Photography','Piloting','Planning','Reading','Redemption','Revenge','Riding','Sarcasm','Self-harm','Self-sacrifice','Sewing','Sexual Abstinence','Shopping','Sign Language','Skipping School','Sleepwalking','Smoking','Stalking','Stargazing','Summoning','Supernatural Cloning','Surgery','Symbolic Hair Cutting','Treason','Turndown','Ventriloquism','Voodoo','Yoga'
+  ],
+  sexualEngagesIn: [
+    'Group Sex','Masturbation','Location-based Sex','Pornography','Molesting','Oral Sex','Incest','Defloration','Fingering','Sex With Others','Cum Play','Discreet Sex','Sexual Roleplay','Sexual Cosplay','Sexual Fantasy','Comfort Sex','Condom Sex','Phone Sex','Drunk Sex','Erotic Spitting','French Kiss','Genderbent Sex','Impregnation','Leg Locking During Sex','Live Sex Chat','Paraphilic Infantilism','Rough Sex','Sex in a Wedding Dress','Sex Involving Menstruation','Sex Involving Prostitution','Sex Involving Smegma','Sexting','Sexual Hair Eating','Sexual Sadism','Sex while Being Pregnant','Sleep Sex','Spit Drinking','Striptease','Sweat Licking','Voyeurism','Wake-up Sex'
+  ]
+};
+
+function fillIdeaDatalist(id, values) {
+  const list = $('#' + id);
+  if (!list) return;
+  list.innerHTML = (values || []).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+}
+
+const IDEA_FIELD_TO_LIST = {
+  ideaArchetype: 'archetype',
+  ideaConflict: 'conflict',
+  ideaSetting: 'setting',
+  ideaTone: 'tone',
+  ideaOccupation: 'occupation',
+  ideaRelationship: 'relationship',
+  ideaStatus: 'status',
+  ideaPersonality: 'personality',
+  ideaSubjectOf: 'subjectOf',
+  ideaEngagesIn: 'engagesIn',
+  ideaSexualEngagesIn: 'sexualEngagesIn'
+};
+
+function closeIdeaSuggestionBoxes(exceptInput = null) {
+  $$('.idea-suggestion-box').forEach(box => {
+    if (exceptInput && box.dataset.forInput === exceptInput.id) return;
+    box.remove();
+  });
+}
+
+function ensureIdeaSuggestionBox(input) {
+  if (!input) return null;
+  const parent = input.parentElement;
+  if (!parent) return null;
+  parent.classList.add('idea-combo-wrap');
+  let box = parent.querySelector(`.idea-suggestion-box[data-for-input="${input.id}"]`);
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'idea-suggestion-box hidden';
+    box.dataset.forInput = input.id;
+    parent.appendChild(box);
+  }
+  return box;
+}
+
+function renderIdeaSuggestionBox(input) {
+  if (!input) return;
+  const listName = IDEA_FIELD_TO_LIST[input.id];
+  if (!listName) return;
+  const box = ensureIdeaSuggestionBox(input);
+  if (!box) return;
+  const query = String(input.value || '').trim().toLowerCase();
+  const allValues = ideaOptionsForGender(listName);
+  let values = allValues;
+  if (query) {
+    values = allValues.filter(v => String(v).toLowerCase().includes(query));
+  }
+  values = values.slice(0, 80);
+  if (!values.length) {
+    box.innerHTML = '<div class="idea-suggestion-empty">No matching options. You can still type a custom value.</div>';
+  } else {
+    box.innerHTML = values.map(v => `<button type="button" class="idea-suggestion-item" data-value="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('');
+  }
+  box.classList.remove('hidden');
+}
+
+function setupIdeaAutocompleteFields() {
+  Object.keys(IDEA_FIELD_TO_LIST).forEach(id => {
+    const input = $('#' + id);
+    if (!input || input.dataset.ideaAutocompleteReady === '1') return;
+    input.dataset.ideaAutocompleteReady = '1';
+    // Native datalist popups cannot be size-limited consistently in WebView,
+    // so use a themed scrollable suggestion panel instead.
+    input.removeAttribute('list');
+    ensureIdeaSuggestionBox(input);
+    input.addEventListener('focus', () => { closeIdeaSuggestionBoxes(input); renderIdeaSuggestionBox(input); });
+    input.addEventListener('click', () => { closeIdeaSuggestionBoxes(input); renderIdeaSuggestionBox(input); });
+    input.addEventListener('input', () => renderIdeaSuggestionBox(input));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeIdeaSuggestionBoxes();
+    });
+  });
+  document.addEventListener('click', (e) => {
+    const item = e.target?.closest?.('.idea-suggestion-item');
+    if (item) {
+      const box = item.closest('.idea-suggestion-box');
+      const input = box ? $('#' + box.dataset.forInput) : null;
+      if (input) {
+        input.value = item.dataset.value || item.textContent || '';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        closeIdeaSuggestionBoxes();
+        input.focus();
+      }
+      return;
+    }
+    if (!e.target?.closest?.('.idea-combo-wrap')) closeIdeaSuggestionBoxes();
+  }, { capture: true });
+}
+
+function ideaOptionsForGender(listName) {
+  const gender = $('#ideaGender')?.value || '';
+  let values = [...(IDEA_OPTIONS[listName] || [])];
+  if (gender === 'female') {
+    if (listName === 'relationship') values = values.filter(v => !['boyfriend','ex-boyfriend','secret boyfriend','uncle','nephew'].includes(v));
+    if (listName === 'archetype') values = values.filter(v => !['warrior'].includes(v)).concat(['wife','mistress','mature beauty']).filter((v,i,a)=>a.indexOf(v)===i);
+  } else if (gender === 'male') {
+    if (listName === 'relationship') values = values.filter(v => !['girlfriend','ex-girlfriend','secret girlfriend','aunt','niece','mistress'].includes(v)).concat(['husband']).filter((v,i,a)=>a.indexOf(v)===i);
+    if (listName === 'archetype') values = values.filter(v => !['gyaru','rich girl','older woman','office lady','idol','cosplayer','villainess','housewife','hostess'].includes(v)).concat(['salaryman','older man','prince','delinquent guy']).filter((v,i,a)=>a.indexOf(v)===i);
+  } else if (gender === 'nonbinary') {
+    if (listName === 'relationship') values = values.filter(v => !['boyfriend','girlfriend','ex-boyfriend','ex-girlfriend','secret boyfriend','secret girlfriend','aunt','uncle','niece','nephew','mistress'].includes(v)).concat(['partner','ex-partner','secret partner']).filter((v,i,a)=>a.indexOf(v)===i);
+    if (listName === 'archetype') values = values.filter(v => !['gyaru','rich girl','older woman','office lady','housewife','hostess'].includes(v)).concat(['androgynous beauty','mysterious outsider']).filter((v,i,a)=>a.indexOf(v)===i);
+  }
+  return values.sort((a,b)=>String(a).localeCompare(String(b)));
+}
+
+function populateIdeaGeneratorOptions() {
+  fillIdeaDatalist('ideaArchetypeList', ideaOptionsForGender('archetype'));
+  fillIdeaDatalist('ideaConflictList', ideaOptionsForGender('conflict'));
+  fillIdeaDatalist('ideaSettingList', ideaOptionsForGender('setting'));
+  fillIdeaDatalist('ideaToneList', ideaOptionsForGender('tone'));
+  fillIdeaDatalist('ideaOccupationList', ideaOptionsForGender('occupation'));
+  fillIdeaDatalist('ideaRelationshipList', ideaOptionsForGender('relationship'));
+  fillIdeaDatalist('ideaStatusList', ideaOptionsForGender('status'));
+  fillIdeaDatalist('ideaPersonalityList', ideaOptionsForGender('personality'));
+  fillIdeaDatalist('ideaSubjectOfList', ideaOptionsForGender('subjectOf'));
+  fillIdeaDatalist('ideaEngagesInList', ideaOptionsForGender('engagesIn'));
+  fillIdeaDatalist('ideaSexualEngagesInList', ideaOptionsForGender('sexualEngagesIn'));
+  setupIdeaAutocompleteFields();
+  const active = document.activeElement;
+  if (active && IDEA_FIELD_TO_LIST[active.id]) renderIdeaSuggestionBox(active);
+}
+
+function openIdeaGeneratorModal() {
+  populateIdeaGeneratorOptions();
+  closeIdeaSuggestionBoxes();
+  const modal = $('#ideaGeneratorModal');
+  if (!modal) { setStatus('Idea Generator popup could not be found.', 'error'); return; }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeIdeaGeneratorModal() {
+  closeIdeaSuggestionBoxes();
+  const modal = $('#ideaGeneratorModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function clearIdeaGenerator() {
+  closeIdeaSuggestionBoxes();
+  ['ideaGender','ideaArchetype','ideaConflict','ideaSetting','ideaTone','ideaOccupation','ideaRelationship','ideaStatus','ideaPersonality','ideaSubjectOf','ideaEngagesIn','ideaSexualEngagesIn','ideaCustomInstructions'].forEach(id => {
+    const el = $('#' + id);
+    if (el) el.value = '';
+  });
+}
+
+function collectIdeaGeneratorPayload() {
+  return {
+    gender: $('#ideaGender')?.value || '',
+    archetype: $('#ideaArchetype')?.value || '',
+    coreConflict: $('#ideaConflict')?.value || '',
+    setting: $('#ideaSetting')?.value || '',
+    tone: $('#ideaTone')?.value || '',
+    occupation: $('#ideaOccupation')?.value || '',
+    relationship: $('#ideaRelationship')?.value || '',
+    status: $('#ideaStatus')?.value || '',
+    personality: $('#ideaPersonality')?.value || '',
+    subjectOf: $('#ideaSubjectOf')?.value || '',
+    engagesIn: $('#ideaEngagesIn')?.value || '',
+    sexualEngagesIn: $('#ideaSexualEngagesIn')?.value || '',
+    customInstructions: $('#ideaCustomInstructions')?.value || ''
+  };
+}
+
+function buildIdeaFallbackConcept(payload) {
+  const labels = {
+    gender: 'Gender', archetype: 'Archetype', coreConflict: 'Core Conflict', setting: 'Setting', tone: 'Tone',
+    occupation: 'Occupation / Role', relationship: 'Relationship to {{user}}', status: 'Status / Social Position',
+    personality: 'Personality', subjectOf: 'Subject Of', engagesIn: 'Engages In', sexualEngagesIn: 'Engages In (Sexual)', customInstructions: 'Custom Instructions'
+  };
+  const lines = [
+    'You are generating an IDEA SEED for the Main Concept box, not a full character card.',
+    'Create compact editable concept notes only. Do not write a finished card.',
+    'Use these exact sections: Core Idea, Main Character, Relationship to {{user}}, Conflict, Setting, Tone, First Scene Hook, Tags.',
+    'Keep it concise and playable. All romance/sexual participants must be 18+.',
+    '',
+    'SELECTED IDEA INGREDIENTS'
+  ];
+  Object.entries(labels).forEach(([key, label]) => {
+    const value = String(payload?.[key] || '').trim();
+    if (value) lines.push(`- ${label}: ${value}`);
+  });
+  return lines.join('\n');
+}
+
+function buildIdeaFallbackTemplate() {
+  const makeSection = (id, title, description) => ({ id, title, enabled: true, category: 'idea', description, fields: [] });
+  return {
+    globalRules: [
+      'This is an idea generator pass only.',
+      'Return concise Main Concept notes, not a complete card.',
+      'Do not include First Message, Example Dialogues, State Tracking, or Stable Diffusion Prompt unless the user explicitly asked for them in custom instructions.'
+    ],
+    sections: [
+      makeSection('core_idea', 'Core Idea', 'One paragraph summarizing the card concept.'),
+      makeSection('main_character', 'Main Character', 'Who the central character is, including the selected archetype/role.'),
+      makeSection('relationship', 'Relationship to {{user}}', 'How the character knows or relates to {{user}}.'),
+      makeSection('conflict', 'Conflict', 'The main tension, secret, problem, or emotional hook.'),
+      makeSection('setting', 'Setting', 'Where the concept begins and why it is playable.'),
+      makeSection('tone', 'Tone', 'The mood and genre direction.'),
+      makeSection('first_scene_hook', 'First Scene Hook', 'A short setup for where the chat could begin.'),
+      makeSection('tags', 'Tags', '6-10 lowercase comma-separated tags.')
+    ],
+    qa: { enabled: false, sections: [] }
+  };
+}
+
+async function callIdeaGeneratorBackend(api, payload, settings) {
+  const direct = api?.generate_idea || api?.generateIdea || api?.generateIdeaFromOptions || api?.ideaGenerator || api?.createIdea;
+  if (direct) return await direct.call(api, payload, settings);
+
+  // Packaged builds may lag behind the frontend method table. Fallback through
+  // the long-standing generate() API so Idea Generator still works without a
+  // dedicated backend method. Restore the user's real template afterwards.
+  if (api?.generate) {
+    const fallbackSettings = { ...(settings || {}), streamAi: false, alternateFirstMessages: 0, mode: (settings?.mode || 'full') };
+    const res = await api.generate(buildIdeaFallbackConcept(payload), buildIdeaFallbackTemplate(), fallbackSettings);
+    try { if (api.save_template && template) await api.save_template(template); } catch (_) {}
+    if (!res.ok) return res;
+    return { ok: true, idea: (res.output || '').trim(), fallback: true };
+  }
+
+  const available = api ? Object.keys(api).filter(k => /idea|generate/i.test(k)).join(', ') : '';
+  return { ok: false, error: 'Idea Generator backend is not available. Restart the app after updating.' + (available ? ` Available related methods: ${available}` : '') };
+}
+
+async function generateIdeaIntoMainConcept() {
+  if (isInterfaceLocked()) return;
+  settings = collectSettings();
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  const payload = collectIdeaGeneratorPayload();
+  const hasAny = Object.values(payload).some(v => String(v || '').trim());
+  if (!hasAny) { setStatus('Choose at least one idea option or enter custom instructions first.', 'error'); return; }
+  setBusy('IDEA GENERATOR — creating main concept seed…');
+  setStatus('Generating a compact idea seed for Main Concept…', '');
+  try {
+    const api = window.pywebview?.api;
+    const res = await callIdeaGeneratorBackend(api, payload, settings);
+    if (!res.ok) throw new Error(res.error || 'Idea generation failed.');
+    $('#conceptText').value = res.idea || '';
+    closeIdeaGeneratorModal();
+    updateAvailability();
+    setStatus('Idea generated into Main Concept. Review/tweak it, then generate the card when ready.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 async function generateCard() {
   if (!handleUnbuiltBuilderWarning()) return;
   clearGenerationArtifacts();
@@ -4255,6 +4891,7 @@ async function generateCard() {
   $('[data-tab="output"]').classList.add('active');
   $('#output').classList.add('active');
   switchSubTab('output', 'output-fulltext');
+  await rememberCurrentModel(true);
   settings = collectSettings();
   const settingsError = validateTextApiSettings(settings);
   if (settingsError) {

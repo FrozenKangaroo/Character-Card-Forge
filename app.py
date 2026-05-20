@@ -21,6 +21,7 @@ import uuid
 import io
 import socket
 import hashlib
+import traceback
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -433,11 +434,15 @@ DEFAULT_SETTINGS = {
     "visionModel": "",
     "visionImagePath": "",
     "activeTemplateName": "Default",
-    "frontPorchDataFolder": "",
+    "frontPorchDataFolder": "",  # Legacy/current active Front Porch folder.
+    "frontPorchExportTarget": "stable",
+    "frontPorchStableDataFolder": "",
+    "frontPorchBetaDataFolder": "",
     "dataFilesFolder": "",
     "restrictTags": False,
     "allowedTags": "",
     "nsfwBrowserMode": "show",
+    "recentModels": [],
     "browserTagMerges": {},
     "browserVirtualFolders": [],
     "browserVirtualFolderAssignments": {},
@@ -1347,9 +1352,28 @@ class Api:
         try:
             if not LOG_FILE.exists():
                 return {"ok": True, "path": str(LOG_FILE), "text": "No debug log yet."}
-            return {"ok": True, "path": str(LOG_FILE), "text": LOG_FILE.read_text(encoding="utf-8")[-60000:]}
+            return {"ok": True, "path": str(LOG_FILE), "text": LOG_FILE.read_text(encoding="utf-8", errors="replace")[-60000:]}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def append_debug_event(self, event, payload=None):
+        """Frontend-safe debug bridge.
+
+        Some token-fetch failures can happen before the backend fetch method is
+        reached (missing fields, pywebview binding mismatch, frontend exception).
+        This lets the visible Debug Log record those client-side checkpoints too.
+        """
+        try:
+            clean_event = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(event or "client_event"))[:160] or "client_event"
+            clean_payload = payload if isinstance(payload, dict) else {"value": payload}
+            self._log_event(clean_event, clean_payload)
+            return {"ok": True, "path": str(LOG_FILE)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # camelCase alias for pywebview builds that expose JavaScript methods this way.
+    def appendDebugEvent(self, event, payload=None):
+        return self.append_debug_event(event, payload)
 
 
     def _extract_first_json_object(self, raw):
@@ -1505,7 +1529,47 @@ class Api:
             settings["apiRetryCount"] = max(0, min(6, int(settings.get("apiRetryCount") or DEFAULT_SETTINGS["apiRetryCount"])))
         except Exception:
             settings["apiRetryCount"] = DEFAULT_SETTINGS["apiRetryCount"]
-        settings["frontPorchDataFolder"] = str(settings.get("frontPorchDataFolder") or "").strip()
+        legacy_front_porch = str(settings.get("frontPorchDataFolder") or "").strip()
+        target = str(settings.get("frontPorchExportTarget") or "stable").strip().lower()
+        if target not in {"stable", "beta"}:
+            target = "stable"
+        stable_front_porch = str(settings.get("frontPorchStableDataFolder") or "").strip()
+        beta_front_porch = str(settings.get("frontPorchBetaDataFolder") or "").strip()
+
+        # v1.0.2 migration: older builds had only one Front Porch Data Folder.
+        # If the user already had a single folder configured, place it into the most
+        # likely stable/beta slot by looking for the database name. If the path cannot
+        # be inspected, treat it as the stable path to preserve older behaviour.
+        if legacy_front_porch and not stable_front_porch and not beta_front_porch:
+            try:
+                legacy_path = Path(legacy_front_porch.strip('"').strip("'")).expanduser()
+                probe_paths = []
+                if legacy_path.suffix.lower() == ".db":
+                    probe_paths.append(legacy_path)
+                else:
+                    probe_paths.extend([
+                        legacy_path / "KoboldManager" / "front_porch_beta.db",
+                        legacy_path / "front_porch_beta.db",
+                        legacy_path / "KoboldManager" / "front_porch.db",
+                        legacy_path / "front_porch.db",
+                    ])
+                has_beta = any(p.name == "front_porch_beta.db" and p.exists() for p in probe_paths)
+                has_stable = any(p.name == "front_porch.db" and p.exists() for p in probe_paths)
+                if has_beta and not has_stable:
+                    beta_front_porch = legacy_front_porch
+                    target = "beta"
+                else:
+                    stable_front_porch = legacy_front_porch
+            except Exception:
+                stable_front_porch = legacy_front_porch
+
+        active_front_porch = beta_front_porch if target == "beta" else stable_front_porch
+        if not active_front_porch and legacy_front_porch:
+            active_front_porch = legacy_front_porch
+        settings["frontPorchExportTarget"] = target
+        settings["frontPorchStableDataFolder"] = stable_front_porch
+        settings["frontPorchBetaDataFolder"] = beta_front_porch
+        settings["frontPorchDataFolder"] = active_front_porch
         settings["dataFilesFolder"] = str(settings.get("dataFilesFolder") or str(USER_DATA_ROOT)).strip() or str(USER_DATA_ROOT)
         settings["restrictTags"] = bool(settings.get("restrictTags"))
         allowed_tags_value = settings.get("allowedTags")
@@ -1579,6 +1643,48 @@ class Api:
         settings["backupTextMode"] = "lite" if backup_mode in {"lite", "lite_mode", "lite-mode"} else "same"
         settings["visionImagePath"] = str(settings.get("visionImagePath") or "").strip()
         settings["activeTemplateName"] = str(settings.get("activeTemplateName") or "Default").strip() or "Default"
+        # Remember recently used text models for quick switching. Keep compact and sorted newest first.
+        raw_recent = settings.get("recentModels") if isinstance(settings.get("recentModels"), list) else []
+        recent = []
+        seen_recent = set()
+        now_ts = time.time()
+        for item in raw_recent:
+            if isinstance(item, dict):
+                name = self._clean_model_name(item.get("name") or item.get("model") or item.get("id"))
+                try:
+                    last_used = float(item.get("lastUsed") or item.get("last_used") or 0)
+                except Exception:
+                    last_used = 0
+                input_tokens = item.get("maxInputTokens") or item.get("max_input_tokens") or ""
+                output_tokens = item.get("maxOutputTokens") or item.get("max_output_tokens") or ""
+            else:
+                name = self._clean_model_name(item)
+                last_used = 0
+                input_tokens = ""
+                output_tokens = ""
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen_recent:
+                continue
+            seen_recent.add(key)
+            entry = {"name": name, "lastUsed": last_used or 0}
+            try:
+                if input_tokens not in (None, ""):
+                    entry["maxInputTokens"] = int(input_tokens)
+            except Exception:
+                pass
+            try:
+                if output_tokens not in (None, ""):
+                    entry["maxOutputTokens"] = int(output_tokens)
+            except Exception:
+                pass
+            recent.append(entry)
+        current_model = self._clean_model_name(settings.get("model"))
+        if current_model and current_model.casefold() not in seen_recent:
+            recent.insert(0, {"name": current_model, "lastUsed": now_ts})
+        recent.sort(key=lambda x: float(x.get("lastUsed") or 0), reverse=True)
+        settings["recentModels"] = recent[:30]
         # Character Card Forge is now Front Porch-first and Character Card V2-first.
         # Older installs sometimes kept the previous JSON default in data/settings.json,
         # so migrate old/unversioned settings back to PNG once.
@@ -1633,7 +1739,16 @@ class Api:
         except Exception:
             pass
         self._save_json(SETTINGS_FILE, self.settings)
-        return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default"), "paths": self.get_data_locations()}
+        return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default"), "paths": self.get_data_locations(), "version": self.get_app_version()}
+
+    def get_app_version(self):
+        try:
+            version_file = APP_DIR / "VERSION"
+            if version_file.exists():
+                return version_file.read_text(encoding="utf-8").strip() or "unknown"
+        except Exception:
+            pass
+        return "1.0.2"
 
     def get_data_locations(self):
         return {
@@ -2064,6 +2179,737 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def generate_idea(self, idea_options, settings=None):
+        """Generate a compact Main Concept seed from Idea Generator controls."""
+        try:
+            merged = self._normalise_settings({**self.settings, **(settings or {})})
+            validation = self._validate_text_api_settings(merged)
+            if not validation.get("ok"):
+                return {"ok": False, "error": validation.get("error") or "AI settings are incomplete."}
+            idea_options = idea_options or {}
+            labels = {
+                "gender": "Gender",
+                "archetype": "Archetype",
+                "coreConflict": "Core Conflict",
+                "setting": "Setting",
+                "tone": "Tone",
+                "occupation": "Occupation / Role",
+                "relationship": "Relationship to {{user}}",
+                "status": "Status / Social Position",
+                "personality": "Personality",
+                "subjectOf": "Subject Of",
+                "engagesIn": "Engages In",
+                "sexualEngagesIn": "Engages In (Sexual)",
+                "customInstructions": "Custom Instructions",
+            }
+            chosen = []
+            for key, label in labels.items():
+                value = str(idea_options.get(key) or "").strip()
+                if value:
+                    chosen.append(f"- {label}: {value}")
+            if not chosen:
+                return {"ok": False, "error": "Choose at least one idea option or enter custom instructions first."}
+            prompt = "\n".join([
+                "You are an idea generator for fictional AI roleplay character cards.",
+                "Create ONLY a compact Main Concept seed, not a full character card.",
+                "The output will be pasted into the Main Concept box before the user generates the real card later.",
+                "Use the selected ingredients below as inspiration, but make them coherent and playable.",
+                "All main/romantic/sexual participants must be adults 18+ even if the setting is school-like; use university/adult academy framing when needed.",
+                "Avoid explicit sexual prose. You may include romance, drama, secrecy, temptation, or tension as scenario ingredients, but keep this as high-level concept notes.",
+                "Include these concise headings only: Core Idea, Main Character, Relationship to {{user}}, Conflict, Setting, Tone, First Scene Hook, Tags.",
+                "Keep it short enough to edit easily: around 250-500 words.",
+                "Do not write Name/Description/Personality/Scenario/First Message sections as a finished card.",
+                "",
+                "SELECTED IDEA INGREDIENTS",
+                "\n".join(chosen),
+            ])
+            raw = self._chat(prompt, merged).strip()
+            raw = self._clean_section_text(raw)
+            raw = re.sub(r"^```(?:markdown|text)?\s*", "", raw, flags=re.I).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
+            if not raw:
+                return {"ok": False, "error": "The AI returned an empty idea."}
+            self._log_event("idea_generator_response", {"options": idea_options, "preview": raw[:1000]})
+            return {"ok": True, "idea": raw}
+        except Exception as e:
+            self._log_event("idea_generator_error", {"error": str(e)})
+            return {"ok": False, "error": f"Idea generation failed: {e}"}
+
+    # CamelCase aliases for PyWebView builds that do not expose/refresh the snake_case
+    # method table reliably after packaging. The frontend tries both names.
+    def generateIdea(self, idea_options, settings=None):
+        return self.generate_idea(idea_options, settings)
+
+    def generateIdeaFromOptions(self, idea_options, settings=None):
+        return self.generate_idea(idea_options, settings)
+
+    def _model_metadata_value(self, obj, keys):
+        if not isinstance(obj, dict):
+            return None
+        for key in keys:
+            if key in obj and obj.get(key) not in (None, ""):
+                return obj.get(key)
+        # Try nested common metadata dictionaries.
+        for nested_key in ("metadata", "details", "limits", "capabilities", "config", "info", "provider", "settings", "parameters"):
+            nested = obj.get(nested_key)
+            if isinstance(nested, dict):
+                value = self._model_metadata_value(nested, keys)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    def _coerce_token_limit(self, value):
+        """Safely coerce a token limit value to int.
+
+        Some model catalogs include nested dict/list objects in metadata blocks.
+        Those must never be passed into int()/float() as usable limits.
+        """
+        if value is None or isinstance(value, (dict, list, tuple, set)):
+            return 0
+        try:
+            if isinstance(value, str):
+                value = value.strip().replace(",", "")
+                if not value:
+                    return 0
+            parsed = int(float(value))
+            return parsed if parsed > 0 else 0
+        except Exception:
+            return 0
+
+    def fetch_model_token_limits(self, settings=None):
+        """Fetch model token metadata with direct visible diagnostics.
+
+        This method is intentionally self-contained and writes directly to LOG_FILE
+        before doing anything else, so Debug Log can prove whether the pywebview
+        bridge actually reached Python.
+        """
+        import json as _json
+        import os as _os
+        import re as _re
+        import subprocess as _subprocess
+        import time as _time
+        import traceback as _traceback
+        import urllib.parse as _urlparse
+        import urllib.request as _urlrequest
+        from pathlib import Path as _Path
+
+        def _fallback_log_file():
+            try:
+                return LOG_FILE
+            except Exception:
+                home = _Path(_os.environ.get("HOME") or _os.environ.get("USERPROFILE") or "/tmp").expanduser()
+                return home / ".local" / "share" / "Character Card Forge" / "data" / "debug.log"
+
+        def log_debug(event, payload=None):
+            """Write JSON event directly to the same file read by Debug Log."""
+            payload = payload or {}
+            try:
+                path = _fallback_log_file()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                entry = {
+                    "time": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "event": event,
+                    "payload": payload,
+                }
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(_json.dumps(entry, ensure_ascii=False, indent=2, default=str) + "\n---\n")
+                    f.flush()
+                try:
+                    print(f"[TOKEN_FETCH] {event}: {_json.dumps(payload, ensure_ascii=False, default=str)[:1200]}", flush=True)
+                except Exception:
+                    pass
+            except Exception:
+                # Token logging must never stop the actual fetch.
+                pass
+
+        def setting_value(merged, *keys):
+            for key in keys:
+                try:
+                    value = merged.get(key)
+                    if value not in (None, ""):
+                        return value
+                except Exception:
+                    pass
+            return ""
+
+        def normalize_settings(local_settings):
+            merged = {}
+            try:
+                merged.update(DEFAULT_SETTINGS)
+            except Exception:
+                pass
+            try:
+                if isinstance(getattr(self, "settings", None), dict):
+                    merged.update(self.settings)
+            except Exception:
+                pass
+            try:
+                if isinstance(local_settings, dict):
+                    merged.update(local_settings)
+            except Exception:
+                pass
+            return merged
+
+        def ensure_scheme(url):
+            url = str(url or "").strip()
+            if url and not url.startswith(("http://", "https://")):
+                url = "https://" + url
+            return url
+
+        def strip_completion_suffix(url):
+            url = ensure_scheme(url).rstrip("/")
+            lowered = url.casefold()
+            for suffix in ("/chat/completions", "/completions", "/responses"):
+                if lowered.endswith(suffix):
+                    return url[: -len(suffix)]
+            return url
+
+        def tokenise(value):
+            return [p for p in _re.split(r"[:\-_/.\s]+", str(value or "").casefold()) if p]
+
+        def compact(value):
+            return _re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+        def safe_int(value):
+            if value is None or isinstance(value, (dict, list, tuple, set)):
+                return 0
+            try:
+                if isinstance(value, str):
+                    value = value.strip().replace(",", "")
+                    if not value:
+                        return 0
+                parsed = int(float(value))
+                return parsed if parsed > 0 else 0
+            except Exception:
+                return 0
+
+        def nested_limit(obj, keys):
+            if not isinstance(obj, dict):
+                return 0
+            for key in keys:
+                if key in obj:
+                    val = safe_int(obj.get(key))
+                    if val > 0:
+                        return val
+            for nested_key in (
+                "metadata", "details", "limits", "capabilities", "config", "info",
+                "provider", "settings", "parameters", "architecture", "model", "generation_config"
+            ):
+                nested = obj.get(nested_key)
+                if isinstance(nested, dict):
+                    val = nested_limit(nested, keys)
+                    if val > 0:
+                        return val
+                elif isinstance(nested, list):
+                    for sub in nested:
+                        val = nested_limit(sub, keys)
+                        if val > 0:
+                            return val
+            return 0
+
+        input_keys = [
+            "context_length", "contextLength", "context_window", "contextWindow", "context_size", "contextSize",
+            "max_context", "maxContext", "max_context_length", "maxContextLength", "max_input_tokens", "maxInputTokens",
+            "input_token_limit", "inputTokenLimit", "prompt_token_limit", "promptTokenLimit", "max_prompt_tokens", "maxPromptTokens",
+            "max_position_embeddings",
+        ]
+        output_keys = [
+            "max_output_tokens", "maxOutputTokens", "max_completion_tokens", "maxCompletionTokens", "completion_token_limit",
+            "completionTokenLimit", "output_token_limit", "outputTokenLimit", "generation_token_limit", "generationTokenLimit",
+            "max_generation", "maxGeneration", "max_completion", "maxCompletion", "max_gen_tokens", "maxGenTokens",
+        ]
+
+        def extract_limits(row):
+            if not isinstance(row, dict):
+                return 0, 0
+            in_val = nested_limit(row, input_keys)
+            out_val = nested_limit(row, output_keys)
+            return in_val, out_val
+
+        def extract_model_list(data):
+            if isinstance(data, dict):
+                if isinstance(data.get("data"), list):
+                    return data.get("data") or []
+                for key in ("models", "items", "result"):
+                    if isinstance(data.get(key), list):
+                        return data.get(key) or []
+            if isinstance(data, list):
+                return data
+            return []
+
+        def identity_values(row):
+            if not isinstance(row, dict):
+                return []
+            keys = ["id", "name", "model", "canonicalId", "canonical_id", "slug", "label"]
+            vals = []
+            for key in keys:
+                val = row.get(key)
+                if val not in (None, ""):
+                    vals.append(str(val))
+            for nested_key in ("metadata", "details", "info"):
+                nested = row.get(nested_key)
+                if isinstance(nested, dict):
+                    for key in keys:
+                        val = nested.get(key)
+                        if val not in (None, ""):
+                            vals.append(str(val))
+            deduped = []
+            seen = set()
+            for val in vals:
+                key = val.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(val)
+            return deduped
+
+        def display_id(row):
+            vals = identity_values(row)
+            return vals[0] if vals else ""
+
+        def score_candidate(candidate, target_model):
+            cand = str(candidate or "")
+            target = str(target_model or "")
+            if not cand or not target:
+                return 0
+            cand_cf = cand.casefold()
+            target_cf = target.casefold()
+            cand_compact = compact(cand)
+            target_compact = compact(target)
+            target_tail = target.split("/")[-1]
+            target_tail_compact = compact(target_tail)
+            score = 0
+            if cand_cf == target_cf:
+                score = max(score, 1_000_000)
+            if cand_compact == target_compact:
+                score = max(score, 950_000)
+            if cand_cf.endswith("/" + target_cf) or cand_cf.endswith(":" + target_cf):
+                score = max(score, 850_000)
+            if target_tail_compact and (cand_compact == target_tail_compact or cand_compact.endswith(target_tail_compact)):
+                score = max(score, 800_000)
+            if target_cf in cand_cf or cand_cf in target_cf:
+                score = max(score, 650_000 + min(len(cand_cf), len(target_cf)))
+            ignored = {"org", "ai", "the", "model"}
+            target_tokens = [t for t in tokenise(target) if t not in ignored]
+            cand_tokens = {t for t in tokenise(cand) if t not in ignored}
+            if target_tokens:
+                matched = sum(1 for t in target_tokens if t in cand_tokens)
+                ratio = matched / max(1, len(target_tokens))
+                if matched == len(target_tokens):
+                    score = max(score, 500_000 + matched)
+                elif matched >= 3 and ratio >= 0.70:
+                    score = max(score, int(300_000 + ratio * 100_000))
+            return score
+
+        def read_urllib(url, headers):
+            req = _urlrequest.Request(url, headers=headers, method="GET")
+            with _urlrequest.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                status = getattr(response, "status", getattr(response, "code", ""))
+            return _json.loads(raw), raw, status
+
+        def read_curl(url, headers):
+            curl = _shutil_which("curl")
+            if not curl:
+                raise RuntimeError("curl is not available")
+            cmd = [curl, "-sS", "--compressed", "--max-time", "30", url]
+            for key, value in headers.items():
+                cmd.extend(["-H", f"{key}: {value}"])
+            proc = _subprocess.run(cmd, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE, text=True, timeout=40)
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or "curl failed").strip()[:1000])
+            raw = proc.stdout or ""
+            return _json.loads(raw), raw, "curl"
+
+        def _shutil_which(name):
+            try:
+                import shutil as _shutil
+                return _shutil.which(name)
+            except Exception:
+                return None
+
+        def raw_find_limit_near_id(body, ids):
+            body = str(body or "")
+            if not body:
+                return 0, 0
+            patterns_in = [
+                r'"context_length"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"contextLength"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"max_input_tokens"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"maxInputTokens"\s*:\s*"?([0-9][0-9,]*)"?',
+            ]
+            patterns_out = [
+                r'"max_output_tokens"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"maxOutputTokens"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"max_completion_tokens"\s*:\s*"?([0-9][0-9,]*)"?',
+                r'"maxCompletionTokens"\s*:\s*"?([0-9][0-9,]*)"?',
+            ]
+            def json_escaped(value):
+                try:
+                    return _json.dumps(str(value), ensure_ascii=False)[1:-1]
+                except Exception:
+                    return str(value)
+            def window_at(index):
+                start = body.rfind("{", 0, index)
+                if start < 0:
+                    start = max(0, index - 2500)
+                depth = 0
+                in_str = False
+                esc = False
+                for pos in range(start, min(len(body), index + 24000)):
+                    ch = body[pos]
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif ch == "\\":
+                            esc = True
+                        elif ch == '"':
+                            in_str = False
+                        continue
+                    if ch == '"':
+                        in_str = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth <= 0 and pos > index:
+                            return body[start:pos + 1]
+                return body[max(0, index - 2500):min(len(body), index + 24000)]
+            def extract(window):
+                iv = ov = 0
+                for pat in patterns_in:
+                    m = _re.search(pat, window, flags=_re.I)
+                    if m:
+                        iv = safe_int(m.group(1))
+                        if iv > 0:
+                            break
+                for pat in patterns_out:
+                    m = _re.search(pat, window, flags=_re.I)
+                    if m:
+                        ov = safe_int(m.group(1))
+                        if ov > 0:
+                            break
+                return iv, ov
+            needles = []
+            for val in ids:
+                val = str(val or "").strip()
+                if not val:
+                    continue
+                for candidate in (val, val.replace("/", r"\/"), json_escaped(val), val.split("/")[-1]):
+                    if candidate and candidate not in needles:
+                        needles.append(candidate)
+            for needle in sorted(needles, key=len, reverse=True):
+                for match in _re.finditer(_re.escape(needle), body, flags=_re.I):
+                    iv, ov = extract(window_at(match.start()))
+                    if iv > 0 or ov > 0:
+                        return iv, ov
+            return 0, 0
+
+        log_debug("model_token_fetch_python_entry", {"settingsType": type(settings).__name__, "debugLogPath": str(_fallback_log_file())})
+
+        try:
+            merged = normalize_settings(settings)
+            raw_base = str(setting_value(merged, "apiBaseUrl", "baseUrl", "api_base_url") or "").strip()
+            model = str(setting_value(merged, "model", "textModel", "modelName") or "").strip()
+            api_key = str(setting_value(merged, "apiKey", "api_key", "key") or "").strip()
+
+            if not raw_base or not model:
+                log_debug("model_token_fetch_skipped_missing_fields", {"hasApiBaseUrl": bool(raw_base), "hasModel": bool(model)})
+                return {"ok": False, "error": "Enter API Base URL and Model first.", "debugLogPath": str(_fallback_log_file())}
+
+            base = strip_completion_suffix(raw_base)
+            is_nanogpt = any(marker in base.casefold() for marker in ("nano-gpt", "nanogpt"))
+            endpoints = []
+            if is_nanogpt:
+                parsed = _urlparse.urlparse(base)
+                root_base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'nano-gpt.com'}".rstrip("/")
+                endpoints = [
+                    root_base + "/api/v1/models?detailed=true",
+                    root_base + "/api/subscription/v1/models?detailed=true",
+                    root_base + "/api/paid/v1/models?detailed=true",
+                ]
+            else:
+                b = base.rstrip("/")
+                if b.endswith("/models"):
+                    endpoints = [b + "?detailed=true", b]
+                else:
+                    endpoints = [b + "/models?detailed=true", b + "/models"]
+            seen = set()
+            endpoints = [u for u in endpoints if not (u in seen or seen.add(u))]
+            headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0 CharacterCardForge/1.0.2"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                headers["x-api-key"] = api_key
+
+            log_debug("model_token_fetch_start", {
+                "rawBase": raw_base,
+                "normalisedBase": base,
+                "model": model,
+                "isNanoGpt": is_nanogpt,
+                "endpoints": endpoints,
+                "hasApiKey": bool(api_key),
+                "headerKeys": sorted(headers.keys()),
+            })
+
+            readers = [("urllib", read_urllib)]
+            if is_nanogpt:
+                readers.append(("curl", read_curl))
+
+            all_rows = []
+            raw_responses = []
+            endpoint_errors = []
+            fetch_attempts = []
+            sampled_ids = []
+
+            for url in endpoints:
+                for method, reader in readers:
+                    try:
+                        data, raw, status = reader(url, headers)
+                        rows = extract_model_list(data)
+                        fetch_attempts.append({"url": url, "method": method, "status": status, "count": len(rows)})
+                        raw_responses.append({"url": url, "method": method, "body": raw})
+                        possible = []
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            rid = display_id(row)
+                            if rid and rid not in sampled_ids and len(sampled_ids) < 40:
+                                sampled_ids.append(rid)
+                            score = max([score_candidate(v, model) for v in identity_values(row)] or [0])
+                            if score > 0 and len(possible) < 20:
+                                iv, ov = extract_limits(row)
+                                possible.append({
+                                    "id": rid,
+                                    "score": score,
+                                    "input": iv,
+                                    "output": ov,
+                                    "keys": sorted([str(k) for k in row.keys()])[:80],
+                                    "context_length": row.get("context_length"),
+                                    "max_output_tokens": row.get("max_output_tokens"),
+                                })
+                            row = dict(row)
+                            row["_ccf_source_endpoint"] = url
+                            row["_ccf_fetch_method"] = method
+                            all_rows.append(row)
+                        log_debug("model_token_fetch_response", {
+                            "url": url,
+                            "method": method,
+                            "status": status,
+                            "modelRows": len(rows),
+                            "topLevelKeys": sorted(list(data.keys()))[:50] if isinstance(data, dict) else [],
+                            "rawBodyPrefix": str(raw or "")[:2500],
+                            "possibleMatches": possible,
+                        })
+                    except Exception as e:
+                        err = f"{method} {url}: {e}"
+                        endpoint_errors.append(err)
+                        log_debug("model_token_fetch_endpoint_error", {"url": url, "method": method, "error": str(e), "traceback": _traceback.format_exc()[-2500:]})
+
+            if not all_rows:
+                log_debug("model_token_fetch_no_rows", {"endpointErrors": endpoint_errors[:12], "fetchAttempts": fetch_attempts})
+                return {
+                    "ok": False,
+                    "error": "Could not fetch any model metadata. " + ("; ".join(endpoint_errors[:4]) or "No endpoints returned model rows."),
+                    "searchedEndpoints": endpoints,
+                    "endpointErrors": endpoint_errors[:12],
+                    "fetchAttempts": fetch_attempts,
+                    "debugLogPath": str(_fallback_log_file()),
+                }
+
+            matches = []
+            for row in all_rows:
+                best_score = 0
+                best_id = display_id(row)
+                for ident in identity_values(row):
+                    sc = score_candidate(ident, model)
+                    if sc > best_score:
+                        best_score = sc
+                        best_id = ident
+                if best_score >= 300_000:
+                    iv, ov = extract_limits(row)
+                    matches.append({"row": row, "score": best_score, "id": best_id, "input": iv, "output": ov})
+
+            log_debug("model_token_fetch_matched_rows", {
+                "matchedCount": len(matches),
+                "rows": [{
+                    "id": display_id(m["row"]) or m.get("id", ""),
+                    "matchedIdentity": m.get("id", ""),
+                    "score": m.get("score", 0),
+                    "input": m.get("input", 0),
+                    "output": m.get("output", 0),
+                    "keys": sorted([str(k) for k in m["row"].keys() if not str(k).startswith("_ccf_")])[:80],
+                } for m in matches[:25]],
+                "sampleModels": sampled_ids[:25],
+            })
+
+            if not matches:
+                return {
+                    "ok": False,
+                    "error": f"Could not find model configuration matching '{model}'. Seen examples:\n" + "\n".join(f" - {x}" for x in sampled_ids[:12]),
+                    "sampleModels": sampled_ids[:40],
+                    "searchedEndpoints": endpoints,
+                    "endpointErrors": endpoint_errors[:12],
+                    "fetchAttempts": fetch_attempts,
+                    "debugLogPath": str(_fallback_log_file()),
+                }
+
+            matches.sort(key=lambda m: ((m["input"] > 0 or m["output"] > 0), m["score"], m["input"], m["output"]), reverse=True)
+            best = matches[0]
+            row = best["row"]
+            input_tokens = best["input"]
+            output_tokens = best["output"]
+
+            log_debug("model_token_fetch_best_match", {
+                "requestedModel": model,
+                "chosenId": display_id(row) or best.get("id", ""),
+                "matchedIdentity": best.get("id", ""),
+                "score": best.get("score", 0),
+                "inputTokensBeforeRawFallback": input_tokens,
+                "outputTokensBeforeRawFallback": output_tokens,
+                "matchedRowKeys": sorted([str(k) for k in row.keys() if not str(k).startswith("_ccf_")])[:100],
+                "matchedRowJsonPrefix": _json.dumps({k: v for k, v in row.items() if not str(k).startswith("_ccf_")}, ensure_ascii=False, default=str)[:8000],
+            })
+
+            if input_tokens <= 0 and output_tokens <= 0:
+                ids = [model, best.get("id", ""), display_id(row)] + identity_values(row)
+                for raw in raw_responses:
+                    iv, ov = raw_find_limit_near_id(raw.get("body", ""), ids)
+                    log_debug("model_token_fetch_raw_fallback_attempt", {
+                        "url": raw.get("url", ""),
+                        "method": raw.get("method", ""),
+                        "input": iv,
+                        "output": ov,
+                        "ids": ids[:12],
+                    })
+                    if iv > 0 or ov > 0:
+                        input_tokens, output_tokens = iv, ov
+                        row["_ccf_raw_limit_endpoint"] = raw.get("url", "")
+                        row["_ccf_raw_limit_method"] = raw.get("method", "")
+                        break
+
+            if input_tokens <= 0 and output_tokens <= 0:
+                log_debug("model_token_fetch_found_but_no_limits", {
+                    "requestedModel": model,
+                    "chosenId": display_id(row) or best.get("id", ""),
+                    "matchedRowKeys": sorted([str(k) for k in row.keys() if not str(k).startswith("_ccf_")])[:100],
+                    "fetchAttempts": fetch_attempts,
+                    "endpointErrors": endpoint_errors[:12],
+                })
+                return {
+                    "ok": False,
+                    "error": f"Found {display_id(row) or best.get('id') or model}, but no token limit fields were read. Open Debug Log and copy the latest model_token_fetch_* entries.",
+                    "modelInfo": row,
+                    "sourceEndpoint": row.get("_ccf_source_endpoint", ""),
+                    "searchedEndpoints": endpoints,
+                    "endpointErrors": endpoint_errors[:12],
+                    "fetchAttempts": fetch_attempts,
+                    "debugLogPath": str(_fallback_log_file()),
+                }
+
+            if input_tokens <= 0:
+                input_tokens = safe_int(merged.get("maxInputTokens")) or 32768
+            if output_tokens <= 0:
+                output_tokens = min(384000, max(4096, input_tokens // 4)) if input_tokens > 0 else 4096
+
+            result = {
+                "ok": True,
+                "model": display_id(row) or best.get("id") or model,
+                "matchedRequestedModel": model,
+                "matchScore": best.get("score", 0),
+                "maxInputTokens": input_tokens,
+                "maxOutputTokens": output_tokens,
+                "modelInfo": row,
+                "sourceEndpoint": row.get("_ccf_raw_limit_endpoint") or row.get("_ccf_source_endpoint", ""),
+                "fetchMethod": row.get("_ccf_raw_limit_method") or row.get("_ccf_fetch_method", ""),
+                "searchedEndpoints": endpoints,
+                "endpointErrors": endpoint_errors[:12],
+                "fetchAttempts": fetch_attempts,
+                "debugLogPath": str(_fallback_log_file()),
+            }
+
+            log_debug("model_token_fetch_success", {
+                "requestedModel": model,
+                "matchedModel": result.get("model"),
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "sourceEndpoint": result.get("sourceEndpoint"),
+                "fetchMethod": result.get("fetchMethod"),
+                "fetchAttempts": fetch_attempts,
+            })
+
+            try:
+                if hasattr(self, "_remember_recent_model_in_settings"):
+                    self.settings = self._remember_recent_model_in_settings(merged, model, result)
+                else:
+                    self.settings = merged
+                if hasattr(self, "_save_json"):
+                    self._save_json(SETTINGS_FILE, self.settings)
+                result["recentModels"] = self.settings.get("recentModels", []) if isinstance(self.settings, dict) else []
+            except Exception as save_err:
+                log_debug("model_token_fetch_save_recent_warning", {"error": str(save_err)})
+            return result
+        except Exception as global_err:
+            log_debug("model_token_fetch_global_exception", {"error": str(global_err), "traceback": _traceback.format_exc()[-8000:]})
+            return {"ok": False, "error": f"Token limit fetch crashed before completing: {global_err}. Open Debug Log and copy the latest model_token_fetch_* entries.", "debugLogPath": str(_fallback_log_file())}
+
+
+    # camelCase aliases for PyWebView builds that expose names differently
+    def fetchModelTokenLimits(self, settings=None):
+        return self.fetch_model_token_limits(settings)
+
+    def _remember_recent_model_in_settings(self, settings=None, model_name=None, token_info=None):
+        settings = self._normalise_settings({**self.settings, **(settings or {})})
+        name = self._clean_model_name(model_name or settings.get("model"))
+        if not name:
+            return settings
+        token_info = token_info or {}
+        existing = settings.get("recentModels") if isinstance(settings.get("recentModels"), list) else []
+        now_ts = time.time()
+        merged = []
+        seen = {name.casefold()}
+        entry = {"name": name, "lastUsed": now_ts}
+        for src_key, dst_key in (("maxInputTokens", "maxInputTokens"), ("max_input_tokens", "maxInputTokens"), ("maxOutputTokens", "maxOutputTokens"), ("max_output_tokens", "maxOutputTokens")):
+            try:
+                val = token_info.get(src_key)
+                if val not in (None, ""):
+                    entry[dst_key] = int(val)
+            except Exception:
+                pass
+        if "maxInputTokens" not in entry:
+            try:
+                entry["maxInputTokens"] = int(settings.get("maxInputTokens") or 0)
+            except Exception:
+                pass
+        if "maxOutputTokens" not in entry:
+            try:
+                entry["maxOutputTokens"] = int(settings.get("maxOutputTokens") or 0)
+            except Exception:
+                pass
+        merged.append(entry)
+        for item in existing:
+            if isinstance(item, dict):
+                old_name = self._clean_model_name(item.get("name") or item.get("model") or item.get("id"))
+            else:
+                old_name = self._clean_model_name(item)
+            if not old_name or old_name.casefold() in seen:
+                continue
+            seen.add(old_name.casefold())
+            if isinstance(item, dict):
+                old = dict(item)
+                old["name"] = old_name
+                merged.append(old)
+            else:
+                merged.append({"name": old_name, "lastUsed": 0})
+        settings["recentModels"] = merged[:30]
+        return self._normalise_settings(settings)
+
+    def remember_recent_model(self, settings=None, model_name=None, token_info=None):
+        self.settings = self._remember_recent_model_in_settings(settings, model_name, token_info)
+        self._save_json(SETTINGS_FILE, self.settings)
+        return {"ok": True, "settings": self.settings, "recentModels": self.settings.get("recentModels", [])}
+
+    def rememberRecentModel(self, settings=None, model_name=None, token_info=None):
+        return self.remember_recent_model(settings, model_name, token_info)
+
     def save_settings(self, settings):
         incoming = dict(settings or {})
         requested_data_root = str(incoming.get("dataFilesFolder") or "").strip()
@@ -2076,6 +2922,10 @@ class Api:
             except Exception as e:
                 data_root_result = {"ok": False, "error": f"Could not process data folder: {e}"}
         self.settings = self._normalise_settings({**self.settings, **incoming})
+        self.settings = self._remember_recent_model_in_settings(self.settings, self.settings.get("model"), {
+            "maxInputTokens": self.settings.get("maxInputTokens"),
+            "maxOutputTokens": self.settings.get("maxOutputTokens"),
+        })
         self.settings["dataFilesFolder"] = str(USER_DATA_ROOT if not data_root_result or not data_root_result.get("ok") else Path(requested_data_root).expanduser().resolve())
         self._save_json(SETTINGS_FILE, self.settings)
         result = {"ok": True, "settings": self.settings}
@@ -6517,12 +7367,24 @@ class Api:
             return {"ok": False, "error": f"Could not create emotion image zip: {e}"}
 
 
-    def _front_porch_paths(self, settings=None):
-        # Current UI settings should win over old saved workspace settings.
-        settings = self._normalise_settings({**(settings or {}), **self.settings})
-        raw_root = str(settings.get("frontPorchDataFolder") or "").strip().strip('"').strip("'")
+    def _front_porch_paths(self, settings=None, target=None):
+        # Current UI settings should win over older saved workspace settings.
+        settings = self._normalise_settings({**self.settings, **(settings or {})})
+        selected_target = str(target or settings.get("frontPorchExportTarget") or "stable").strip().lower()
+        if selected_target not in {"stable", "beta"}:
+            selected_target = "stable"
+
+        folder_key = "frontPorchBetaDataFolder" if selected_target == "beta" else "frontPorchStableDataFolder"
+        raw_root = str(settings.get(folder_key) or "").strip().strip('"').strip("'")
         if not raw_root:
-            return None, None, "Front Porch Data Folder is not set. Set it in AI Settings first."
+            # Legacy fallback for settings created before stable/beta folders existed.
+            raw_root = str(settings.get("frontPorchDataFolder") or "").strip().strip('"').strip("'")
+        if not raw_root:
+            label = "Beta" if selected_target == "beta" else "Stable"
+            return None, None, f"{label} Front Porch Data Folder is not set. Set it in Settings first.", selected_target
+
+        expected_db_name = "front_porch_beta.db" if selected_target == "beta" else "front_porch.db"
+        label = "Beta" if selected_target == "beta" else "Stable"
         root = Path(raw_root).expanduser()
         candidates = []
 
@@ -6531,11 +7393,14 @@ class Api:
             if path not in candidates:
                 candidates.append(path)
 
-        # Accept selecting the database file itself.
+        # Accept selecting the database file itself, but make the stable/beta target explicit
+        # so the exporter cannot quietly write to the wrong Front Porch install.
         if root.suffix.lower() == ".db":
             db = root
+            if db.exists() and db.name == expected_db_name:
+                return db.parent, db, "", selected_target
             if db.exists() and db.name in {"front_porch_beta.db", "front_porch.db"}:
-                return db.parent, db, ""
+                return None, None, f"Selected {label} target expects {expected_db_name}, but the selected database is {db.name}. Change the export target or choose the matching database.", selected_target
             add_candidate(root.parent)
 
         # User normally selects the Front Porch data folder, which contains KoboldManager.
@@ -6547,33 +7412,60 @@ class Api:
         add_candidate(root.resolve() if root.exists() else root)
 
         checked = []
+        found_other = []
         for km in candidates:
             if not km.exists() or not km.is_dir():
                 checked.append(str(km))
                 continue
-            dbs = [km / "front_porch_beta.db", km / "front_porch.db"]
-            checked.extend(str(p) for p in dbs)
-            db = next((p for p in dbs if p.exists()), None)
-            if db:
-                return km, db, ""
-        self._log_event("front_porch_scan_not_found", {"raw_root": raw_root, "checked": checked[:20]})
-        return None, None, "Could not find front_porch_beta.db or front_porch.db. Set Front Porch Data Folder to the folder shown in Front Porch → Settings, or select the KoboldManager folder/database directly. Checked: " + "; ".join(checked[:6])
+            expected = km / expected_db_name
+            checked.append(str(expected))
+            if expected.exists():
+                return km, expected, "", selected_target
+            other_name = "front_porch.db" if selected_target == "beta" else "front_porch_beta.db"
+            other = km / other_name
+            checked.append(str(other))
+            if other.exists():
+                found_other.append(str(other))
 
-    def scan_front_porch_folder(self, settings=None):
-        km, db, err = self._front_porch_paths(settings)
+        payload = {"target": selected_target, "raw_root": raw_root, "expectedDb": expected_db_name, "foundOther": found_other[:10], "checked": checked[:20]}
+        self._log_event("front_porch_scan_not_found", payload)
+        if found_other:
+            return None, None, f"{label} export target expects {expected_db_name}, but only found the other Front Porch database: {found_other[0]}. Switch the export target or set the matching {label} data folder.", selected_target
+        return None, None, f"Could not find {expected_db_name}. Set the {label} Front Porch Data Folder to the folder shown in that Front Porch version's Settings, or select its KoboldManager folder/database directly. Checked: " + "; ".join(checked[:6]), selected_target
+
+    def scan_front_porch_folder(self, settings=None, *args, target=None):
+        """Locate the selected Front Porch database quickly.
+
+        Keep this bridge method tolerant of older/newer frontend calls.  PyWebView
+        reports confusing positional-argument errors when the JS side calls an
+        exposed method with an extra argument, so beta29 accepts optional *args
+        and also reads the target from the settings payload.  The actual scan is
+        intentionally shallow: it only checks the expected db path candidates.
+        Export still performs any deeper database work.
+        """
+        if target is None and args:
+            target = args[0]
+        if isinstance(settings, dict) and not target:
+            target = settings.get("frontPorchExportTarget")
+        km, db, err, selected_target = self._front_porch_paths(settings, target=target)
         if err:
-            return {"ok": False, "error": err}
+            return {"ok": False, "error": err, "target": selected_target}
         try:
-            con = sqlite3.connect(str(db))
-            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-            con.close()
-            needed = {"characters", "avatar_images"}
-            missing = sorted(needed - tables)
-            if missing:
-                return {"ok": False, "error": f"Front Porch database found, but required table(s) are missing: {', '.join(missing)}"}
-            return {"ok": True, "koboldManager": str(km), "database": str(db), "charactersDir": str(km / "Characters"), "databaseName": db.name}
+            chars_dir = km / "Characters"
+            payload = {
+                "ok": True,
+                "koboldManager": str(km),
+                "database": str(db),
+                "charactersDir": str(chars_dir),
+                "databaseName": db.name,
+                "target": selected_target,
+                "targetLabel": ("Beta" if selected_target == "beta" else "Stable"),
+                "charactersDirExists": chars_dir.exists(),
+            }
+            self._log_event("front_porch_scan_success", payload)
+            return payload
         except Exception as e:
-            return {"ok": False, "error": f"Could not inspect Front Porch database: {e}"}
+            return {"ok": False, "error": f"Could not inspect Front Porch folder: {e}", "target": selected_target}
 
     def _safe_front_porch_character_folder(self, name):
         """Match Front Porch AI's character/avatar directory slug.
@@ -6640,9 +7532,9 @@ class Api:
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or load a character first."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
-        km, db, err = self._front_porch_paths(merged_settings)
+        km, db, err, selected_target = self._front_porch_paths(merged_settings)
         if err:
-            return {"ok": False, "error": err}
+            return {"ok": False, "error": err, "target": selected_target}
         chars_dir = km / "Characters"
         chars_dir.mkdir(parents=True, exist_ok=True)
         name = self._extract_name(output) or "Character Card"
@@ -6756,8 +7648,8 @@ class Api:
             cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
             con.commit()
             con.close()
-            self._log_event("front_porch_export", {"name": name, "id": char_id, "db": str(db), "image": image_filename, "emotions": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)})
-            return {"ok": True, "name": name, "characterId": char_id, "database": str(db), "cardImage": str(image_dest), "emotionImages": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)}
+            self._log_event("front_porch_export", {"name": name, "id": char_id, "target": selected_target, "db": str(db), "image": image_filename, "emotions": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)})
+            return {"ok": True, "name": name, "characterId": char_id, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "cardImage": str(image_dest), "emotionImages": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)}
         except Exception as e:
             try:
                 con.rollback(); con.close()

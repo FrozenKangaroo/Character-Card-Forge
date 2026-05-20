@@ -5,14 +5,18 @@ on:
     tags:
       - 'v*'
 
-# This grants the runner permission to create and write to the Releases page
 permissions:
   contents: write
 
 jobs:
   release:
-    runs-on: macos-latest
-    
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
@@ -23,19 +27,42 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install Dependencies
+      # Linux-specific core GUI dependencies (Required for pywebview/PyQt6 headless runs)
+      - name: Install Linux System Dependencies
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          brew install create-dmg
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 libgl1-mesa-glx libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
+            binutils wget
+
+      # Mac-specific dmg creator utility
+      - name: Install Mac System Dependencies
+        if: matrix.os == 'macos-latest'
+        run: brew install create-dmg
+
+      # All platforms install requirements + packaging tool
+      - name: Install Python Package Dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build Standalone Mac Executable
+      # --- COMPILATION PHASE ---
+
+      - name: Build Standalone Executable (Windows)
+        if: matrix.os == 'windows-latest'
         run: |
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
+          powershell Compress-Archive -Path "dist/Character-Card-Forge/*" -DestinationPath "dist/Character-Card-Forge-Windows.zip"
 
-      - name: Package into DMG Container
+      - name: Build Standalone Executable (macOS)
+        if: matrix.os == 'macos-latest'
         run: |
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
           mkdir -p dist/dmg
           create-dmg \
             --volname "Character Card Forge" \
@@ -46,9 +73,55 @@ jobs:
             "dist/dmg/Character-Card-Forge.dmg" \
             "dist/Character-Card-Forge.app"
 
-      - name: Upload DMG to GitHub Releases
+      - name: Build Standalone Executable (Linux AppImage)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # 1. Compile into a standard Linux binary layout
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" app.py
+          
+          # 2. Grab the official linuxdeploy tool to package into an AppImage container
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          
+          # 3. Dummy setup minimal metadata file elements required by AppImage standard
+          mkdir -p dist/appdir/usr/share/applications
+          cat << 'EOT' > dist/appdir/usr/share/applications/character-card-forge.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=Character Card Forge
+          Exec=Character-Card-Forge
+          Icon=character-card-forge
+          Categories=Utility;
+          EOT
+          touch dist/appdir/usr/share/icons/character-card-forge.png
+          
+          # 4. Trigger creation
+          export OUTPUT="Character-Card-Forge-Linux.AppImage"
+          ./linuxdeploy-x86_64.AppImage --appdir dist/appdir --executable dist/Character-Card-Forge/Character-Card-Forge --output appimage
+          mv Character-Card-Forge*.AppImage dist/Character-Card-Forge-Linux.AppImage
+
+      # --- ARTIFACT UPLOAD PHASE ---
+
+      - name: Upload Windows Asset
+        if: matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Character-Card-Forge-Windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS Asset
+        if: matrix.os == 'macos-latest'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/dmg/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Linux Asset
+        if: matrix.os == 'ubuntu-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Character-Card-Forge-Linux.AppImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -94,19 +94,20 @@ The Character Browser shows autosaved character projects from the writable user 
 
 To export directly into Front Porch AI:
 
-1. Open Front Porch AI.
-2. Go to Front Porch settings and find the Front Porch data folder.
-3. In Character Card Forge, open **AI Settings**.
-4. Set **Front Porch Data Folder** to that folder.
-5. Use **Scan Front Porch Folder**.
-6. Export the card to Front Porch.
+1. Open the Front Porch version you want to target.
+2. Go to that Front Porch version's settings and find its data folder.
+3. In Character Card Forge, open **Settings**.
+4. Set **Stable Front Porch Data Folder** and/or **Beta Front Porch Data Folder**.
+5. Choose **Front Porch Export Target** before exporting.
+6. Use **Scan Selected Target**, **Scan Stable**, or **Scan Beta** to verify the database.
+7. Export the card to Front Porch.
 
-Character Card Forge looks for:
+Character Card Forge uses the selected target to choose the matching database:
 
 ```text
-<Front Porch Data Folder>/KoboldManager/front_porch_beta.db
-<Front Porch Data Folder>/KoboldManager/front_porch.db
-<Front Porch Data Folder>/KoboldManager/Characters/
+<Stable Front Porch Data Folder>/KoboldManager/front_porch.db
+<Beta Front Porch Data Folder>/KoboldManager/front_porch_beta.db
+<Selected Front Porch Data Folder>/KoboldManager/Characters/
 ```
 
 Emotion/avatar images are linked through Front Porch's `avatar_images` table and saved under the character's `avatars` subfolder.
@@ -426,6 +427,19 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Split-card generation identifies main characters and generates one focused single-character card per character.
 - During each split-card pass, the focused character becomes the main card character, while other characters are preserved as lorebook/background/supporting references.
 - Output areas now support character tabs, so Q&A Answers, Full Text Output, Emotion Images, and Quick Save / Image can be switched per generated card.
+
+
+## Version 1.0.2
+
+- Added Nano-GPT model token auto-fetching from detailed model catalog endpoints, including canonical, subscription, and paid model lists.
+- Token fetching now reads documented `context_length` and `max_output_tokens` values and applies them to Max Input Tokens and Max Output Tokens.
+- Added visible token fetch status/debug controls in Settings so successful matches and log details are easy to inspect.
+- Improved Settings layout so token fetch results do not stretch API fields or break the grid.
+- Added separate Stable and Beta Front Porch data folders plus an export target selector.
+- Front Porch scanning now checks the selected target quickly and chooses the expected database: `front_porch.db` for Stable and `front_porch_beta.db` for Beta.
+- Expanded the Idea Generator with more relationship, setting, core conflict, personality, subject, engagement, and sexual engagement options.
+- Large Idea Generator dropdowns are searchable and capped to avoid oversized menus.
+- Updated AppImage/source version display and cache-busting to the stable 1.0.2 release.
 
 
 ## Version 1.0.0
