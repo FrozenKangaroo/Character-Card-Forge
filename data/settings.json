@@ -43,5 +43,12 @@
   "recentModels": [],
   "frontPorchExportTarget": "stable",
   "frontPorchStableDataFolder": "",
-  "frontPorchBetaDataFolder": ""
+  "frontPorchBetaDataFolder": "",
+  "ideaGeneratorOptions": {},
+  "ideaGeneratorMultiFields": [
+    "personality",
+    "subjectOf",
+    "engagesIn",
+    "sexualEngagesIn"
+  ]
 }

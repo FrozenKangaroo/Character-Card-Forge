@@ -429,6 +429,105 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Output areas now support character tabs, so Q&A Answers, Full Text Output, Emotion Images, and Quick Save / Image can be switched per generated card.
 
 
+
+## Version 1.0.3
+
+- Replaced emoji-based Character Browser action buttons with inline SVG icons so AI Description, Load Workspace, and Delete render reliably in PyWebView/AppImage builds.
+- Added a Character Browser loading modal when opening or manually refreshing the browser, making slower library scans visibly active instead of looking frozen.
+- Updated release version to `1.0.3`, removed beta suffix, and made the app read its displayed version from the `VERSION` file instead of hard-coded frontend/backend fallbacks.
+- Fixed packaged-build version detection so AppImage/PyInstaller builds can read `VERSION` from bundled resources, `_internal`, the executable folder, or the AppDir root instead of falling back to a stale displayed value.
+
+## Version 1.0.3-beta12
+
+- Consolidated the selected-card actions in Character Browser into compact icon buttons.
+- Moved AI Description, Load Workspace, and Delete Saved Card icons above the selected card description so they no longer crowd the selected-card header.
+- Added accessible labels and hover tooltips for each icon action.
+- Styled AI, load, and delete actions with distinct compact icon treatments for clearer small-window use.
+- Updated app version, sidebar version fallback, VERSION file, README, and frontend cache-busting to `1.0.3-beta12`.
+
+## Version 1.0.3-beta11
+
+- Fixed Front Porch main image export still falling back to a blank image when the saved card image only existed in Character Card Forge's workspace asset database or embedded base64 data.
+- Added a stricter Front Porch image resolver that checks the selected local path, loaded project fields, saved workspace asset blobs, saved project JSON, generated-image base64, tab-level generated images, and deep embedded `data:image/...` values before export.
+- Front Porch export now refuses to write a blank card image when an expected image cannot be resolved, and logs `front_porch_image_resolution_failed` diagnostics instead.
+- Front Porch card PNG writing now requires a verified image source for Front Porch exports, while normal Chara Card PNG export can still use the blank placeholder when no image is selected.
+- Updated app version, sidebar version fallback, VERSION file, README, and frontend cache-busting to `1.0.3-beta11`.
+
+## Version 1.0.3-beta9
+
+- Fixed Front Porch exports creating blank main images when the selected card image was still a remote/generated URL.
+- Card image URLs are now downloaded/materialized into the local card image folder before saving, loading, Chara PNG writing, or Front Porch export.
+- Loading older workspaces with URL-based card images now converts the image back to a stable local file path when possible.
+- Importing an image URL through the Concept import flow now stores the downloaded local image path instead of keeping the URL in `cardImagePath`.
+- Front Porch export now stops with a clear error if a selected image cannot be found/downloaded, instead of silently exporting a blank placeholder image.
+
+## Version 1.0.3-beta7
+
+- Added a Front Porch export target picker when both Stable and Beta Front Porch data folders are configured.
+- **Export to Front Porch AI** now offers: Stable, Beta, or Both.
+- **Export Selected to Front Porch** uses the same target picker for batch exports.
+- Exporting to Both writes each selected card to both configured Front Porch databases, creating separate timestamped backups for each target.
+- The exporter temporarily applies the chosen target during export, then restores the previously selected Front Porch target/settings afterward.
+- Backend Front Porch project export is now tolerant of optional target/settings arguments for future bridge compatibility.
+
+## Version 1.0.3-beta6
+
+- Fixed Generate Card modal Q&A bridge error: `Api.generate_qa_context() takes 4 positional arguments but 6 were given`.
+- Custom per-card Q&A questions are now merged into a temporary frontend Q&A template before calling the backend.
+- Restored the backend call to the original 3-argument PyWebView signature for better AppImage/stale-build compatibility.
+- Backend Q&A bridge is now tolerant of extra positional arguments if an older/newer frontend mix happens during packaging.
+
+## Version 1.0.3-beta5
+
+- Renamed the **Character Description** concept subtab to **Vision** to better match the image-analysis workflow.
+- Added a **Generate Card Options** modal that appears before generation starts.
+- Added per-card temporary generation notes that are injected into the current generation only and are not saved to settings or templates.
+- Added per-card custom Q&A questions, one per line, that are merged with normal Q&A for the current generation only.
+- Custom Q&A is useful for card-specific details such as asking an IT character what their first computer was.
+- Improved small-window layout for selected character actions in Character Browser so AI Description, Delete Saved Card, and Load Workspace wrap instead of being pushed off-screen.
+- Reworked Concept, Prompt Template, Settings, and Output subtabs to use left/right arrow scrolling when there are more tabs than fit on screen.
+- Hidden visible subtab scrollbars to keep smaller windows cleaner.
+- Updated app version, sidebar version fallback, VERSION file, README, and frontend cache-busting to `1.0.3-beta5`.
+
+
+## Version 1.0.3-beta4
+
+- Fixed README release history so the full-card vision feature is listed as `1.0.3-beta1` and the browse-button fix remains `1.0.3-beta2`.
+- Added default Idea Generator settings keys to `data/settings.json` for clearer fresh installs and packaged builds.
+- Improved the Idea Generator Settings editor so switching fields auto-applies the currently edited field before loading the next one.
+- This prevents unsaved in-editor changes from being overwritten when moving from one Idea Generator field to another.
+- Updated app version, sidebar version fallback, VERSION file, and frontend cache-busting to `1.0.3-beta4`.
+
+
+## Version 1.0.3-beta3
+
+- Expanded the Idea Generator with configurable option lists per field.
+- Added an **Idea Generator** tab in Settings where each field's dropdown options can be edited one-per-line.
+- Added reset controls for a selected Idea Generator field and for all Idea Generator option lists.
+- Added multi-select support for Idea Generator fields, with Personality, Subject Of, Engages In, and Engages In (Sexual) enabled by default.
+- Multi-select fields now show picked values as removable chips while keeping the dropdown searchable and scroll-limited.
+- Split the crowded Settings page into organized tabs: AI / Models, Vision, Stable Diffusion, Front Porch, Data / Browser, Tags, and Idea Generator.
+- Updated app version, sidebar version fallback, VERSION file, and frontend cache-busting to `1.0.3-beta3`.
+
+
+## Version 1.0.3-beta2
+
+- Fixed Character Description / Concept browse buttons after the full-card vision update.
+- Select Vision Image, vision drop-zone click, concept attachment browse, card image browse, saved-card load, and builder/concept card loaders now use the backend native picker path instead of relying on hidden browser file inputs.
+- Kept drag-and-drop and hidden file inputs as fallback paths.
+- Updated cache-busting and version display to `1.0.3-beta2`.
+
+
+## Version 1.0.3-beta1
+
+- Expanded Vision Image Analysis with a new **Analyze Full Card → Concept** action.
+- The original **Analyze Image** flow still focuses only on the visible character design.
+- The new full-card mode analyzes the whole image/card, including character design, visible action, expression, props, background, setting, mood, lighting, symbols, composition, and legible text when possible.
+- Full-card analysis generates a structured Main Concept with character, visual design, personality/vibe, setting, what is happening in the card, relationship to `{{user}}`, core conflict/hook, scenario starting point, and details to preserve.
+- The generated full-card concept is written directly into the Main Concept box, with an option to replace or append if the box already contains text.
+- Vision prompts now support separate character-only and full-card analysis modes while keeping SFW retry handling for refused vision responses.
+- Updated app version, sidebar version fallback, and frontend cache-busting to `1.0.3-beta1`.
+
 ## Version 1.0.2
 
 - Added Nano-GPT model token auto-fetching from detailed model catalog endpoints, including canonical, subscription, and paid model lists.

@@ -1,3 +1,4 @@
+let frontPorchExportTargetModalResolve = null;
 let template = null;
 let settings = null;
 let styles = {};
@@ -30,7 +31,7 @@ let browserShowSubfolders = false;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
 let recentModels = [];
-let appVersion = "1.0.2";
+let appVersion = "unknown";
 let modelTokenFetchTimer = null;
 let conceptImportFile = null;
 let conceptImportUrlValue = "";
@@ -70,7 +71,7 @@ function showRandomTip(forceDifferent = false) {
 
 function updateAppVersionDisplay() {
   const el = $('#appVersionText');
-  if (el) { const shown = (!appVersion || appVersion === 'unknown') ? '1.0.2' : appVersion; el.textContent = `Version ${shown}`; }
+  if (el) { const shown = (!appVersion || appVersion === 'unknown') ? 'unknown' : appVersion; el.textContent = `Version ${shown}`; }
 }
 
 function setTextareaValue(id, value) {
@@ -300,7 +301,7 @@ function isAiActionElement(el) {
   if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
   if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
   const aiIds = new Set([
-    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeVisionToBuildersBtn',
+    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeFullCardBtn','analyzeVisionToBuildersBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
     'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
@@ -356,6 +357,12 @@ function setVisionImagePath(path) {
     analyze.dataset.visionPath = value;
     analyze.disabled = isInterfaceLocked() || isAiGenerationBusy() ? true : !value;
     analyze.title = value ? '' : 'Select a vision image first.';
+  }
+  const fullCardAnalyze = $('#analyzeFullCardBtn');
+  if (fullCardAnalyze) {
+    fullCardAnalyze.dataset.visionPath = value;
+    fullCardAnalyze.disabled = isInterfaceLocked() || isAiGenerationBusy() ? true : !value;
+    fullCardAnalyze.title = value ? '' : 'Select a vision image first.';
   }
 }
 
@@ -462,27 +469,102 @@ function updateAvailability() {
     if (genCard) genCard.disabled = aiBusy;
     const genImg = $('#generateImagesBtn');
     if (genImg) genImg.disabled = !sdReady || aiBusy;
+    const path = getVisionImagePath();
     const analyze = $('#analyzeVisionBtn');
     if (analyze) {
-      const path = getVisionImagePath();
       analyze.dataset.visionPath = path;
       analyze.disabled = !path || aiBusy;
       analyze.title = path ? (aiBusy ? 'An AI task is already running.' : '') : 'Select a vision image first.';
+    }
+    const fullCardAnalyze = $('#analyzeFullCardBtn');
+    if (fullCardAnalyze) {
+      fullCardAnalyze.dataset.visionPath = path;
+      fullCardAnalyze.disabled = !path || aiBusy;
+      fullCardAnalyze.title = path ? (aiBusy ? 'An AI task is already running.' : 'Analyze the full card image into Main Concept.') : 'Select a vision image first.';
     }
     const follow = $('#followupText');
     if (follow) follow.disabled = !output;
   }
 }
 
+function showBrowserLoadingModal(message = 'Scanning saved cards and refreshing the browser cache. Large libraries can take a moment.') {
+  const modal = $('#browserLoadingModal');
+  if (!modal) return;
+  const text = $('#browserLoadingText');
+  if (text) text.textContent = message;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function hideBrowserLoadingModal() {
+  const modal = $('#browserLoadingModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function waitForNextFrame() {
+  return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
 function bindTabs() {
-  $$('.nav').forEach(btn => btn.addEventListener('click', () => {
+  $$('.nav').forEach(btn => btn.addEventListener('click', async () => {
     $$('.nav').forEach(b => b.classList.remove('active'));
     $$('.tab').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
     $('#' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'browser') refreshCharacterBrowser(false);
+    if (btn.dataset.tab === 'browser') {
+      showBrowserLoadingModal();
+      await waitForNextFrame();
+      await refreshCharacterBrowser(false, { modal: true, keepModalVisible: true });
+    }
+    refreshSubtabScrollControls();
     updateAvailability();
   }));
+}
+
+function enhanceScrollableSubtabs() {
+  $$('.subtabs').forEach(group => {
+    if (group.parentElement?.classList.contains('subtabs-scroll-shell')) return;
+    const shell = document.createElement('div');
+    shell.className = 'subtabs-scroll-shell';
+    const left = document.createElement('button');
+    left.type = 'button';
+    left.className = 'subtabs-scroll-btn subtabs-scroll-left';
+    left.textContent = '‹';
+    left.setAttribute('aria-label', 'Scroll tabs left');
+    const right = document.createElement('button');
+    right.type = 'button';
+    right.className = 'subtabs-scroll-btn subtabs-scroll-right';
+    right.textContent = '›';
+    right.setAttribute('aria-label', 'Scroll tabs right');
+    group.parentNode.insertBefore(shell, group);
+    shell.appendChild(left);
+    shell.appendChild(group);
+    shell.appendChild(right);
+    const update = () => {
+      const overflow = group.scrollWidth > group.clientWidth + 4;
+      shell.classList.toggle('has-overflow', overflow);
+      left.disabled = !overflow || group.scrollLeft <= 2;
+      right.disabled = !overflow || group.scrollLeft + group.clientWidth >= group.scrollWidth - 2;
+    };
+    left.addEventListener('click', () => group.scrollBy({ left: -Math.max(180, Math.floor(group.clientWidth * 0.7)), behavior: 'smooth' }));
+    right.addEventListener('click', () => group.scrollBy({ left: Math.max(180, Math.floor(group.clientWidth * 0.7)), behavior: 'smooth' }));
+    group.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    setTimeout(update, 0);
+    shell.__ccfUpdateSubtabs = update;
+    setTimeout(update, 250);
+  });
+}
+
+function refreshSubtabScrollControls() {
+  $$('.subtabs-scroll-shell').forEach(shell => {
+    if (typeof shell.__ccfUpdateSubtabs === 'function') {
+      setTimeout(shell.__ccfUpdateSubtabs, 0);
+      setTimeout(shell.__ccfUpdateSubtabs, 120);
+    }
+  });
 }
 
 function bindSubTabs() {
@@ -494,7 +576,9 @@ function bindSubTabs() {
       btn.classList.add('active');
       const panel = $('#' + btn.dataset.subtab);
       if (panel) panel.classList.add('active');
+      setTimeout(() => btn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }), 0);
       if (btn.dataset.subtab === 'output-debug') refreshDebugLog(true);
+      refreshSubtabScrollControls();
       updateAvailability();
     }));
   });
@@ -503,11 +587,12 @@ function bindSubTabs() {
 async function init() {
   installConceptImportModalDelegatedHandlers();
   bindTabs();
+  enhanceScrollableSubtabs();
   bindSubTabs();
   const state = await window.pywebview.api.get_state();
   template = state.template;
   settings = state.settings;
-  appVersion = (state.version && state.version !== 'unknown') ? state.version : (appVersion && appVersion !== 'unknown' ? appVersion : '1.0.2');
+  appVersion = (state.version || 'unknown').toString().trim() || 'unknown';
   updateAppVersionDisplay();
   recentModels = normalizeRecentModels(settings.recentModels || []);
   styles = state.styles || {};
@@ -580,6 +665,8 @@ function hydrateSettings() {
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
   browserShowSubfolders = !!settings.browserShowSubfolders;
   const showSubfolders = $('#browserShowSubfolders'); if (showSubfolders) showSubfolders.checked = browserShowSubfolders;
+  initIdeaSettingsEditor();
+  populateIdeaGeneratorOptions();
   updateImportedCardToolsHint();
 }
 
@@ -1111,6 +1198,7 @@ function collectSettings() {
     browserVirtualFolders: browserVirtualFolders || [],
     browserShowSubfolders: !!browserShowSubfolders,
     recentModels: normalizeRecentModels(recentModels),
+    ...collectIdeaSettingsEditorState(settings || {}),
   };
 }
 
@@ -1486,9 +1574,14 @@ function moveField(section, index, dir) {
 function switchSubTab(groupName, panelId) {
   const group = $(`.subtabs[data-subtab-group="${groupName}"]`);
   if (!group) return;
-  $$('.subtab', group).forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === panelId));
+  $$('.subtab', group).forEach(btn => {
+    const active = btn.dataset.subtab === panelId;
+    btn.classList.toggle('active', active);
+    if (active) setTimeout(() => btn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }), 0);
+  });
   $$(`[data-subtab-panel="${groupName}"]`).forEach(panel => panel.classList.toggle('active', panel.id === panelId));
   if (panelId === 'output-debug') refreshDebugLog(true);
+  refreshSubtabScrollControls();
 }
 
 let debugLogTimer = null;
@@ -1706,22 +1799,39 @@ function bindActions() {
   $$('.builder-card select, .builder-card input, .builder-card textarea').forEach(el => el.addEventListener('input', () => { updateBuilderConditionalOptions(); updateCustomConditionalOptions(); captureCurrentMultiBuilderState(); }));
   $$('.multi-builder-character-select').forEach(el => el.addEventListener('change', () => switchMultiBuilderCharacter(el.value)));
   $$('.multi-builder-character-label').forEach(el => el.addEventListener('input', () => { if (!isMultiBuilderMode()) return; $$('.multi-builder-character-label').forEach(other => { if (other !== el) other.value = el.value; }); multiBuilderStates[multiBuilderSelectedIndex] = { ...(multiBuilderStates[multiBuilderSelectedIndex] || {}), ...readBuilderDomState(), multiCharacterName: el.value || '' }; updateMultiBuilderSelectors(false); }));
-  $('#selectVisionImageBtn').addEventListener('click', () => openBrowserFileInput('visionFileInput', 'vision image'));
+  $('#selectVisionImageBtn').addEventListener('click', selectVisionImage);
   $('#visionImageUrlBtn')?.addEventListener('click', () => selectVisionImageUrl({ analyze: false }));
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
+  $('#analyzeFullCardBtn')?.addEventListener('click', analyzeFullCardToMainConcept);
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
   $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
-  $('#generateBtn').addEventListener('click', generateCard);
+  $('#generateBtn').addEventListener('click', openGenerationOptionsModal);
   $('#openIdeaGeneratorModalBtn')?.addEventListener('click', openIdeaGeneratorModal);
+  $('#closeGenerationOptionsModalBtn')?.addEventListener('click', closeGenerationOptionsModal);
+  $('#cancelGenerationOptionsBtn')?.addEventListener('click', closeGenerationOptionsModal);
+  $('#startGenerationWithOptionsBtn')?.addEventListener('click', startGenerationFromModal);
+  $('#generationOptionsModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'generationOptionsModal') closeGenerationOptionsModal(); });
+  $('#closeFrontPorchExportTargetModalBtn')?.addEventListener('click', () => closeFrontPorchExportTargetModal(null));
+  $('#cancelFrontPorchExportTargetBtn')?.addEventListener('click', () => closeFrontPorchExportTargetModal(null));
+  $('#frontPorchExportStableBtn')?.addEventListener('click', () => closeFrontPorchExportTargetModal(['stable']));
+  $('#frontPorchExportBetaBtn')?.addEventListener('click', () => closeFrontPorchExportTargetModal(['beta']));
+  $('#frontPorchExportBothBtn')?.addEventListener('click', () => closeFrontPorchExportTargetModal(['stable', 'beta']));
+  $('#frontPorchExportTargetModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'frontPorchExportTargetModal') closeFrontPorchExportTargetModal(null); });
   $('#ideaGender')?.addEventListener('change', populateIdeaGeneratorOptions);
   $('#closeIdeaGeneratorModalBtn')?.addEventListener('click', closeIdeaGeneratorModal);
   $('#clearIdeaGeneratorBtn')?.addEventListener('click', clearIdeaGenerator);
   $('#generateIdeaBtn')?.addEventListener('click', generateIdeaIntoMainConcept);
+  $('#ideaSettingsField')?.addEventListener('change', (e) => switchIdeaSettingsField(e.target.value));
+  $('#ideaSettingsApplyBtn')?.addEventListener('click', () => applyIdeaSettingsField(true));
+  $('#ideaSettingsResetFieldBtn')?.addEventListener('click', resetIdeaSettingsField);
+  $('#ideaSettingsResetAllBtn')?.addEventListener('click', resetAllIdeaSettings);
+  $('#ideaSettingsMulti')?.addEventListener('change', () => applyIdeaSettingsField(false));
   $('#ideaGeneratorModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'ideaGeneratorModal') closeIdeaGeneratorModal(); });
+  initIdeaSettingsEditor();
   populateIdeaGeneratorOptions();
-  $('#refreshCharactersBtn')?.addEventListener('click', refreshCharacterBrowser);
+  $('#refreshCharactersBtn')?.addEventListener('click', () => refreshCharacterBrowser(true, { modal: true }));
   $('#browserMultiDeleteBtn')?.addEventListener('click', deleteSelectedCharacterDirectories);
   $('#browserMultiExportPngBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_png'));
   $('#browserMultiExportJsonBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_json'));
@@ -1755,22 +1865,22 @@ function bindActions() {
   $('#analyzeVisionToBuildersBtn')?.addEventListener('click', analyzeSelectedImageToBuilders);
   $('#transferToBuildersBtn')?.addEventListener('click', transferConceptToBuilders);
   $('#transferToBuildersMainBtn')?.addEventListener('click', transferConceptToBuilders);
-  $('#loadCardToBuildersMainBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
-  $('#loadCardToBuildersModeBtn')?.addEventListener('click', () => openBrowserFileInput('builderCardFileInput', 'card to builders'));
+  $('#loadCardToBuildersMainBtn')?.addEventListener('click', loadCardToBuildersNative);
+  $('#loadCardToBuildersModeBtn')?.addEventListener('click', loadCardToBuildersNative);
   $('#loadCardToBuildersUrlMainBtn')?.addEventListener('click', loadCardToBuildersUrl);
   $('#loadCardToBuildersUrlModeBtn')?.addEventListener('click', loadCardToBuildersUrl);
-  $('#loadCardToConceptMainBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
-  $('#loadCardToConceptModeBtn')?.addEventListener('click', () => openBrowserFileInput('conceptCardFileInput', 'card to main concept'));
+  $('#loadCardToConceptMainBtn')?.addEventListener('click', loadCardToMainConceptNative);
+  $('#loadCardToConceptModeBtn')?.addEventListener('click', loadCardToMainConceptNative);
   $('#loadCardToConceptUrlMainBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#loadCardToConceptUrlModeBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#reviseBtn').addEventListener('click', reviseCard);
-  $('#loadSavedBtn').addEventListener('click', () => openBrowserFileInput('savedFileInput', 'saved card/project'));
+  $('#loadSavedBtn').addEventListener('click', loadSavedCardOrProject);
   $('#loadSavedUrlBtn')?.addEventListener('click', loadSavedCardOrProjectFromUrl);
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
   $('#clearLogBtn').addEventListener('click', clearDebugLog);
   $('#copyBtn').addEventListener('click', copyOutput);
   $('#exportBtn').addEventListener('click', exportCard);
-  $('#selectImageBtn').addEventListener('click', () => openBrowserFileInput('cardImageFileInput', 'card image'));
+  $('#selectImageBtn').addEventListener('click', selectCardImage);
   $('#cardImageUrlBtn')?.addEventListener('click', importCardImageUrl);
   $('#generateImagesBtn').addEventListener('click', generateSdImages);
   $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
@@ -1781,7 +1891,7 @@ function bindActions() {
   $('#clearEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = false); });
   $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
-  $('#attachConceptFilesBtn').addEventListener('click', () => openBrowserFileInput('conceptAttachmentInput', 'attachment'));
+  $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
   $('#attachConceptUrlBtn')?.addEventListener('click', attachConceptUrl);
   $('#clearConceptAttachmentsBtn').addEventListener('click', clearConceptAttachments);
   // Hidden file inputs remain as an emergency browser fallback, but normal flow uses KDE/Zenity native dialogs from the backend.
@@ -1798,12 +1908,12 @@ function bindActions() {
   $('#conceptImportAsMainBtn')?.addEventListener('click', () => runConceptImport('main'));
   $('#conceptImportAsBuildersBtn')?.addEventListener('click', () => runConceptImport('builders'));
 
-  bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles });
-  bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles });
-  bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles });
-  bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles });
-  bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles });
-  bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles });
+  bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles, onClick: attachConceptFiles });
+  bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles, onClick: selectVisionImage });
+  bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles, onClick: loadSavedCardOrProject });
+  bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles, onClick: loadCardToBuildersNative });
+  bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles, onClick: loadCardToMainConceptNative });
+  bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles, onClick: selectCardImage });
   bindConceptImportDropZone();
   enhanceBuilderAiButtons();
   populateBuilderPresets();
@@ -2198,7 +2308,7 @@ async function transferConceptToBuilders() {
   const mainConcept = ($('#conceptText')?.value || '').trim();
   const characterDescription = ($('#visionDescription')?.value || '').trim();
   if (!mainConcept && !characterDescription) {
-    setStatus('Write a Main Concept or provide a Character Description / Vision Description first.', 'error');
+    setStatus('Write a Main Concept or provide a Vision Description first.', 'error');
     return;
   }
   setBusy('TRANSFER TO BUILDERS — reading concept and filling builder fields…');
@@ -2209,7 +2319,7 @@ async function transferConceptToBuilders() {
     if (!res.ok) throw new Error(res.error || 'Transfer to Builders failed.');
     const applied = applyBuilderTransferResult(res);
     const multiMsg = applied.characterCount >= 2 ? ` Detected ${applied.characterCount} main characters and switched to Multi-Character Single Card. Side characters remain in concept/lore context, not builder slots.` : '';
-    setStatus(`Transferred concept to builders: filled ${applied.count} field(s). Builder guidance now takes priority over Main Concept / Character Description during generation.${multiMsg}${res.notes ? ' ' + res.notes : ''}`, 'ok');
+    setStatus(`Transferred concept to builders: filled ${applied.count} field(s). Builder guidance now takes priority over Main Concept / Vision during generation.${multiMsg}${res.notes ? ' ' + res.notes : ''}`, 'ok');
     switchSubTab('concept', 'concept-builder');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -2637,6 +2747,54 @@ async function analyzeVisionImage() {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     setStatus(res.retryUsed ? 'Vision model refused once, then succeeded with a SFW retry. Description ready.' : 'Vision description ready. It will be included when generating/revising the card.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function analyzeFullCardToMainConcept() {
+  const visionPath = getVisionImagePath();
+  if (!visionPath) {
+    setStatus('Select a vision image before analyzing the full card.', 'error');
+    updateAvailability();
+    return;
+  }
+  setVisionImagePath(visionPath);
+  settings = collectSettings();
+  settings.visionImagePath = visionPath;
+  const settingsError = validateVisionApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  await window.pywebview.api.save_settings(settings);
+  setBusy('ANALYZING FULL CARD WITH VISION MODEL — building Main Concept…');
+  try {
+    const res = await window.pywebview.api.analyze_vision_image(visionPath, settings, 'full_card');
+    if (!res.ok) throw new Error(res.error || 'Full card analysis failed.');
+    const concept = String(res.concept || res.description || '').trim();
+    if (!concept) throw new Error('Vision model returned an empty concept. Try a different vision model or enter the concept manually.');
+    const conceptBox = $('#conceptText');
+    if (!conceptBox) throw new Error('Main Concept box was not found.');
+    const existing = String(conceptBox.value || '').trim();
+    let finalText = concept;
+    if (existing) {
+      const replace = window.confirm('Replace the current Main Concept with the full-card analysis?\n\nOK = Replace\nCancel = Append below the existing concept');
+      finalText = replace ? concept : `${existing}\n\n---\n\nFull Card Image Analysis:\n${concept}`;
+    }
+    conceptBox.value = finalText;
+    conceptBox.dispatchEvent(new Event('input', { bubbles: true }));
+    if (res.imagePath) setVisionImagePath(res.imagePath);
+    if ($('#visionDescription') && concept.length <= 12000) $('#visionDescription').value = concept;
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    updateAvailability();
+    setStatus(res.retryUsed ? 'Full-card analysis succeeded after a SFW retry. Main Concept updated.' : 'Full-card analysis complete. Main Concept updated.', 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -3222,13 +3380,13 @@ function buildConceptForModel() {
   const parts = [];
   const hasBuilder = !!builderGuidance.hasAny;
   if (hasBuilder) {
-    parts.push('BUILDER PRIORITY RULE — if Main Concept, attachments, or Character Description conflict with any Builder guidance below, the Builder guidance wins. Treat Builder guidance as the newest and most intentional version. Do not let older concept text override it.');
+    parts.push('BUILDER PRIORITY RULE — if Main Concept, attachments, or Vision reference conflict with any Builder guidance below, the Builder guidance wins. Treat Builder guidance as the newest and most intentional version. Do not let older concept text override it.');
   }
   if (concept) parts.push(concept);
   if (attachmentText) parts.push(attachmentText);
   if (visual) {
     parts.push([
-      'CHARACTER DESCRIPTION / VISION REFERENCE — use this as physical appearance/clothing reference only when it does not conflict with Character Builder Visual Description. Builder visual fields take priority:',
+      'VISION REFERENCE — use this as physical appearance/clothing reference only when it does not conflict with Character Builder Visual Description. Builder visual fields take priority:',
       visual
     ].join('\n'));
   }
@@ -3392,7 +3550,12 @@ async function saveCurrentWorkspace(reason='autosave') {
   }
 }
 
-async function refreshCharacterBrowser(showStatus=true) {
+async function refreshCharacterBrowser(showStatus=true, options={}) {
+  const useModal = !!(options && options.modal);
+  if (useModal && !options.keepModalVisible) {
+    showBrowserLoadingModal();
+    await waitForNextFrame();
+  }
   try {
     const res = await window.pywebview.api.list_character_library();
     if (!res.ok) throw new Error(res.error || 'Could not load character browser.');
@@ -3410,6 +3573,8 @@ async function refreshCharacterBrowser(showStatus=true) {
     if (showStatus) setStatus(`Character Browser refreshed: ${characterBrowserCards.length} character(s).`, 'ok');
   } catch (err) {
     if (showStatus) setStatus(err.message || String(err), 'error');
+  } finally {
+    if (useModal) hideBrowserLoadingModal();
   }
 }
 
@@ -3737,23 +3902,43 @@ async function exportSelectedCharactersToFrontPorchBatch() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   settings = collectSettings();
-  const fpTarget = currentFrontPorchTargetInfo();
-  if (!fpTarget.folder) { setStatus(`Set the ${fpTarget.label} Data Folder in Settings first.`, 'error'); return; }
-  const okConfirm = confirm(`Export ${paths.length} selected character(s) to ${fpTarget.label}?\n\nA database backup is created by the exporter. Close Front Porch before exporting if possible.`);
-  if (!okConfirm) return;
+  const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: 'batch' });
+  if (!targets || !targets.length) return;
+
+  if (!frontPorchBothFoldersConfigured(settings)) {
+    const label = frontPorchTargetInfo(targets[0], settings).label;
+    const okConfirm = confirm(`Export ${paths.length} selected character(s) to ${label}?
+
+A database backup is created by the exporter. Close Front Porch before exporting if possible.`);
+    if (!okConfirm) return;
+  }
+
+  const originalSettings = { ...settings };
   setBusy('BATCH EXPORTING TO FRONT PORCH AI…');
   let ok = 0;
   let failed = 0;
-  try { await window.pywebview.api.save_settings(settings); } catch (_) {}
-  for (const path of paths) {
-    try {
-      const res = await window.pywebview.api.export_front_porch_from_project(path);
-      if (res.ok) ok += 1;
-      else failed += 1;
-    } catch (_) { failed += 1; }
+  const targetTotals = [];
+  try {
+    for (const target of targets) {
+      const info = frontPorchTargetInfo(target, originalSettings);
+      let targetOk = 0;
+      let targetFailed = 0;
+      setBusy(`BATCH EXPORTING TO ${info.label.toUpperCase()}…`);
+      for (const path of paths) {
+        try {
+          const res = await exportFrontPorchProjectToTarget(path, target, originalSettings);
+          if (res.ok) { ok += 1; targetOk += 1; }
+          else { failed += 1; targetFailed += 1; }
+        } catch (_) { failed += 1; targetFailed += 1; }
+      }
+      targetTotals.push(`${info.label}: ${targetOk} succeeded${targetFailed ? `, ${targetFailed} failed` : ''}`);
+    }
+  } finally {
+    try { await window.pywebview.api.save_settings(originalSettings); } catch (_) {}
+    settings = originalSettings;
+    setBusy('');
   }
-  setBusy('');
-  setStatus(`${fpTarget.label} batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
+  setStatus(`Front Porch batch export complete — ${targetTotals.join(' | ')}.`, failed ? 'error' : 'ok');
 }
 
 function normaliseBrowserTag(tag) {
@@ -4530,41 +4715,125 @@ async function scanFrontPorchFolder(targetOverride = null) {
   }
 }
 
-function currentFrontPorchTargetInfo() {
-  const current = collectSettings();
-  const target = current.frontPorchExportTarget === 'beta' ? 'beta' : 'stable';
+function frontPorchTargetInfo(targetOverride = null, baseSettings = null) {
+  const current = baseSettings || collectSettings();
+  const target = targetOverride ? (targetOverride === 'beta' ? 'beta' : 'stable') : (current.frontPorchExportTarget === 'beta' ? 'beta' : 'stable');
   const folder = target === 'beta' ? current.frontPorchBetaDataFolder : current.frontPorchStableDataFolder;
   return {
     target,
-    folder: folder || '',
+    folder: (folder || '').trim(),
     label: target === 'beta' ? 'Beta Front Porch' : 'Stable Front Porch',
   };
 }
 
+function currentFrontPorchTargetInfo() {
+  return frontPorchTargetInfo();
+}
+
+function frontPorchBothFoldersConfigured(baseSettings = null) {
+  const current = baseSettings || collectSettings();
+  return !!String(current.frontPorchStableDataFolder || '').trim() && !!String(current.frontPorchBetaDataFolder || '').trim();
+}
+
+function frontPorchSettingsForTarget(target, baseSettings = null) {
+  const current = { ...(baseSettings || collectSettings()) };
+  const selectedTarget = target === 'beta' ? 'beta' : 'stable';
+  current.frontPorchExportTarget = selectedTarget;
+  current.frontPorchDataFolder = selectedTarget === 'beta'
+    ? String(current.frontPorchBetaDataFolder || '').trim()
+    : String(current.frontPorchStableDataFolder || '').trim();
+  return current;
+}
+
+function openFrontPorchExportTargetModal({ count = 1, mode = 'single' } = {}) {
+  const modal = $('#frontPorchExportTargetModal');
+  if (!modal) return Promise.resolve(null);
+  const summary = $('#frontPorchExportTargetSummary');
+  if (summary) {
+    const itemLabel = count === 1 ? 'this character' : `${count} selected characters`;
+    summary.textContent = `Both Stable and Beta Front Porch data folders are configured. Choose where to export ${itemLabel}.`;
+  }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  return new Promise(resolve => {
+    frontPorchExportTargetModalResolve = resolve;
+  });
+}
+
+function closeFrontPorchExportTargetModal(result = null) {
+  const modal = $('#frontPorchExportTargetModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+  if (frontPorchExportTargetModalResolve) {
+    const resolve = frontPorchExportTargetModalResolve;
+    frontPorchExportTargetModalResolve = null;
+    resolve(result);
+  }
+}
+
+function showFrontPorchSettingsError() {
+  setStatus('Set at least one Front Porch Data Folder in Settings first. Stable uses front_porch.db; Beta uses front_porch_beta.db.', 'error');
+  $$('.nav').forEach(b => b.classList.remove('active'));
+  $$('.tab').forEach(t => t.classList.remove('active'));
+  $('[data-tab="settings"]')?.classList.add('active');
+  $('#settings')?.classList.add('active');
+}
+
+async function chooseFrontPorchExportTargets({ count = 1, mode = 'single' } = {}) {
+  settings = collectSettings();
+  const hasStable = !!String(settings.frontPorchStableDataFolder || '').trim();
+  const hasBeta = !!String(settings.frontPorchBetaDataFolder || '').trim();
+  if (hasStable && hasBeta) {
+    return await openFrontPorchExportTargetModal({ count, mode });
+  }
+  if (hasStable) return ['stable'];
+  if (hasBeta) return ['beta'];
+  showFrontPorchSettingsError();
+  return null;
+}
+
+async function exportFrontPorchProjectToTarget(projectPath, target, baseSettings = null) {
+  const targetSettings = frontPorchSettingsForTarget(target, baseSettings);
+  await window.pywebview.api.save_settings(targetSettings);
+  // Keep the bridge call one-argument for AppImage/stale frontend compatibility.
+  // The backend is beta7-tolerant of optional target/settings arguments, but does
+  // not require them because save_settings updates the active export target first.
+  return await window.pywebview.api.export_front_porch_from_project(projectPath);
+}
 
 async function exportSelectedCharacterToFrontPorch() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
   settings = collectSettings();
-  const fpTarget = currentFrontPorchTargetInfo();
-  if (!fpTarget.folder) {
-    setStatus(`Set the ${fpTarget.label} Data Folder in Settings first. Use the folder shown in that Front Porch version's Settings.`, 'error');
-    $$('.nav').forEach(b => b.classList.remove('active'));
-    $$('.tab').forEach(t => t.classList.remove('active'));
-    $('[data-tab="settings"]').classList.add('active');
-    $('#settings').classList.add('active');
-    return;
+  const targets = await chooseFrontPorchExportTargets({ count: 1, mode: 'single' });
+  if (!targets || !targets.length) return;
+
+  if (!frontPorchBothFoldersConfigured(settings)) {
+    const label = frontPorchTargetInfo(targets[0], settings).label;
+    const ok = confirm(`Export this saved character directly into ${label}?
+
+This will write to the selected Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A timestamped database backup will be created first. Close Front Porch before exporting if possible.`);
+    if (!ok) return;
   }
-  const ok = confirm(`Export this saved character directly into ${fpTarget.label}?\n\nThis will write to the selected Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A timestamped database backup will be created first. Close Front Porch before exporting if possible.`);
-  if (!ok) return;
+
+  const originalSettings = { ...settings };
   setBusy('EXPORTING TO FRONT PORCH AI…');
+  const results = [];
   try {
-    await window.pywebview.api.save_settings(settings);
-    const res = await window.pywebview.api.export_front_porch_from_project(selectedCharacterProjectPath);
-    if (!res.ok) throw new Error(res.error || 'Front Porch export failed.');
-    setStatus(`Exported to ${res.targetLabel || fpTarget.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`, 'ok');
+    for (const target of targets) {
+      const info = frontPorchTargetInfo(target, originalSettings);
+      setBusy(`EXPORTING TO ${info.label.toUpperCase()}…`);
+      const res = await exportFrontPorchProjectToTarget(selectedCharacterProjectPath, target, originalSettings);
+      if (!res.ok) throw new Error(res.error || `${info.label} export failed.`);
+      results.push(`${res.targetLabel || info.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`);
+    }
+    setStatus(`Exported to Front Porch AI. ${results.join(' | ')}`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
+    try { await window.pywebview.api.save_settings(originalSettings); } catch (_) {}
+    settings = originalSettings;
     setBusy('');
   }
 }
@@ -4616,6 +4885,123 @@ const IDEA_OPTIONS = {
   ]
 };
 
+const IDEA_FIELD_LABELS = {
+  archetype: 'Archetype',
+  conflict: 'Core Conflict',
+  setting: 'Setting',
+  tone: 'Tone',
+  occupation: 'Occupation / Role',
+  relationship: 'Relationship to {{user}}',
+  status: 'Status / Social Position',
+  personality: 'Personality',
+  subjectOf: 'Subject Of',
+  engagesIn: 'Engages In',
+  sexualEngagesIn: 'Engages In (Sexual)'
+};
+
+const DEFAULT_IDEA_MULTI_FIELDS = ['personality', 'subjectOf', 'engagesIn', 'sexualEngagesIn'];
+const IDEA_OPTION_LIMIT = 80;
+let ideaSettingsEditorLoadedField = 'personality';
+
+
+function cleanIdeaOptionValue(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function dedupeIdeaOptions(values = []) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(values) ? values : []).forEach(value => {
+    const cleaned = cleanIdeaOptionValue(value);
+    if (!cleaned) return;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(cleaned);
+  });
+  return out;
+}
+
+function parseIdeaOptionText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  const parts = raw.includes('\n') ? raw.split(/\r?\n/) : raw.split(',');
+  return dedupeIdeaOptions(parts);
+}
+
+function formatIdeaOptionText(values = []) {
+  return dedupeIdeaOptions(values).join('\n');
+}
+
+function normaliseIdeaGeneratorOptionsMap(map = {}) {
+  const cleaned = {};
+  Object.keys(IDEA_OPTIONS).forEach(field => {
+    const values = map?.[field];
+    if (Array.isArray(values)) {
+      const list = dedupeIdeaOptions(values);
+      if (list.length) cleaned[field] = list;
+    }
+  });
+  return cleaned;
+}
+
+function collectIdeaGeneratorMultiFieldsFromSettings(baseSettings = settings) {
+  const raw = baseSettings?.ideaGeneratorMultiFields;
+  const list = Array.isArray(raw) ? raw : DEFAULT_IDEA_MULTI_FIELDS;
+  const valid = new Set(Object.keys(IDEA_OPTIONS));
+  const out = [];
+  list.forEach(field => {
+    const key = String(field || '').trim();
+    if (valid.has(key) && !out.includes(key)) out.push(key);
+  });
+  return out.length ? out : [...DEFAULT_IDEA_MULTI_FIELDS];
+}
+
+function getIdeaGeneratorOptionsFromSettings(baseSettings = settings) {
+  return normaliseIdeaGeneratorOptionsMap(baseSettings?.ideaGeneratorOptions || {});
+}
+
+function collectIdeaSettingsEditorState(baseSettings = settings, targetField = ideaSettingsEditorLoadedField || $('#ideaSettingsField')?.value || '') {
+  const optionsMap = getIdeaGeneratorOptionsFromSettings(baseSettings);
+  let multiFields = collectIdeaGeneratorMultiFieldsFromSettings(baseSettings);
+  const field = String(targetField || '').trim();
+  if (field && IDEA_OPTIONS[field]) {
+    const edited = parseIdeaOptionText($('#ideaSettingsOptions')?.value || '');
+    const defaults = dedupeIdeaOptions(IDEA_OPTIONS[field] || []);
+    const editedKey = edited.join('\n').toLowerCase();
+    const defaultKey = defaults.join('\n').toLowerCase();
+    if (edited.length && editedKey !== defaultKey) optionsMap[field] = edited;
+    else delete optionsMap[field];
+
+    const allowMulti = !!$('#ideaSettingsMulti')?.checked;
+    multiFields = multiFields.filter(x => x !== field);
+    if (allowMulti) multiFields.push(field);
+  }
+  return {
+    ideaGeneratorOptions: normaliseIdeaGeneratorOptionsMap(optionsMap),
+    ideaGeneratorMultiFields: collectIdeaGeneratorMultiFieldsFromSettings({ ideaGeneratorMultiFields: multiFields })
+  };
+}
+
+function applyIdeaSettingsFieldToSettings(field, showStatus = false) {
+  const targetField = String(field || '').trim();
+  if (!targetField || !IDEA_OPTIONS[targetField]) return false;
+  const collected = collectIdeaSettingsEditorState(settings || {}, targetField);
+  settings = { ...(settings || {}), ...collected };
+  populateIdeaGeneratorOptions();
+  if (showStatus) setStatus(`Updated Idea Generator options for ${IDEA_FIELD_LABELS[targetField] || targetField}. Save Settings to keep it.`, 'ok');
+  return true;
+}
+
+function ideaBaseOptions(listName) {
+  const custom = getIdeaGeneratorOptionsFromSettings(settings)[listName];
+  return dedupeIdeaOptions(custom && custom.length ? custom : (IDEA_OPTIONS[listName] || []));
+}
+
+function ideaIsMultiField(listName) {
+  return collectIdeaGeneratorMultiFieldsFromSettings(settings).includes(listName);
+}
+
 function fillIdeaDatalist(id, values) {
   const list = $('#' + id);
   if (!list) return;
@@ -4635,6 +5021,50 @@ const IDEA_FIELD_TO_LIST = {
   ideaEngagesIn: 'engagesIn',
   ideaSexualEngagesIn: 'sexualEngagesIn'
 };
+
+function ideaInputValues(input) {
+  return dedupeIdeaOptions(String(input?.value || '').split(','));
+}
+
+function setIdeaInputValues(input, values) {
+  if (!input) return;
+  input.value = dedupeIdeaOptions(values).join(', ');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function ideaActiveSearchQuery(input) {
+  const listName = IDEA_FIELD_TO_LIST[input?.id];
+  const raw = String(input?.value || '');
+  if (listName && ideaIsMultiField(listName)) {
+    const parts = raw.split(',');
+    return String(parts[parts.length - 1] || '').trim().toLowerCase();
+  }
+  return raw.trim().toLowerCase();
+}
+
+function renderIdeaSelectedChips(input) {
+  if (!input) return;
+  const listName = IDEA_FIELD_TO_LIST[input.id];
+  const parent = input.parentElement;
+  if (!parent) return;
+  let holder = parent.querySelector(`.idea-selected-chips[data-for-input="${input.id}"]`);
+  if (!listName || !ideaIsMultiField(listName)) {
+    if (holder) holder.remove();
+    return;
+  }
+  const values = ideaInputValues(input);
+  if (!holder) {
+    holder = document.createElement('div');
+    holder.className = 'idea-selected-chips';
+    holder.dataset.forInput = input.id;
+    input.insertAdjacentElement('afterend', holder);
+  }
+  if (!values.length) {
+    holder.innerHTML = '<span class="idea-chip-placeholder">Multiple choices allowed</span>';
+    return;
+  }
+  holder.innerHTML = values.map(v => `<span class="idea-chip"><span>${escapeHtml(v)}</span><button type="button" class="idea-chip-remove" data-input="${escapeHtml(input.id)}" data-value="${escapeHtml(v)}" title="Remove ${escapeHtml(v)}">×</button></span>`).join('');
+}
 
 function closeIdeaSuggestionBoxes(exceptInput = null) {
   $$('.idea-suggestion-box').forEach(box => {
@@ -4664,57 +5094,96 @@ function renderIdeaSuggestionBox(input) {
   if (!listName) return;
   const box = ensureIdeaSuggestionBox(input);
   if (!box) return;
-  const query = String(input.value || '').trim().toLowerCase();
+  const query = ideaActiveSearchQuery(input);
+  const selected = new Set(ideaInputValues(input).map(v => v.toLowerCase()));
   const allValues = ideaOptionsForGender(listName);
   let values = allValues;
-  if (query) {
-    values = allValues.filter(v => String(v).toLowerCase().includes(query));
-  }
-  values = values.slice(0, 80);
+  if (query) values = allValues.filter(v => String(v).toLowerCase().includes(query));
+  if (ideaIsMultiField(listName)) values = values.filter(v => !selected.has(String(v).toLowerCase()));
+  values = values.slice(0, IDEA_OPTION_LIMIT);
   if (!values.length) {
     box.innerHTML = '<div class="idea-suggestion-empty">No matching options. You can still type a custom value.</div>';
   } else {
     box.innerHTML = values.map(v => `<button type="button" class="idea-suggestion-item" data-value="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('');
   }
   box.classList.remove('hidden');
+  renderIdeaSelectedChips(input);
 }
 
 function setupIdeaAutocompleteFields() {
   Object.keys(IDEA_FIELD_TO_LIST).forEach(id => {
     const input = $('#' + id);
-    if (!input || input.dataset.ideaAutocompleteReady === '1') return;
+    if (!input) return;
+    input.removeAttribute('list');
+    ensureIdeaSuggestionBox(input);
+    renderIdeaSelectedChips(input);
+    if (input.dataset.ideaAutocompleteReady === '1') return;
     input.dataset.ideaAutocompleteReady = '1';
     // Native datalist popups cannot be size-limited consistently in WebView,
     // so use a themed scrollable suggestion panel instead.
-    input.removeAttribute('list');
-    ensureIdeaSuggestionBox(input);
     input.addEventListener('focus', () => { closeIdeaSuggestionBoxes(input); renderIdeaSuggestionBox(input); });
     input.addEventListener('click', () => { closeIdeaSuggestionBoxes(input); renderIdeaSuggestionBox(input); });
-    input.addEventListener('input', () => renderIdeaSuggestionBox(input));
+    input.addEventListener('input', () => { renderIdeaSelectedChips(input); renderIdeaSuggestionBox(input); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeIdeaSuggestionBoxes();
+      if (e.key === 'Enter') {
+        const listName = IDEA_FIELD_TO_LIST[input.id];
+        if (listName && ideaIsMultiField(listName)) {
+          e.preventDefault();
+          const parts = String(input.value || '').split(',');
+          const last = cleanIdeaOptionValue(parts.pop() || '');
+          const existing = dedupeIdeaOptions(parts);
+          if (last) setIdeaInputValues(input, [...existing, last]);
+        }
+      }
     });
   });
-  document.addEventListener('click', (e) => {
-    const item = e.target?.closest?.('.idea-suggestion-item');
-    if (item) {
-      const box = item.closest('.idea-suggestion-box');
-      const input = box ? $('#' + box.dataset.forInput) : null;
-      if (input) {
-        input.value = item.dataset.value || item.textContent || '';
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        closeIdeaSuggestionBoxes();
-        input.focus();
+  if (!document.body.dataset.ideaAutocompleteGlobalReady) {
+    document.body.dataset.ideaAutocompleteGlobalReady = '1';
+    document.addEventListener('click', (e) => {
+      const remove = e.target?.closest?.('.idea-chip-remove');
+      if (remove) {
+        e.preventDefault();
+        const input = $('#' + remove.dataset.input);
+        if (input) {
+          const removeKey = String(remove.dataset.value || '').toLowerCase();
+          setIdeaInputValues(input, ideaInputValues(input).filter(v => v.toLowerCase() !== removeKey));
+          closeIdeaSuggestionBoxes(input);
+          renderIdeaSuggestionBox(input);
+        }
+        return;
       }
-      return;
-    }
-    if (!e.target?.closest?.('.idea-combo-wrap')) closeIdeaSuggestionBoxes();
-  }, { capture: true });
+      const item = e.target?.closest?.('.idea-suggestion-item');
+      if (item) {
+        const box = item.closest('.idea-suggestion-box');
+        const input = box ? $('#' + box.dataset.forInput) : null;
+        if (input) {
+          const value = item.dataset.value || item.textContent || '';
+          const listName = IDEA_FIELD_TO_LIST[input.id];
+          if (listName && ideaIsMultiField(listName)) {
+            const current = ideaInputValues(input);
+            const key = String(value).toLowerCase();
+            if (!current.some(v => v.toLowerCase() === key)) setIdeaInputValues(input, [...current, value]);
+            closeIdeaSuggestionBoxes(input);
+            renderIdeaSuggestionBox(input);
+            input.focus();
+          } else {
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            closeIdeaSuggestionBoxes();
+            input.focus();
+          }
+        }
+        return;
+      }
+      if (!e.target?.closest?.('.idea-combo-wrap')) closeIdeaSuggestionBoxes();
+    }, { capture: true });
+  }
 }
 
 function ideaOptionsForGender(listName) {
   const gender = $('#ideaGender')?.value || '';
-  let values = [...(IDEA_OPTIONS[listName] || [])];
+  let values = [...ideaBaseOptions(listName)];
   if (gender === 'female') {
     if (listName === 'relationship') values = values.filter(v => !['boyfriend','ex-boyfriend','secret boyfriend','uncle','nephew'].includes(v));
     if (listName === 'archetype') values = values.filter(v => !['warrior'].includes(v)).concat(['wife','mistress','mature beauty']).filter((v,i,a)=>a.indexOf(v)===i);
@@ -4725,7 +5194,7 @@ function ideaOptionsForGender(listName) {
     if (listName === 'relationship') values = values.filter(v => !['boyfriend','girlfriend','ex-boyfriend','ex-girlfriend','secret boyfriend','secret girlfriend','aunt','uncle','niece','nephew','mistress'].includes(v)).concat(['partner','ex-partner','secret partner']).filter((v,i,a)=>a.indexOf(v)===i);
     if (listName === 'archetype') values = values.filter(v => !['gyaru','rich girl','older woman','office lady','housewife','hostess'].includes(v)).concat(['androgynous beauty','mysterious outsider']).filter((v,i,a)=>a.indexOf(v)===i);
   }
-  return values.sort((a,b)=>String(a).localeCompare(String(b)));
+  return dedupeIdeaOptions(values).sort((a,b)=>String(a).localeCompare(String(b)));
 }
 
 function populateIdeaGeneratorOptions() {
@@ -4743,6 +5212,69 @@ function populateIdeaGeneratorOptions() {
   setupIdeaAutocompleteFields();
   const active = document.activeElement;
   if (active && IDEA_FIELD_TO_LIST[active.id]) renderIdeaSuggestionBox(active);
+}
+
+function populateIdeaSettingsFieldSelect() {
+  const select = $('#ideaSettingsField');
+  if (!select) return;
+  const prev = select.value || ideaSettingsEditorLoadedField || 'personality';
+  select.innerHTML = Object.entries(IDEA_FIELD_LABELS).map(([key, label]) => `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`).join('');
+  select.value = IDEA_OPTIONS[prev] ? prev : 'personality';
+}
+
+function loadIdeaSettingsField(field = $('#ideaSettingsField')?.value || ideaSettingsEditorLoadedField || 'personality') {
+  const select = $('#ideaSettingsField');
+  if (!select || !IDEA_OPTIONS[field]) return;
+  select.value = field;
+  ideaSettingsEditorLoadedField = field;
+  const custom = getIdeaGeneratorOptionsFromSettings(settings)[field];
+  const values = custom && custom.length ? custom : (IDEA_OPTIONS[field] || []);
+  const textarea = $('#ideaSettingsOptions');
+  if (textarea) textarea.value = formatIdeaOptionText(values);
+  const multi = $('#ideaSettingsMulti');
+  if (multi) multi.checked = ideaIsMultiField(field);
+}
+
+function switchIdeaSettingsField(nextField) {
+  const next = String(nextField || '').trim();
+  const current = ideaSettingsEditorLoadedField || $('#ideaSettingsField')?.value || 'personality';
+  if (!next || !IDEA_OPTIONS[next]) return;
+  if (current && IDEA_OPTIONS[current] && current !== next) {
+    applyIdeaSettingsFieldToSettings(current, false);
+    setStatus(`Auto-applied ${IDEA_FIELD_LABELS[current] || current} edits. Save Settings to keep them.`, 'ok');
+  }
+  loadIdeaSettingsField(next);
+}
+
+function applyIdeaSettingsField(showStatus = true) {
+  const field = ideaSettingsEditorLoadedField || $('#ideaSettingsField')?.value || '';
+  if (!field || !IDEA_OPTIONS[field]) return;
+  applyIdeaSettingsFieldToSettings(field, showStatus);
+  loadIdeaSettingsField(field);
+}
+
+function resetIdeaSettingsField() {
+  const field = ideaSettingsEditorLoadedField || $('#ideaSettingsField')?.value || '';
+  if (!field || !IDEA_OPTIONS[field]) return;
+  const map = getIdeaGeneratorOptionsFromSettings(settings);
+  delete map[field];
+  settings = { ...(settings || {}), ideaGeneratorOptions: map };
+  loadIdeaSettingsField(field);
+  populateIdeaGeneratorOptions();
+  setStatus(`Reset ${IDEA_FIELD_LABELS[field] || field} options to defaults. Save Settings to keep it.`, 'ok');
+}
+
+function resetAllIdeaSettings() {
+  if (!confirm('Reset all Idea Generator option lists to their built-in defaults?')) return;
+  settings = { ...(settings || {}), ideaGeneratorOptions: {}, ideaGeneratorMultiFields: [...DEFAULT_IDEA_MULTI_FIELDS] };
+  loadIdeaSettingsField($('#ideaSettingsField')?.value || ideaSettingsEditorLoadedField || 'personality');
+  populateIdeaGeneratorOptions();
+  setStatus('Reset all Idea Generator options to defaults. Save Settings to keep it.', 'ok');
+}
+
+function initIdeaSettingsEditor() {
+  populateIdeaSettingsFieldSelect();
+  loadIdeaSettingsField($('#ideaSettingsField')?.value || ideaSettingsEditorLoadedField || 'personality');
 }
 
 function openIdeaGeneratorModal() {
@@ -4767,7 +5299,10 @@ function clearIdeaGenerator() {
   closeIdeaSuggestionBoxes();
   ['ideaGender','ideaArchetype','ideaConflict','ideaSetting','ideaTone','ideaOccupation','ideaRelationship','ideaStatus','ideaPersonality','ideaSubjectOf','ideaEngagesIn','ideaSexualEngagesIn','ideaCustomInstructions'].forEach(id => {
     const el = $('#' + id);
-    if (el) el.value = '';
+    if (el) {
+      el.value = '';
+      if (IDEA_FIELD_TO_LIST[id]) renderIdeaSelectedChips(el);
+    }
   });
 }
 
@@ -4882,7 +5417,87 @@ async function generateIdeaIntoMainConcept() {
   }
 }
 
-async function generateCard() {
+function openGenerationOptionsModal() {
+  if (isInterfaceLocked()) return;
+  const modal = $('#generationOptionsModal');
+  if (!modal) { generateCard({}); return; }
+  const runQa = $('#generationRunQa');
+  if (runQa) runQa.checked = !!template?.qa?.enabled;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  setTimeout(() => $('#generationTemporaryNotes')?.focus(), 40);
+}
+
+function closeGenerationOptionsModal() {
+  const modal = $('#generationOptionsModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function collectGenerationRunOptions() {
+  const tempNotes = ($('#generationTemporaryNotes')?.value || '').trim();
+  const customQaText = ($('#generationCustomQa')?.value || '').trim();
+  const customQaQuestions = customQaText.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const includeTempNotes = $('#generationIncludeTemporaryNotes') ? $('#generationIncludeTemporaryNotes').checked : true;
+  return {
+    runQa: $('#generationRunQa') ? $('#generationRunQa').checked : !!template?.qa?.enabled,
+    temporaryNotes: includeTempNotes ? tempNotes : '',
+    customQaQuestions,
+  };
+}
+
+async function startGenerationFromModal() {
+  const options = collectGenerationRunOptions();
+  if (options.customQaQuestions.length) options.runQa = true;
+  closeGenerationOptionsModal();
+  await generateCard(options);
+}
+
+function applyGenerationOptionsToConcept(concept, options={}) {
+  const parts = [String(concept || '').trim()].filter(Boolean);
+  const notes = String(options.temporaryNotes || '').trim();
+  if (notes) {
+    parts.push(['TEMPORARY GENERATION NOTES FOR THIS CARD ONLY — use these as one-off direction. Do not create a separate section for them unless the template already asks for it:', notes].join('\n'));
+  }
+  return parts.join('\n\n');
+}
+
+function buildGenerationQaTemplate(baseTemplate, options = {}) {
+  // Build a temporary Q&A template in the frontend so generate_qa_context can
+  // keep its original 3-argument bridge call. This avoids PyWebView/AppImage
+  // mismatch errors when a newly packed frontend is accidentally paired with
+  // an older backend signature.
+  let temp = {};
+  try {
+    temp = JSON.parse(JSON.stringify(baseTemplate || {}));
+  } catch (err) {
+    temp = { ...(baseTemplate || {}) };
+  }
+  const questions = Array.isArray(options.customQaQuestions)
+    ? options.customQaQuestions.map(q => String(q || '').trim()).filter(Boolean)
+    : [];
+  const qa = temp.qa || {};
+  if (options.runQa || questions.length) qa.enabled = true;
+  if (questions.length) {
+    const sections = Array.isArray(qa.sections) ? qa.sections.slice() : [];
+    sections.push({
+      id: 'temporary_card_qa',
+      title: 'Card-specific Q&A',
+      enabled: true,
+      collapsed: false,
+      questions: questions.map(q => ({ enabled: true, text: q })),
+    });
+    qa.sections = sections;
+  }
+  temp.qa = qa;
+  return temp;
+}
+
+async function generateCard(options = {}) {
+  options = { runQa: !!template?.qa?.enabled, temporaryNotes: '', customQaQuestions: [], ...(options || {}) };
+  if ((options.customQaQuestions || []).length) options.runQa = true;
   if (!handleUnbuiltBuilderWarning()) return;
   clearGenerationArtifacts();
   setStatus('Starting generation…', '');
@@ -4902,12 +5517,20 @@ async function generateCard() {
     updateAvailability();
     return;
   }
-  const conceptForModel = buildConceptForModel();
+  const conceptForModel = applyGenerationOptionsToConcept(buildConceptForModel(), options);
   try {
     if (settings.cardMode === 'split_cards') {
       setBusy('SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
       setStatus('Generating one card per main character. Each card will get its own Output/Q&A/Emotion/Image tab.', '');
-      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, settings, '');
+      let splitQaAnswers = '';
+      if (options.runQa || (options.customQaQuestions || []).length) {
+        setBusy('SPLIT-CARD GENERATION — running shared Q&A first…');
+        const splitQaRes = await window.pywebview.api.generate_qa_context(conceptForModel, buildGenerationQaTemplate(template, options), settings);
+        if (!splitQaRes.ok) throw new Error(splitQaRes.error || 'Split-card Q&A generation failed.');
+        splitQaAnswers = splitQaRes.qaAnswers || '';
+      }
+      setBusy('SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
+      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, settings, splitQaAnswers, !(options.runQa || (options.customQaQuestions || []).length));
       if (!res.ok) throw new Error(res.error || 'Split-card generation failed.');
       setCharacterOutputTabs(res.cards || []);
       currentBrowserDescription = '';
@@ -4920,12 +5543,12 @@ async function generateCard() {
     }
 
     let qaAnswers = '';
-    if (template?.qa?.enabled) {
+    if (options.runQa || (options.customQaQuestions || []).length) {
       setBusy('PRE-GENERATION Q&A — interviewing the character(s)…');
       setStatus(settings.streamAi ? 'Running Q&A interview pass with streaming enabled…' : 'Running Q&A interview pass before card generation…', '');
       const qaBoxStream = $('#qaAnswersText');
       if (qaBoxStream && settings.streamAi) qaBoxStream.value = '';
-      const qaRes = await window.pywebview.api.generate_qa_context(conceptForModel, template, settings);
+      const qaRes = await window.pywebview.api.generate_qa_context(conceptForModel, buildGenerationQaTemplate(template, options), settings);
       if (!qaRes.ok) throw new Error(qaRes.error || 'Q&A generation failed.');
       qaAnswers = qaRes.qaAnswers || '';
       lastQnaAnswers = qaAnswers;
@@ -5467,14 +6090,17 @@ function isImageLikeName(value) {
 
 async function setCardImageFromUrlForImport(url) {
   if (!url || !isImageLikeName(url)) return '';
-  if ($('#cardImagePath')) $('#cardImagePath').value = url;
-  setVisionImagePath(url);
+  const saved = await window.pywebview.api.save_image_from_url(url, 'card');
+  if (!saved.ok) throw new Error(saved.error || 'Could not import image URL.');
+  const localPath = saved.path || url;
+  if ($('#cardImagePath')) $('#cardImagePath').value = localPath;
+  setVisionImagePath(localPath);
   settings = collectSettings();
-  settings.cardImagePath = url;
-  settings.visionImagePath = url;
+  settings.cardImagePath = localPath;
+  settings.visionImagePath = localPath;
   await window.pywebview.api.save_settings(settings);
   updateImportedCardToolsHint();
-  return url;
+  return localPath;
 }
 
 async function runAnalyzeForImportedImage(imagePath, { toBuilders = false } = {}) {
@@ -5549,7 +6175,7 @@ async function runConceptImport(target) {
       if (res?.ok) {
         if (toBuilders) await applyCardToBuildersResult(res, url);
         else await applyCardToMainConceptResult(res, url);
-        if (url && isImageLikeName(url)) imageForAnalysis = url;
+        if (url && isImageLikeName(url)) imageForAnalysis = imageForAnalysis || ($('#cardImagePath')?.value || '').trim();
       }
     } else if (file) {
       const dataUrl = await fileToDataUrl(file);

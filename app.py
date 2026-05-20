@@ -43,9 +43,81 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 else:
     BUNDLE_ROOT = Path(__file__).resolve().parent
 
-# APP_DIR remains available for bundled read-only assets such as VERSION.
+# APP_DIR remains available for bundled read-only assets. In PyInstaller/AppImage
+# builds, resources may live either inside sys._MEIPASS/_internal or beside the
+# executable/AppDir root, so version lookup checks several safe read-only roots.
 APP_DIR = BUNDLE_ROOT
 BUNDLED_DATA_DIR = BUNDLE_ROOT / "data"
+
+
+def _candidate_version_files():
+    candidates = []
+
+    def add(path):
+        try:
+            p = Path(path).expanduser().resolve()
+        except Exception:
+            return
+        if p not in candidates:
+            candidates.append(p)
+
+    # Prefer the VERSION file bundled with frontend assets first. AppImage
+    # builds have been seen to keep stale loose root VERSION files in the
+    # AppDir, while the frontend folder is refreshed because index.html/app.js
+    # must be copied for every build. This keeps the displayed version tied to
+    # the shipped frontend bundle instead of an old AppImage root file.
+    add(APP_DIR / "frontend" / "VERSION")
+    add(BUNDLE_ROOT / "frontend" / "VERSION")
+
+    # Source checkout / bundled resource root fallback.
+    add(APP_DIR / "VERSION")
+    add(BUNDLE_ROOT / "VERSION")
+
+    # PyInstaller one-dir commonly has resources either in _internal or beside
+    # the executable. AppImage builders often copy VERSION to the AppDir root.
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        add(exe_dir / "VERSION")
+        add(exe_dir / "_internal" / "VERSION")
+        add(exe_dir.parent / "VERSION")
+    except Exception:
+        pass
+
+    # AppImage runtime root, when present.
+    appdir = os.environ.get("APPDIR")
+    if appdir:
+        add(Path(appdir) / "VERSION")
+        add(Path(appdir) / "usr" / "bin" / "VERSION")
+
+    # Working directory fallback for direct terminal runs and dev launchers.
+    try:
+        add(Path.cwd() / "VERSION")
+    except Exception:
+        pass
+
+    return candidates
+
+
+def _read_app_version():
+    for version_file in _candidate_version_files():
+        try:
+            if version_file.exists() and version_file.is_file():
+                value = version_file.read_text(encoding="utf-8", errors="replace").strip()
+                if value:
+                    return value
+        except Exception:
+            continue
+    return "unknown"
+
+
+def _app_version_file_path():
+    for version_file in _candidate_version_files():
+        try:
+            if version_file.exists() and version_file.is_file():
+                return str(version_file)
+        except Exception:
+            continue
+    return ""
 
 
 def _safe_mkdir(path):
@@ -443,6 +515,8 @@ DEFAULT_SETTINGS = {
     "allowedTags": "",
     "nsfwBrowserMode": "show",
     "recentModels": [],
+    "ideaGeneratorOptions": {},
+    "ideaGeneratorMultiFields": ["personality", "subjectOf", "engagesIn", "sexualEngagesIn"],
     "browserTagMerges": {},
     "browserVirtualFolders": [],
     "browserVirtualFolderAssignments": {},
@@ -951,6 +1025,18 @@ class Api:
             self._store_workspace_asset(conn, project_key, "workspace_payload", "json", data_text=json.dumps(workspace, ensure_ascii=False), metadata={"kind":"workspace"})
             if image_path:
                 mime, blob, filename = self._read_file_asset_blob(image_path)
+                if not blob:
+                    # Selected generated-image paths can be cleaned after save, while the
+                    # workspace still has the generated image as base64 dataUrl. Store that
+                    # base64 as the selected card image so saved-card exports can restore it.
+                    for candidate in self._workspace_card_image_candidates(workspace, image_path):
+                        data_url = self._candidate_image_data_url_from_value(candidate)
+                        if not data_url:
+                            continue
+                        cmime, cblob = self._asset_data_url_to_blob(data_url)
+                        if cblob:
+                            mime, blob, filename = cmime or "image/png", cblob, "selected_card_image" + (self._extension_from_mime(cmime or "image/png", "image") or ".png")
+                            break
                 if blob:
                     self._store_workspace_asset(conn, project_key, "selected_card_image", "image", filename=filename, mime_type=mime, source_path=image_path, data_blob=blob, metadata={"role":"selected_card_image"})
             def store_image_list(prefix, images):
@@ -1581,6 +1667,32 @@ class Api:
         settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
         settings["sdModel"] = str(settings.get("sdModel") or "").strip()
         settings["streamAi"] = bool(settings.get("streamAi"))
+
+        idea_fields = {"archetype", "conflict", "setting", "tone", "occupation", "relationship", "status", "personality", "subjectOf", "engagesIn", "sexualEngagesIn"}
+        raw_idea_options = settings.get("ideaGeneratorOptions") if isinstance(settings.get("ideaGeneratorOptions"), dict) else {}
+        clean_idea_options = {}
+        for field, values in raw_idea_options.items():
+            if field not in idea_fields or not isinstance(values, list):
+                continue
+            cleaned_values = []
+            seen_values = set()
+            for value in values:
+                text = re.sub(r"\s+", " ", str(value or "").strip())[:120]
+                key = text.casefold()
+                if text and key not in seen_values:
+                    seen_values.add(key)
+                    cleaned_values.append(text)
+            if cleaned_values:
+                clean_idea_options[field] = cleaned_values[:500]
+        settings["ideaGeneratorOptions"] = clean_idea_options
+        raw_multi = settings.get("ideaGeneratorMultiFields") if isinstance(settings.get("ideaGeneratorMultiFields"), list) else DEFAULT_SETTINGS.get("ideaGeneratorMultiFields", [])
+        clean_multi = []
+        for field in raw_multi:
+            field = str(field or "").strip()
+            if field in idea_fields and field not in clean_multi:
+                clean_multi.append(field)
+        settings["ideaGeneratorMultiFields"] = clean_multi or list(DEFAULT_SETTINGS.get("ideaGeneratorMultiFields", []))
+
         merges = settings.get("browserTagMerges") if isinstance(settings.get("browserTagMerges"), dict) else {}
         clean_merges = {}
         for raw_from, raw_to in merges.items():
@@ -1742,13 +1854,7 @@ class Api:
         return {"settings": self.settings, "template": self.template, "styles": FIRST_MESSAGE_STYLES, "emotions": EMOTION_OPTIONS, "templates": self._list_prompt_templates(), "activeTemplateName": self.settings.get("activeTemplateName", "Default"), "paths": self.get_data_locations(), "version": self.get_app_version()}
 
     def get_app_version(self):
-        try:
-            version_file = APP_DIR / "VERSION"
-            if version_file.exists():
-                return version_file.read_text(encoding="utf-8").strip() or "unknown"
-        except Exception:
-            pass
-        return "1.0.2"
+        return _read_app_version()
 
     def get_data_locations(self):
         return {
@@ -1759,6 +1865,7 @@ class Api:
             "settingsFile": str(SETTINGS_FILE),
             "libraryDbFile": str(LIBRARY_DB_FILE),
             "dataDirConfigFile": str(_data_dir_config_file()),
+            "versionFile": _app_version_file_path(),
         }
 
     def _network_timeout(self, settings=None, fallback=300):
@@ -2015,7 +2122,7 @@ class Api:
             return {"ok": False, "error": f"AI preset generation failed: {e}"}
 
     def ai_transfer_to_builders(self, main_concept, character_description, field_catalog, settings=None):
-        """Use the full text model to convert Main Concept + Character Description into builder fields."""
+        """Use the full text model to convert Main Concept + Vision into builder fields."""
         try:
             merged = self._normalise_settings({**self.settings, **(settings or {})})
             validation = self._validate_text_api_settings(merged)
@@ -2056,7 +2163,7 @@ class Api:
                 "For text fields, write short direct values suitable for a form field.",
                 "Do not invent wildly unrelated facts; infer sensible details only when helpful.",
                 "Return strict JSON with this shape: {\"fields\": {\"fieldId\": \"value\"}, \"characters\": [{\"name\": \"\", \"role\": \"main\", \"fields\": {\"fieldId\": \"value\"}}], \"cardMode\": \"single|multi\", \"multiCharacterCount\": \"\", \"sideCharacterNotes\": \"\", \"notes\": \"\"}.",
-                "Builder fields filled by this response will take priority over Main Concept / Character Description during generation.",
+                "Builder fields filled by this response will take priority over Main Concept / Vision during generation.",
                 "AVAILABLE BUILDER FIELDS JSON:",
                 json.dumps(compact_fields, ensure_ascii=False, separators=(",", ":")),
                 "MAIN CONCEPT:",
@@ -2202,9 +2309,22 @@ class Api:
                 "sexualEngagesIn": "Engages In (Sexual)",
                 "customInstructions": "Custom Instructions",
             }
+            def _format_idea_value(value):
+                if isinstance(value, (list, tuple, set)):
+                    items = []
+                    seen_items = set()
+                    for item in value:
+                        text = re.sub(r"\s+", " ", str(item or "").strip())
+                        key = text.casefold()
+                        if text and key not in seen_items:
+                            seen_items.add(key)
+                            items.append(text)
+                    return ", ".join(items)
+                return re.sub(r"\s+", " ", str(value or "").strip())
+
             chosen = []
             for key, label in labels.items():
-                value = str(idea_options.get(key) or "").strip()
+                value = _format_idea_value(idea_options.get(key))
                 if value:
                     chosen.append(f"- {label}: {value}")
             if not chosen:
@@ -2635,7 +2755,7 @@ class Api:
                     endpoints = [b + "/models?detailed=true", b + "/models"]
             seen = set()
             endpoints = [u for u in endpoints if not (u in seen or seen.add(u))]
-            headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0 CharacterCardForge/1.0.2"}
+            headers = {"Accept": "application/json", "User-Agent": f"Mozilla/5.0 CharacterCardForge/{self.get_app_version()}"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
                 headers["x-api-key"] = api_key
@@ -3849,26 +3969,59 @@ class Api:
             raise RuntimeError(f"Q&A is enabled but the AI skipped required question(s): {missing_labels}. Try again or simplify the Q&A list.")
         return answers.strip()
 
-    def generate_qa_context(self, concept, template, settings):
+    def generate_qa_context(self, concept, template, settings, *extra_args, extra_questions=None, force_enabled=None):
+        # Keep this bridge method tolerant of older/newer frontend calls.
+        # PyWebView passes JS arguments positionally, so adding modal-specific
+        # options directly to the method signature can break if a stale frontend
+        # or backend is mixed during packaging.
+        if extra_args:
+            if len(extra_args) >= 1:
+                extra_questions = extra_args[0]
+            if len(extra_args) >= 2:
+                force_enabled = extra_args[1]
         self._reset_cancel()
         if not concept or not concept.strip():
             return {"ok": False, "error": "Enter a character concept first."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
         self.save_settings(merged_settings)
         template = self._normalise_template(template)
+        # Save the real template only. Per-card custom Q&A questions are added to
+        # a temporary copy below so the Generate Card modal cannot accidentally
+        # pollute the saved Prompt Template Q&A list.
         self.save_template(template)
+        qa_template = json.loads(json.dumps(template))
+        cleaned_extra = []
+        if isinstance(extra_questions, str):
+            cleaned_extra = [q.strip() for q in re.split(r"\r?\n", extra_questions) if q.strip()]
+        elif isinstance(extra_questions, (list, tuple)):
+            cleaned_extra = [str(q or "").strip() for q in extra_questions if str(q or "").strip()]
+        if cleaned_extra:
+            qa = qa_template.setdefault("qa", {})
+            qa["enabled"] = True
+            sections = qa.setdefault("sections", [])
+            sections.append({
+                "id": "temporary_card_qa",
+                "title": "Card-specific Q&A",
+                "enabled": True,
+                "collapsed": False,
+                "questions": [{"enabled": True, "text": q} for q in cleaned_extra],
+            })
+            qa_template = self._normalise_template(qa_template)
+        elif force_enabled is not None:
+            qa_template.setdefault("qa", {})["enabled"] = bool(force_enabled)
+            qa_template = self._normalise_template(qa_template)
         settings_check = self._validate_text_api_settings(merged_settings)
         if not settings_check.get("ok"):
             return settings_check
         try:
             self._reset_backup_info()
             self._raise_if_cancelled()
-            answers = self._generate_template_qa(concept, template, merged_settings)
+            answers = self._generate_template_qa(concept, qa_template, merged_settings)
             self._raise_if_cancelled()
             info = self._get_backup_info()
             if info.get("used"):
                 info["phase"] = "qa_interview"
-            return {"ok": True, "qaAnswers": answers, "backupInfo": info}
+            return {"ok": True, "qaAnswers": answers, "backupInfo": info, "temporaryQuestionCount": len(cleaned_extra)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -3945,7 +4098,7 @@ class Api:
             pass
         return fallback or "Character"
 
-    def generate_split_cards(self, concept, template, settings, qa_answers=""):
+    def generate_split_cards(self, concept, template, settings, qa_answers="", disable_template_qa=False):
         self._reset_cancel()
         if not concept or not concept.strip():
             return {"ok": False, "error": "Enter a character concept first."}
@@ -3966,7 +4119,7 @@ class Api:
                 self._raise_if_cancelled()
                 per_settings = {**merged_settings, "cardMode": "split_cards", "_streamTarget": ""}
                 per_qa = (qa_answers or "").strip()
-                if template.get("qa", {}).get("enabled") and not per_qa:
+                if template.get("qa", {}).get("enabled") and not per_qa and not disable_template_qa:
                     q_concept = self._split_card_focus_concept(concept, focus, names)
                     per_qa = self._generate_template_qa(q_concept, template, per_settings)
                 focus_concept = self._split_card_focus_concept(concept, focus, names, per_qa)
@@ -5152,9 +5305,29 @@ class Api:
             "conceptAttachments": project.get("conceptAttachments") or workspace.get("conceptAttachments") or [],
             "message": "Loaded full Character Card Forge project content. Global Settings were kept unchanged.",
         }
+        # If an older saved project kept a generated-image URL as cardImagePath,
+        # materialize it on load so the editor/exporter shows and uses a stable
+        # local PNG/JPG/WebP path instead of a remote URL.
+        raw_image_path = str(loaded.get("imagePath") or "").strip()
+        if raw_image_path:
+            local_image_path = self._ensure_local_card_image_path(raw_image_path, "card", "load_project_payload")
+            if local_image_path:
+                loaded["imagePath"] = local_image_path
+                if isinstance(loaded.get("settings"), dict):
+                    loaded["settings"]["cardImagePath"] = local_image_path
         project_path = project.get("projectPath") or ""
         if project_path:
             loaded = self._hydrate_workspace_from_db_assets(project_path, loaded)
+            raw_image_path = str(loaded.get("imagePath") or "").strip()
+            local_image_path = ""
+            if raw_image_path:
+                local_image_path = self._ensure_local_card_image_path(raw_image_path, "card", "hydrate_project_payload")
+            if not local_image_path and loaded.get("imageDataUrl"):
+                local_image_path = self._ensure_local_card_image_path(loaded.get("imageDataUrl"), "card", "hydrate_project_image_data")
+            if local_image_path:
+                loaded["imagePath"] = local_image_path
+                if isinstance(loaded.get("settings"), dict):
+                    loaded["settings"]["cardImagePath"] = local_image_path
         return loaded
 
     def _maybe_load_companion_project(self, path):
@@ -5531,7 +5704,7 @@ class Api:
     def _write_project_bundle(self, export_folder, safe_name, stamp, output, concept, template, settings, image_path, exported_path, frontend, export_format):
         payload = {
             "format": "character-card-forge-project",
-            "version": ((APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown"),
+            "version": self.get_app_version(),
             "saved_at": stamp,
             "project": {
                 "name": safe_name,
@@ -6019,6 +6192,20 @@ class Api:
         folder = self._character_export_dir(safe_name)
         settings = self._normalise_settings(workspace.get("settings") or self.settings)
         image_path = workspace.get("cardImagePath") or workspace.get("imagePath") or settings.get("cardImagePath") or ""
+        original_image_path = str(image_path or "").strip()
+        local_image_path = self._ensure_local_card_image_path(original_image_path, "card", "save_character_workspace") if original_image_path else ""
+        if not local_image_path:
+            local_image_path = self._resolve_workspace_card_image_path(workspace, original_image_path, "save_character_workspace_generated_base64")
+        if local_image_path:
+            image_path = local_image_path
+            settings["cardImagePath"] = local_image_path
+            workspace["cardImagePath"] = local_image_path
+            workspace["imagePath"] = local_image_path
+            tabs = workspace.get("characterTabs")
+            if isinstance(tabs, list):
+                for tab in tabs:
+                    if isinstance(tab, dict) and (not tab.get("cardImagePath") or str(tab.get("cardImagePath") or "").strip() == original_image_path):
+                        tab["cardImagePath"] = local_image_path
         template = workspace.get("template") or self.template
         concept = workspace.get("concept") or ""
         latest_project = folder / "latest_ccf_project.json"
@@ -6067,7 +6254,7 @@ class Api:
         virtual_folder_id = str(workspace.get("virtualFolderId") or previous_project.get("virtualFolderId") or "").strip()
         project = {
             "format": "character-card-forge-project",
-            "version": ((APP_DIR / "VERSION").read_text(encoding="utf-8").strip() if (APP_DIR / "VERSION").exists() else "unknown"),
+            "version": self.get_app_version(),
             "saved_at": stamp,
             "project": {
                 "name": safe_name,
@@ -6227,7 +6414,7 @@ class Api:
             loaded.get("output") or "",
             "front_porch",
             export_format or "chara_v2_png",
-            loaded.get("imagePath") or "",
+            loaded.get("imagePath") or loaded.get("imageDataUrl") or "",
             loaded.get("concept") or "",
             loaded.get("template") or self.template,
             loaded.get("settings") or self.settings,
@@ -6391,11 +6578,13 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def analyze_vision_image(self, image_path, settings=None):
+    def analyze_vision_image(self, image_path, settings=None, mode="character"):
         self._reset_cancel()
         self._raise_if_cancelled()
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
         self.save_settings(merged_settings)
+        mode = str(mode or "character").strip().lower().replace("-", "_")
+        full_card_mode = mode in {"card", "full_card", "concept", "main_concept", "scene"}
         image_path = (image_path or merged_settings.get("visionImagePath") or "").strip()
         if not image_path:
             return {"ok": False, "error": "Select an image first."}
@@ -6422,7 +6611,7 @@ class Api:
             base_image_payload = {"mime": mime, "b64": b64, "bytes": len(raw), "label": "original", "optimized": False}
         except Exception as e:
             return {"ok": False, "error": f"Could not read image: {e}"}
-        prompt = (
+        character_prompt = (
             "Describe the visible fictional character for an AI roleplay character card. "
             "Focus ONLY on character visual design: physical appearance, body shape, approximate breast/chest size if visible, face, hair, eyes, skin tone, visible distinguishing features, clothing, accessories, and fashion style. "
             "Do NOT include age/age appearance, expression, emotion, pose, posture, camera angle, setting, scene context, background, lighting, story context, pose symbolism, personality, or identity speculation. "
@@ -6432,7 +6621,30 @@ class Api:
             "Output clean bullet points under the heading 'Visual Description'."
         )
 
-        sfw_retry_prompt = (
+        full_card_prompt = (
+            "Analyze the entire fictional character card/reference image, not only the character. "
+            "Use the whole image: character design, pose/action, expression, clothing, props, visible text if legible, background, location, mood, lighting, symbols, composition, and any implied story context. "
+            "Turn that into a playable Main Concept for an AI roleplay character card. "
+            "Infer useful creative details only when the image strongly suggests them; mark uncertain details as implied rather than factual. "
+            "Do not identify copyrighted characters, real people, artists, or source titles. Do not claim identity from the image. "
+            "Do not sexualize anyone who appears underage; if age is unclear, keep the concept adult-coded or non-explicit. "
+            "Return a concise concept block ready to paste into the Main Concept window with these headings:\n"
+            "Title Idea:\n"
+            "Core Character:\n"
+            "Visual Design:\n"
+            "Personality / Vibe:\n"
+            "Setting:\n"
+            "What Is Happening In The Card:\n"
+            "Relationship To {{user}}:\n"
+            "Core Conflict / Hook:\n"
+            "Scenario Starting Point:\n"
+            "Important Details To Preserve:\n"
+            "Keep it specific, vivid, and generator-friendly."
+        )
+
+        prompt = full_card_prompt if full_card_mode else character_prompt
+
+        character_sfw_retry_prompt = (
             "The previous attempt may have refused because the reference image contained nudity or sexual context. "
             "For this retry, create a SAFE-FOR-WORK character visual-design description only. "
             "Describe ONLY the character's safe visual design: face, hair, eyes, skin tone, body type/silhouette, approximate bust/chest size in neutral non-explicit wording, distinguishing features, clothing, accessories, and fashion style. "
@@ -6443,6 +6655,17 @@ class Api:
             "If multiple characters are visible, give a separate concise SFW subsection for each visible character. "
             "Output clean bullet points under the heading 'Visual Description'."
         )
+
+        full_card_sfw_retry_prompt = (
+            "The previous attempt may have refused because the reference image contained nudity or sexual context. "
+            "For this retry, analyze the entire image as a SAFE-FOR-WORK fictional character-card concept only. "
+            "Use neutral wording for body/clothing, omit explicit anatomy and sexual acts, and transform any explicit context into non-explicit story/relationship tension. "
+            "Consider the character, background, setting, props, mood, visible text if legible, and implied scene. "
+            "Do not identify copyrighted characters, real people, artists, or source titles. Do not sexualize anyone who appears underage; if age is unclear, keep the concept adult-coded or non-explicit. "
+            "Return a concise Main Concept block with these headings: Title Idea, Core Character, Visual Design, Personality / Vibe, Setting, What Is Happening In The Card, Relationship To {{user}}, Core Conflict / Hook, Scenario Starting Point, Important Details To Preserve."
+        )
+
+        sfw_retry_prompt = full_card_sfw_retry_prompt if full_card_mode else character_sfw_retry_prompt
 
         def is_vision_refusal(text):
             lowered = (text or "").lower()
@@ -6460,7 +6683,7 @@ class Api:
         empty_retry_prompt = (
             prompt
             + "\n\nIMPORTANT: The previous vision response was empty. Do not return an empty response. "
-            + "Return a concise safe visual character-design description only, with 5-12 bullet points under 'Visual Description'. "
+            + ("Return a concise safe Main Concept block using the requested headings. " if full_card_mode else "Return a concise safe visual character-design description only, with 5-12 bullet points under 'Visual Description'. ")
             + "If any detail is uncertain, omit it rather than refusing or outputting blank text."
         )
 
@@ -6532,14 +6755,14 @@ class Api:
             payload = {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "You are a precise visual description assistant for fictional AI character card creation. When asked for SFW output, safely transform visual references into neutral, non-explicit character-design descriptions."},
+                    {"role": "system", "content": "You are a precise visual analysis assistant for fictional AI character card creation. For character mode, describe only visual character design. For full-card mode, convert the whole image into a concise playable Main Concept. When asked for SFW output, safely transform visual references into neutral, non-explicit character-card descriptions."},
                     {"role": "user", "content": [
                         {"type": "text", "text": prompt_text},
                         {"type": "image_url", "image_url": {"url": f"data:{image_payload['mime']};base64,{image_payload['b64']}"}}
                     ]}
                 ],
                 "temperature": 0.2,
-                "max_tokens": 1800,
+                "max_tokens": 2600 if full_card_mode else 1800,
             }
             url = base + "/chat/completions"
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
@@ -6654,15 +6877,19 @@ class Api:
             return {"ok": False, "error": "The vision model still refused after the SFW retry. Try a less explicit crop/reference image or enter a manual visual description."}
 
         raw_description = description
-        description = clean_vision_description(description)
-        if description != raw_description:
-            self._log_event("vision_analyze_cleaned", {"removed_disallowed_context": True, "before": raw_description[:4000], "after": description[:4000]})
+        if not full_card_mode:
+            description = clean_vision_description(description)
+            if description != raw_description:
+                self._log_event("vision_analyze_cleaned", {"removed_disallowed_context": True, "before": raw_description[:4000], "after": description[:4000]})
         if is_empty_vision_result(description):
             self._log_event("vision_analyze_empty_after_cleanup", {"raw_description": raw_description[:4000]})
             return {"ok": False, "error": "Vision analysis produced no usable description after cleanup. Try a different vision model or enter the visual description manually."}
 
-        self._log_event("vision_analyze_response", {"retry_used": retry_used, "description": description})
-        return {"ok": True, "description": description, "imagePath": str(path), "sourceUrl": downloaded_from_url, "retryUsed": retry_used}
+        self._log_event("vision_analyze_response", {"retry_used": retry_used, "mode": "full_card" if full_card_mode else "character", "description": description})
+        result = {"ok": True, "description": description, "imagePath": str(path), "sourceUrl": downloaded_from_url, "retryUsed": retry_used, "mode": "full_card" if full_card_mode else "character"}
+        if full_card_mode:
+            result["concept"] = description
+        return result
 
 
     def _normalise_sd_prompt_items(self, text, *, max_items=90, max_chars=1200):
@@ -7546,8 +7773,12 @@ class Api:
         data = card_v2.get("data", {})
         image_filename = f"{safe}_{ms}.png"
         image_dest = chars_dir / image_filename
+        original_image_path = str(image_path or "").strip()
+        local_image_path = self._resolve_front_porch_export_image(original_image_path, project_path=project_path, reason="front_porch_export")
+        if not local_image_path:
+            return {"ok": False, "error": "The selected Front Porch card image could not be found, downloaded, or restored from saved base64/asset data, so export was stopped instead of creating a blank image. Try opening the saved card once, selecting/regenerating the image, then saving again. Check Debug Log for front_porch_image_resolution_failed.", "target": selected_target}
         try:
-            self._write_chara_png(image_dest, card_v2, image_path)
+            self._write_chara_png(image_dest, card_v2, local_image_path, require_image=True)
         except Exception as e:
             return {"ok": False, "error": f"Could not write Front Porch character card PNG: {e}"}
 
@@ -7648,7 +7879,7 @@ class Api:
             cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
             con.commit()
             con.close()
-            self._log_event("front_porch_export", {"name": name, "id": char_id, "target": selected_target, "db": str(db), "image": image_filename, "emotions": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)})
+            self._log_event("front_porch_export", {"name": name, "id": char_id, "target": selected_target, "db": str(db), "image": image_filename, "sourceImage": str(local_image_path or original_image_path or ""), "emotions": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)})
             return {"ok": True, "name": name, "characterId": char_id, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "cardImage": str(image_dest), "emotionImages": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)}
         except Exception as e:
             try:
@@ -7657,14 +7888,45 @@ class Api:
                 pass
             return {"ok": False, "error": f"Front Porch export failed: {e}. Database backup was created at: {backup_path}"}
 
-    def export_front_porch_from_project(self, project_path):
+    def export_front_porch_from_project(self, project_path, settings=None, target=None, *args):
+        """Export a saved project directly into Front Porch AI.
+
+        Keep this tolerant for PyWebView/AppImage version mixes. The frontend normally
+        saves the desired Front Porch target first and then calls this with only the
+        project path, but beta7 also accepts an optional target/settings payload so
+        future callers can choose Stable/Beta without relying on global settings.
+        """
+        if target is None and args:
+            target = args[0]
+        if isinstance(settings, str) and target is None:
+            target = settings
+            settings = None
         loaded = self.load_character_project(project_path)
         if not loaded.get("ok"):
             return loaded
-        # Current app settings win over the older settings saved inside the character workspace,
+        # Current app settings win over older settings saved inside the character workspace,
         # otherwise a saved project with a blank Front Porch folder can mask the value the user just entered.
-        settings = {**(loaded.get("settings") or {}), **self.settings}
-        return self.export_to_front_porch(loaded.get("output") or "", loaded.get("imagePath") or loaded.get("settings", {}).get("cardImagePath") or "", settings, project_path)
+        merged_settings = {**(loaded.get("settings") or {}), **self.settings}
+        if isinstance(settings, dict):
+            merged_settings = {**merged_settings, **settings}
+        if target:
+            selected_target = str(target or "stable").strip().lower()
+            if selected_target not in {"stable", "beta"}:
+                selected_target = "stable"
+            merged_settings["frontPorchExportTarget"] = selected_target
+            if selected_target == "beta":
+                merged_settings["frontPorchDataFolder"] = merged_settings.get("frontPorchBetaDataFolder") or merged_settings.get("frontPorchDataFolder") or ""
+            else:
+                merged_settings["frontPorchDataFolder"] = merged_settings.get("frontPorchStableDataFolder") or merged_settings.get("frontPorchDataFolder") or ""
+        selected_image = (
+            loaded.get("imagePath")
+            or loaded.get("imageDataUrl")
+            or (loaded.get("settings") or {}).get("cardImagePath")
+            or (loaded.get("settings") or {}).get("imageDataUrl")
+            or ""
+        )
+        export_image = self._resolve_front_porch_export_image(selected_image, project_path=project_path, loaded_project=loaded, reason="export_front_porch_from_project")
+        return self.export_to_front_porch(loaded.get("output") or "", export_image, merged_settings, project_path)
 
     def export_card(self, output, frontend=None, export_format=None, image_path=None, concept="", template=None, settings=None):
         if not output or not output.strip():
@@ -8209,11 +8471,588 @@ class Api:
             "sillytavern_chara_card_v2": card_v2,
         }
 
-    def _write_chara_png(self, path, payload, image_path=None):
+    def _candidate_image_data_url_from_value(self, value):
+        """Return an image data URL found inside a value, if one exists."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lower().startswith("data:image/") and ";base64," in text.lower():
+                return text
+            # Some saved JSON/workspace strings can contain a nested data URL.
+            m = re.search(r"data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=_\\s-]+", text, re.I)
+            return m.group(0) if m else ""
+        if isinstance(value, dict):
+            for key in ("dataUrl", "data_url", "imageDataUrl", "image_data_url", "url", "uri", "src", "image", "data"):
+                found = self._candidate_image_data_url_from_value(value.get(key))
+                if found:
+                    return found
+        return ""
+
+    def _save_raw_card_image_bytes(self, raw, mime="image/png", kind="card", label="embedded_card_image"):
+        """Persist decoded image bytes and return a local path, verifying with Pillow."""
+        if not raw:
+            return ""
+        try:
+            folder = VISION_IMAGES_DIR if str(kind).lower() == "vision" else CARD_IMAGES_DIR
+            suffix = self._extension_from_mime(mime or "image/png", "image") or self._embedded_image_suffix_from_mime(mime) or ".png"
+            safe_label = self._safe_slug(label or "embedded_card_image")[:48] or "embedded_card_image"
+            path = folder / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{safe_label}{suffix}"
+            path.write_bytes(raw)
+            try:
+                with Image.open(path) as img:
+                    img.verify()
+            except Exception:
+                path.unlink(missing_ok=True)
+                return ""
+            return str(path)
+        except Exception:
+            return ""
+
+    def _materialize_image_data_url(self, data_url, kind="card", reason="data_url"):
+        """Convert an image data URL into a local file path."""
+        try:
+            text = str(data_url or "").strip()
+            m = re.match(r"^data:(image/[a-z0-9.+-]+)(?:;charset=[^;,]+)?;base64,(.*)$", text, re.I | re.S)
+            if not m:
+                return ""
+            mime = (m.group(1) or "image/png").lower()
+            raw = base64.b64decode(re.sub(r"\s+", "", m.group(2) or ""), validate=False)
+            path = self._save_raw_card_image_bytes(raw, mime, kind, reason or "data_url_image")
+            if path:
+                self._log_event("card_image_data_url_materialized", {"reason": reason, "kind": kind, "path": path})
+            return path
+        except Exception as e:
+            self._log_event("card_image_data_url_materialize_exception", {"reason": reason, "kind": kind, "error": str(e)})
+            return ""
+
+    def _materialize_raw_base64_image(self, value, kind="card", reason="raw_base64"):
+        """Handle saved image fields that contain raw base64 without a data:image prefix."""
+        try:
+            text = str(value or "").strip()
+            if len(text) < 256:
+                return ""
+            # Avoid treating normal paths/URLs/JSON as base64.
+            if text.lower().startswith(("http://", "https://", "file://", "data:")):
+                return ""
+            if text.startswith("{") or text.startswith("["):
+                return ""
+            compact = re.sub(r"\s+", "", text)
+            if not re.match(r"^[A-Za-z0-9+/=_-]+$", compact):
+                return ""
+            # Accept URL-safe base64 too.
+            pad = "=" * (-len(compact) % 4)
+            candidates = [compact + pad]
+            if "-" in compact or "_" in compact:
+                candidates.append(compact.replace("-", "+").replace("_", "/") + pad)
+            for candidate in candidates:
+                try:
+                    raw = base64.b64decode(candidate, validate=False)
+                except Exception:
+                    continue
+                path = self._save_raw_card_image_bytes(raw, "image/png", kind, reason or "raw_base64_image")
+                if path:
+                    self._log_event("card_image_raw_base64_materialized", {"reason": reason, "kind": kind, "path": path})
+                    return path
+            return ""
+        except Exception as e:
+            self._log_event("card_image_raw_base64_materialize_exception", {"reason": reason, "kind": kind, "error": str(e)})
+            return ""
+
+    def _iter_image_data_urls_deep(self, value, limit=64):
+        """Yield embedded data:image/... base64 URLs from nested project/workspace data."""
+        seen = set()
+        count = 0
+        def walk(obj):
+            nonlocal count
+            if count >= limit:
+                return
+            if obj is None:
+                return
+            if isinstance(obj, str):
+                # A field may be exactly a data URL, or it may be a JSON/text blob containing one.
+                for m in re.finditer(r"data:image/[a-z0-9.+-]+(?:;charset=[^;,]+)?;base64,[A-Za-z0-9+/=_\s-]+", obj, re.I):
+                    data_url = m.group(0).strip()
+                    if data_url and data_url not in seen:
+                        seen.add(data_url)
+                        count += 1
+                        yield data_url
+                        if count >= limit:
+                            return
+                return
+            if isinstance(obj, dict):
+                # Prefer obvious image fields first so selected/primary images win over random attachments.
+                priority = [
+                    "imageDataUrl", "cardImageDataUrl", "dataUrl", "data_url", "image_data_url",
+                    "cardImagePath", "imagePath", "src", "url", "uri", "image", "data"
+                ]
+                yielded = set()
+                for key in priority:
+                    if key in obj:
+                        yielded.add(key)
+                        yield from walk(obj.get(key))
+                        if count >= limit:
+                            return
+                for key, child in obj.items():
+                    if key in yielded:
+                        continue
+                    yield from walk(child)
+                    if count >= limit:
+                        return
+                return
+            if isinstance(obj, (list, tuple)):
+                for child in obj:
+                    yield from walk(child)
+                    if count >= limit:
+                        return
+        yield from walk(value)
+
+    def _front_porch_project_image_from_assets(self, project_path, selected_path="", reason="front_porch_asset_image"):
+        """Restore the selected/main card image from the workspace asset DB using the real project path."""
+        try:
+            rows = self._load_workspace_assets_from_db(project_path)
+        except Exception as e:
+            self._log_event("front_porch_image_asset_lookup_failed", {"project": str(project_path), "error": str(e)})
+            rows = []
+        if not rows:
+            return ""
+        selected = str(selected_path or "").strip()
+        selected_name = Path(selected).name if selected and not selected.lower().startswith(("data:", "http://", "https://")) else ""
+
+        def row_matches_selected(row):
+            if not selected:
+                return False
+            source = str(row.get("source_path") or "").strip()
+            filename = str(row.get("filename") or "").strip()
+            if source and source == selected:
+                return True
+            if selected_name and (Path(source).name == selected_name or filename == selected_name):
+                return True
+            try:
+                meta = json.loads(row.get("metadata_json") or "{}")
+                for key in ("path", "source_path", "filename"):
+                    val = str(meta.get(key) or "").strip()
+                    if val == selected or (selected_name and Path(val).name == selected_name):
+                        return True
+            except Exception:
+                pass
+            return False
+
+        # Order matters: exact selected generated image, selected-card snapshot, then any usable generated/card image.
+        ordered = []
+        exact = [r for r in rows if row_matches_selected(r)]
+        selected_rows = [r for r in rows if (r.get("asset_key") == "selected_card_image" or (r.get("metadata_json") or "").find("selected_card_image") >= 0)]
+        image_rows = [r for r in rows if str(r.get("asset_type") or "").lower() in {"image", "generated_image", "tab_generated_image"}]
+        for group in (exact, selected_rows, image_rows):
+            for r in group:
+                if r not in ordered:
+                    ordered.append(r)
+
+        for row in ordered:
+            blob = row.get("data_blob")
+            if not blob:
+                continue
+            mime = row.get("mime_type") or "image/png"
+            label = f"{reason}_{row.get('asset_key') or 'asset'}"
+            path = self._save_raw_card_image_bytes(blob, mime, "card", label)
+            if path:
+                self._log_event("front_porch_image_asset_materialized", {
+                    "project": str(project_path),
+                    "selectedPath": selected,
+                    "assetKey": row.get("asset_key"),
+                    "assetType": row.get("asset_type"),
+                    "path": path,
+                })
+                return path
+        return ""
+
+    def _front_porch_project_image_from_json(self, project_path, selected_path="", reason="front_porch_project_json"):
+        """Restore a card image by directly scanning a saved project JSON for image paths/base64."""
+        try:
+            payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
+        except Exception as e:
+            self._log_event("front_porch_image_project_json_read_failed", {"project": str(project_path), "error": str(e)})
+            return ""
+        project = payload.get("project", payload) if isinstance(payload, dict) else {}
+        if not isinstance(project, dict):
+            return ""
+        workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+        settings = project.get("settings") if isinstance(project.get("settings"), dict) else {}
+        selected = str(selected_path or "").strip()
+
+        candidates = []
+        def add(v):
+            if v is None:
+                return
+            if isinstance(v, str):
+                vv = v.strip()
+                if vv and vv not in candidates:
+                    candidates.append(vv)
+            else:
+                data_url = self._candidate_image_data_url_from_value(v)
+                if data_url and data_url not in candidates:
+                    candidates.append(data_url)
+
+        # Direct selected path first, then explicit card-image fields.
+        add(selected)
+        for obj in (project, workspace, settings, workspace.get("settings") if isinstance(workspace.get("settings"), dict) else {}):
+            if not isinstance(obj, dict):
+                continue
+            for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+                add(obj.get(key))
+            # Legacy saved cards may have lost the generated-image temp file, but
+            # still have a latest/exported Chara Card PNG in the saved card folder.
+            # That PNG's visible pixels are a perfectly valid Front Porch main image
+            # source, and its metadata will be replaced during the new export.
+            for key in ("exportedPath", "cardPath", "cardPngPath", "latestCardPath", "latestCardPng", "exportedCardPath"):
+                add(obj.get(key))
+
+        # Prefer generated image entries matching the selected path/name.
+        selected_name = Path(selected).name if selected and not selected.lower().startswith(("data:", "http://", "https://")) else ""
+        def add_image_list(items):
+            if not isinstance(items, list):
+                return
+            exact = []
+            fallback = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_path = str(item.get("path") or item.get("source_path") or item.get("filename") or "").strip()
+                data_url = self._candidate_image_data_url_from_value(item)
+                if not data_url:
+                    continue
+                if selected and (item_path == selected or (selected_name and Path(item_path).name == selected_name)):
+                    exact.append(data_url)
+                else:
+                    fallback.append(data_url)
+            for v in exact + fallback:
+                add(v)
+        add_image_list(project.get("generatedImages") or workspace.get("generatedImages") or [])
+        tabs = project.get("characterTabs") or workspace.get("characterTabs") or []
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict):
+                    add(tab.get("cardImagePath"))
+                    add(tab.get("imagePath"))
+                    add(tab.get("imageDataUrl"))
+                    add(tab.get("cardImageDataUrl"))
+                    add_image_list(tab.get("generatedImages") or [])
+
+        for candidate in candidates:
+            local = self._ensure_local_card_image_path(candidate, "card", reason)
+            if local:
+                self._log_event("front_porch_image_project_json_materialized", {"project": str(project_path), "sourceKind": "candidate", "path": local})
+                return local
+
+        # Last resort: recursively scan the saved project for any embedded data:image URL.
+        for data_url in self._iter_image_data_urls_deep(project):
+            local = self._ensure_local_card_image_path(data_url, "card", reason + "_deep_scan")
+            if local:
+                self._log_event("front_porch_image_project_json_materialized", {"project": str(project_path), "sourceKind": "deep_data_url", "path": local})
+                return local
+        return ""
+
+    def _image_file_is_probably_blank_placeholder(self, path):
+        """Detect the built-in blank placeholder PNG so legacy fallbacks skip it."""
+        try:
+            p = Path(str(path or ""))
+            if not p.exists() or not p.is_file():
+                return True
+            with Image.open(p) as img:
+                sample = img.convert("RGBA")
+                sample.thumbnail((24, 24))
+                pixels = list(sample.getdata())
+            if not pixels:
+                return True
+            # The app's blank placeholder is a flat dark image.  Treat images with
+            # almost no colour variation as blank so an old *_latest_cardv2.png
+            # fallback does not silently re-export the placeholder.
+            channels = list(zip(*pixels))
+            max_delta = 0
+            for ch in channels[:3]:
+                max_delta = max(max_delta, max(ch) - min(ch))
+            alpha_delta = max(channels[3]) - min(channels[3]) if len(channels) > 3 else 0
+            return max_delta < 6 and alpha_delta < 6
+        except Exception:
+            return True
+
+    def _front_porch_existing_card_png_from_project(self, project_path, reason="front_porch_existing_card_png"):
+        """Use an existing saved/auto-exported card PNG as a legacy image fallback.
+
+        Older CCF saves may only remember the selected SD/generated image as a temp
+        path under generated_images/.  If that temp file was later cleaned, the raw
+        generated base64 may also be gone.  However, the saved card folder usually
+        still contains a *_latest_cardv2.png or timestamped *_cardv2.png that was
+        written while the image still existed.  Front Porch export can safely use
+        those visible pixels as the main image source, then write fresh metadata.
+        """
+        try:
+            project_path = Path(str(project_path or "")).expanduser()
+            if not project_path.exists():
+                return ""
+            folder = project_path.parent
+            candidates = []
+            def add_path(value):
+                if not value:
+                    return
+                try:
+                    raw = Path(str(value)).expanduser()
+                    if not raw.is_absolute():
+                        raw = (folder / raw).resolve()
+                    candidates.append(raw)
+                except Exception:
+                    pass
+
+            project = {}
+            try:
+                payload = json.loads(project_path.read_text(encoding="utf-8"))
+                project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            except Exception as e:
+                self._log_event("front_porch_existing_card_png_json_read_failed", {"project": str(project_path), "error": str(e)})
+                project = {}
+            if isinstance(project, dict):
+                workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+                settings = project.get("settings") if isinstance(project.get("settings"), dict) else {}
+                for obj in (project, workspace, settings, workspace.get("settings") if isinstance(workspace.get("settings"), dict) else {}):
+                    if not isinstance(obj, dict):
+                        continue
+                    for key in ("exportedPath", "cardPath", "cardPngPath", "latestCardPath", "latestCardPng", "exportedCardPath"):
+                        add_path(obj.get(key))
+                name = str(project.get("name") or workspace.get("name") or "").strip()
+                if name:
+                    add_path(folder / f"{self._safe_slug(name)}_latest_cardv2.png")
+
+            # Folder-level legacy fallbacks. Prefer latest_cardv2, then newest cardv2.
+            candidates.extend(sorted(folder.glob("*_latest_cardv2.png"), key=lambda x: x.stat().st_mtime, reverse=True))
+            candidates.extend(sorted(folder.glob("*_cardv2.png"), key=lambda x: x.stat().st_mtime, reverse=True))
+
+            seen = set()
+            for candidate in candidates:
+                try:
+                    candidate = Path(candidate)
+                    key = str(candidate.resolve())
+                except Exception:
+                    key = str(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not candidate.exists() or not candidate.is_file():
+                    continue
+                try:
+                    with Image.open(candidate) as img:
+                        img.verify()
+                except Exception:
+                    continue
+                if self._image_file_is_probably_blank_placeholder(candidate):
+                    self._log_event("front_porch_existing_card_png_skipped_blank", {"reason": reason, "project": str(project_path), "path": str(candidate)})
+                    continue
+                self._log_event("front_porch_existing_card_png_resolved", {"reason": reason, "project": str(project_path), "path": str(candidate)})
+                return str(candidate)
+            return ""
+        except Exception as e:
+            self._log_event("front_porch_existing_card_png_failed", {"reason": reason, "project": str(project_path or ""), "error": str(e)})
+            return ""
+
+    def _resolve_front_porch_export_image(self, image_path="", project_path=None, loaded_project=None, reason="front_porch_export"):
+        """Return a verified local image for Front Porch export, never the blank fallback."""
+        original = str(image_path or "").strip()
+        attempts = []
+        def try_candidate(candidate, label):
+            candidate = str(candidate or "").strip()
+            if not candidate:
+                return ""
+            local = self._ensure_local_card_image_path(candidate, "card", f"{reason}_{label}")
+            attempts.append({"label": label, "candidatePrefix": candidate[:120], "ok": bool(local), "local": local})
+            return local
+
+        local = try_candidate(original, "passed_image_path")
+        if local:
+            self._log_event("front_porch_image_resolved", {"reason": reason, "method": "passed_image_path", "path": local})
+            return local
+
+        if isinstance(loaded_project, dict):
+            for key in ("imagePath", "imageDataUrl"):
+                local = try_candidate(loaded_project.get(key), f"loaded_{key}")
+                if local:
+                    self._log_event("front_porch_image_resolved", {"reason": reason, "method": f"loaded_{key}", "path": local})
+                    return local
+            local = self._resolve_workspace_card_image_path(loaded_project, original, f"{reason}_loaded_workspace")
+            attempts.append({"label": "loaded_workspace_candidates", "ok": bool(local), "local": local})
+            if local:
+                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "loaded_workspace_candidates", "path": local})
+                return local
+
+        if project_path:
+            # Use the actual project_path supplied by the frontend, not the old embedded projectPath inside JSON.
+            local = self._front_porch_project_image_from_assets(project_path, original, f"{reason}_asset_db")
+            attempts.append({"label": "asset_db", "ok": bool(local), "local": local})
+            if local:
+                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "asset_db", "path": local})
+                return local
+            local = self._front_porch_project_image_from_json(project_path, original, f"{reason}_project_json")
+            attempts.append({"label": "project_json", "ok": bool(local), "local": local})
+            if local:
+                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "project_json", "path": local})
+                return local
+            local = self._front_porch_existing_card_png_from_project(project_path, f"{reason}_existing_card_png")
+            attempts.append({"label": "existing_card_png", "ok": bool(local), "local": local})
+            if local:
+                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "existing_card_png", "path": local})
+                return local
+
+        self._log_event("front_porch_image_resolution_failed", {"reason": reason, "imagePathPrefix": original[:200], "project": str(project_path or ""), "attempts": attempts})
+        return ""
+
+    def _workspace_card_image_candidates(self, workspace=None, selected_path=""):
+        """Yield likely selected-card image candidates, including generated-image base64.
+
+        Generated image files can be cleaned up, but the saved workspace/library DB may
+        still contain the generated image as a base64 dataUrl. This lets Front Porch
+        export recover the real image instead of writing the blank fallback PNG.
+        """
+        workspace = workspace or {}
+        selected = str(selected_path or "").strip()
+        selected_name = Path(selected).name if selected and not selected.lower().startswith("data:") else ""
+        seen = set()
+        def add(value):
+            if value is None:
+                return
+            if isinstance(value, str):
+                v = value.strip()
+                if v and v not in seen:
+                    seen.add(v)
+                    yield v
+            else:
+                data_url = self._candidate_image_data_url_from_value(value)
+                if data_url and data_url not in seen:
+                    seen.add(data_url)
+                    yield data_url
+        for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+            for v in add(workspace.get(key)):
+                yield v
+        settings = workspace.get("settings") if isinstance(workspace.get("settings"), dict) else {}
+        for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+            for v in add(settings.get(key)):
+                yield v
+        def image_list_candidates(items):
+            if not isinstance(items, list):
+                return
+            # First yield exact path/name matches, then other embedded data URLs as last-resort fallbacks.
+            exact = []
+            fallback = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                data_url = self._candidate_image_data_url_from_value(item)
+                if not data_url:
+                    continue
+                item_path = str(item.get("path") or item.get("source_path") or item.get("filename") or "").strip()
+                item_name = Path(item_path).name if item_path else ""
+                if selected and (item_path == selected or (selected_name and item_name == selected_name)):
+                    exact.append(data_url)
+                else:
+                    fallback.append(data_url)
+            for v in exact + fallback:
+                yield v
+        for v in image_list_candidates(workspace.get("generatedImages") or []):
+            for out in add(v):
+                yield out
+        tabs = workspace.get("characterTabs") if isinstance(workspace.get("characterTabs"), list) else []
+        for tab in tabs:
+            if not isinstance(tab, dict):
+                continue
+            tab_selected = str(tab.get("cardImagePath") or "").strip()
+            # Prefer images from the tab that selected the same path, but still allow fallback.
+            if selected and tab_selected and tab_selected != selected:
+                continue
+            for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+                for v in add(tab.get(key)):
+                    yield v
+            for v in image_list_candidates(tab.get("generatedImages") or []):
+                for out in add(v):
+                    yield out
+
+    def _resolve_workspace_card_image_path(self, workspace=None, selected_path="", reason="workspace_card_image"):
+        """Return a usable local image path using workspace/generated-image fallbacks."""
+        for candidate in self._workspace_card_image_candidates(workspace or {}, selected_path):
+            local = self._ensure_local_card_image_path(candidate, "card", reason)
+            if local:
+                return local
+        return ""
+
+    def _ensure_local_card_image_path(self, image_path, kind="card", reason=""):
+        """Return a local readable image path for card/export work.
+
+        Earlier builds allowed cardImagePath to remain as a remote generated-image
+        URL. That was fine for analysis, but Front Porch export and Chara PNG
+        writing need real local image bytes. Resolve URLs/data URLs here so every
+        export path gets an actual file instead of silently falling back to a blank
+        placeholder.
+        """
+        source = str(image_path or "").strip().strip('"').strip("'")
+        if not source:
+            return ""
+        try:
+            # file:// URLs from drag/drop or browser contexts.
+            if source.lower().startswith("file://"):
+                parsed = urllib.parse.urlparse(source)
+                file_path = Path(urllib.parse.unquote(parsed.path or "")).expanduser()
+                if file_path.exists() and file_path.is_file():
+                    return str(file_path)
+        except Exception:
+            pass
+        try:
+            p = Path(source).expanduser()
+            if p.exists() and p.is_file():
+                return str(p)
+        except Exception:
+            pass
+        try:
+            embedded_data_url = self._candidate_image_data_url_from_value(source)
+            if embedded_data_url:
+                local = self._materialize_image_data_url(embedded_data_url, kind, reason or "card_image_data_url")
+                if local:
+                    return local
+                self._log_event("card_image_data_url_materialize_failed", {"reason": reason, "kind": kind})
+                return ""
+        except Exception as e:
+            self._log_event("card_image_data_url_materialize_exception", {"reason": reason, "kind": kind, "error": str(e)})
+            return ""
+        try:
+            local = self._materialize_raw_base64_image(source, kind, reason or "card_image_raw_base64")
+            if local:
+                return local
+        except Exception:
+            pass
+        try:
+            if self._looks_like_url(source):
+                res = self.save_image_from_url(source, kind)
+                if res.get("ok") and res.get("path"):
+                    self._log_event("card_image_url_materialized", {"reason": reason, "kind": kind, "sourceUrl": source, "path": res.get("path")})
+                    return str(res.get("path"))
+                self._log_event("card_image_url_materialize_failed", {"reason": reason, "kind": kind, "sourceUrl": source, "error": res.get("error", "unknown")})
+                return ""
+        except Exception as e:
+            self._log_event("card_image_url_materialize_exception", {"reason": reason, "kind": kind, "sourceUrl": source, "error": str(e)})
+            return ""
+        # Try a path relative to the app/user data folders as a final fallback.
+        for base in (DATA_DIR, EXPORT_DIR, APP_DIR):
+            try:
+                candidate = (Path(base) / source).expanduser()
+                if candidate.exists() and candidate.is_file():
+                    return str(candidate)
+            except Exception:
+                pass
+        return ""
+
+    def _write_chara_png(self, path, payload, image_path=None, require_image=False):
         source = (image_path or "").strip()
-        if source and Path(source).exists():
-            img = Image.open(source).convert("RGBA")
+        local_source = self._ensure_local_card_image_path(source, "card", "write_chara_png") if source else ""
+        if local_source and Path(local_source).exists():
+            img = Image.open(local_source).convert("RGBA")
         else:
+            if require_image:
+                raise FileNotFoundError(f"No readable image source was available for card PNG export. Source was: {source[:200]}")
             img = Image.new("RGBA", (512, 768), (24, 24, 32, 255))
 
         # Character Card V2 PNG convention: write base64-encoded JSON into the

@@ -17,7 +17,7 @@
         <button class="nav" data-tab="browser">Character Browser</button>
         <button class="nav" data-tab="output">Output / Editor</button>
       </nav>
-      <div class="hint-card" id="tipBox"><div class="tip-head"><strong>Tip</strong><button id="nextTipBtn" type="button" class="tip-next" title="Show another tip">↻</button></div><p id="tipText">Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div><div id="appVersionText" class="app-version">Version 1.0.2</div>
+      <div class="hint-card" id="tipBox"><div class="tip-head"><strong>Tip</strong><button id="nextTipBtn" type="button" class="tip-next" title="Show another tip">↻</button></div><p id="tipText">Tabs keep the forge clean. Description/Personality template sections export into the visible PNG/JSON card fields.</p></div><div id="appVersionText" class="app-version">Version loading...</div>
     </aside>
 
     <main>
@@ -28,7 +28,7 @@
         <div class="page-head"><div><h2>Character Concept</h2><p>Build the concept, visual reference, and generation style from separate tabs.</p></div><div class="actions"><button id="newCardBtn" type="button">New Card</button><button id="transferToBuildersBtn" type="button">Transfer to Builders</button><button id="generateBtn" class="primary">Generate Card</button></div></div>
         <div class="subtabs" data-subtab-group="concept">
           <button class="subtab active" data-subtab="concept-main">Main Concept</button>
-          <button class="subtab" data-subtab="concept-description">Character Description</button>
+          <button class="subtab" data-subtab="concept-description">Vision</button>
           <button class="subtab" data-subtab="concept-builder">Character Builder</button>
           <button class="subtab" data-subtab="concept-personality-builder">Personality Builder</button>
           <button class="subtab" data-subtab="concept-scene-builder">Scene Builder</button>
@@ -48,7 +48,7 @@
               </div>
               <details class="card wide compact-details" open>
                 <summary>Transfer Concept to Builders</summary>
-                <p>Use the full text model to read Main Concept + Character Description and fill Character, Personality, and Scene Builder fields. Builder fields take priority during generation.</p>
+                <p>Use the full text model to read Main Concept + Vision and fill Character, Personality, and Scene Builder fields. Builder fields take priority during generation.</p>
                 <div class="actions"><button id="transferToBuildersMainBtn" type="button" class="primary">Transfer to Builders</button></div>
               </details>
             </aside>
@@ -56,10 +56,10 @@
         </div>
         <div id="concept-description" class="subtab-panel" data-subtab-panel="concept">
           <div class="card wide vision-card">
-            <div class="card-title"><div><h3>Vision Character Description</h3><p>Select a reference image and let a vision model describe only visible physical appearance, body, breast/chest size where visible, and clothing style.</p></div><div class="actions"><button id="selectVisionImageBtn" type="button">Select Vision Image</button><button id="visionImageUrlBtn" type="button">Image URL</button><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze Image</button><button id="analyzeVisionToBuildersBtn" type="button">Analyze → Builders</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
+            <div class="card-title"><div><h3>Vision</h3><p>Select a reference image. Analyze Image describes only the character; Analyze Full Card reads the whole card/scene and writes a Main Concept.</p></div><div class="actions vision-actions"><button id="selectVisionImageBtn" type="button">Select Vision Image</button><button id="visionImageUrlBtn" type="button">Image URL</button><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze Image</button><button id="analyzeFullCardBtn" type="button" disabled title="Select a vision image first.">Analyze Full Card → Concept</button><button id="analyzeVisionToBuildersBtn" type="button">Analyze → Builders</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
             <div id="visionDropZone" class="drop-zone">Drop a vision reference image here or click to browse</div>
             <label>Vision Image Path<input id="visionImagePath" placeholder="Optional reference image for vision analysis." /></label>
-            <textarea id="visionDescription" class="vision-description" placeholder="Vision description appears here. It will be sent to the text model as visual character reference when generating or revising."></textarea>
+            <textarea id="visionDescription" class="vision-description" placeholder="Character-only analysis appears here. Full-card analysis also writes a generated concept into Main Concept."></textarea>
           </div>
         </div>
 
@@ -273,15 +273,96 @@
       </section>
 
       <section id="settings" class="tab">
-        <div class="page-head"><div><h2>Settings</h2><p>Configure AI endpoints, Stable Diffusion, Front Porch export, data storage, tag restrictions, and browser privacy.</p></div><button id="saveSettingsBtn">Save Settings</button></div>
-        <div class="settings-grid">
-          <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label><label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label><label>Model<div class="model-picker"><input id="model" placeholder="model-name" autocomplete="off" /><button id="fetchModelTokensBtn" type="button">Fetch Tokens</button><div id="recentModelDropdown" class="model-suggestion-panel hidden"></div></div><small id="modelTokenHint" class="muted small">Recent models appear as you type. Nano-GPT token limits can be fetched automatically.</small></label><div id="modelTokenPanel" class="token-fetch-panel"><div id="modelTokenResultBox" class="small token-fetch-result muted">No token fetch run in this window yet.</div><div class="actions token-fetch-actions"><button id="showTokenDebugBtn" type="button">Show Token Debug Log</button><button id="copyTokenDebugBtn" type="button">Copy Token Debug</button></div></div><label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label><label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label><label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
-          <label>Vision API Base URL<input id="visionApiBaseUrl" placeholder="Leave blank to use text API base URL" /></label><label>Vision API Key<input id="visionApiKey" type="password" placeholder="Leave blank to use text API key" /></label><label>Vision Model<input id="visionModel" placeholder="vision-model-name" /></label>
-          <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label><label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="5000000" step="1024" value="200000" /></label><label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label><label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label><label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label><label class="toggle-inline setting-toggle"><input id="streamAi" type="checkbox" /> Stream AI text into output boxes</label>
-          <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label><label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div><label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label><label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label><label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label><label>Front Porch Export Target<select id="frontPorchExportTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Selected Target</button></div><label>Stable Front Porch Data Folder<input id="frontPorchStableDataFolder" placeholder="Stable Front Porch → Settings folder" /></label><div class="actions"><button id="scanFrontPorchStableBtn" type="button">Scan Stable</button></div><label>Beta Front Porch Data Folder<input id="frontPorchBetaDataFolder" placeholder="Beta Front Porch → Settings folder" /></label><div class="actions"><button id="scanFrontPorchBetaBtn" type="button">Scan Beta</button></div>
-          <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label><div class="actions"><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div>
-          <label class="toggle-inline setting-toggle"><input id="restrictTags" type="checkbox" /> Restrict AI tags to allowed list</label><label class="wide-setting">Allowed Tags<textarea id="allowedTags" placeholder="female, male, gyaru, romance, fantasy&#10;One tag per line or comma-separated."></textarea></label>
-          <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
+        <div class="page-head"><div><h2>Settings</h2><p>Settings are split into tidy tabs so the forge bench does not become a cursed junk drawer.</p></div><button id="saveSettingsBtn">Save Settings</button></div>
+        <div class="subtabs" data-subtab-group="settings">
+          <button class="subtab active" data-subtab="settings-ai">AI / Models</button>
+          <button class="subtab" data-subtab="settings-vision">Vision</button>
+          <button class="subtab" data-subtab="settings-sd">Stable Diffusion</button>
+          <button class="subtab" data-subtab="settings-frontporch">Front Porch</button>
+          <button class="subtab" data-subtab="settings-data-browser">Data / Browser</button>
+          <button class="subtab" data-subtab="settings-tags">Tags</button>
+          <button class="subtab" data-subtab="settings-ideas">Idea Generator</button>
+        </div>
+
+        <div id="settings-ai" class="subtab-panel active" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>AI / Models</h3><p>Main text endpoint, token limits, fallback model, and generation reliability settings.</p></div></div>
+            <div class="settings-grid">
+              <label>API Base URL<input id="apiBaseUrl" placeholder="https://nano-gpt.com/api/v1" /></label>
+              <label>API Key<input id="apiKey" type="password" placeholder="sk-..." /></label>
+              <label>Model<div class="model-picker"><input id="model" placeholder="model-name" autocomplete="off" /><button id="fetchModelTokensBtn" type="button">Fetch Tokens</button><div id="recentModelDropdown" class="model-suggestion-panel hidden"></div></div><small id="modelTokenHint" class="muted small">Recent models appear as you type. Nano-GPT token limits can be fetched automatically.</small></label>
+              <div id="modelTokenPanel" class="token-fetch-panel"><div id="modelTokenResultBox" class="small token-fetch-result muted">No token fetch run in this window yet.</div><div class="actions token-fetch-actions"><button id="showTokenDebugBtn" type="button">Show Token Debug Log</button><button id="copyTokenDebugBtn" type="button">Copy Token Debug</button></div></div>
+              <label>Backup Text Model<input id="backupTextModel" placeholder="Optional fallback model used only if the main text model refuses" /></label>
+              <label>Backup Text Mode<select id="backupTextMode"><option value="same">Same prompt mode as main generation</option><option value="lite">Lite Mode fallback after main refusal</option></select></label>
+              <label>AI Suggestion Model<input id="aiSuggestionModel" placeholder="Optional lightweight model for Builder AI buttons" /></label>
+              <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0.75" /></label>
+              <label>Max Input Tokens<input id="maxInputTokens" type="number" min="512" max="5000000" step="1024" value="200000" /></label>
+              <label>Max Output Tokens<input id="maxOutputTokens" type="number" min="256" max="1000000" step="1024" value="131000" /></label>
+              <label>API Timeout Seconds<input id="apiTimeoutSeconds" type="number" min="30" max="1800" step="30" value="300" title="Increase this if a VPN causes slow API requests." /></label>
+              <label>API Retry Count<input id="apiRetryCount" type="number" min="0" max="6" step="1" value="2" title="Retries only network/timeout failures, not HTTP/model errors." /></label>
+              <label class="toggle-inline setting-toggle"><input id="streamAi" type="checkbox" /> Stream AI text into output boxes</label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-vision" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>Vision</h3><p>Separate endpoint/model for image analysis. Leave blank to reuse the text API settings.</p></div></div>
+            <div class="settings-grid">
+              <label>Vision API Base URL<input id="visionApiBaseUrl" placeholder="Leave blank to use text API base URL" /></label>
+              <label>Vision API Key<input id="visionApiKey" type="password" placeholder="Leave blank to use text API key" /></label>
+              <label>Vision Model<input id="visionModel" placeholder="vision-model-name" /></label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-sd" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>Stable Diffusion</h3><p>SD Forge / Automatic1111 settings for portrait and emotion image generation.</p></div><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div></div>
+            <div class="settings-grid">
+              <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label>
+              <label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label>
+              <label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label>
+              <label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label>
+              <label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-frontporch" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>Front Porch Export</h3><p>Keep Stable and Beta Front Porch installs separate, then pick the target when exporting.</p></div><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Selected Target</button><button id="scanFrontPorchStableBtn" type="button">Scan Stable</button><button id="scanFrontPorchBetaBtn" type="button">Scan Beta</button></div></div>
+            <div class="settings-grid">
+              <label>Front Porch Export Target<select id="frontPorchExportTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
+              <label>Stable Front Porch Data Folder<input id="frontPorchStableDataFolder" placeholder="Stable Front Porch → Settings folder" /></label>
+              <label>Beta Front Porch Data Folder<input id="frontPorchBetaDataFolder" placeholder="Beta Front Porch → Settings folder" /></label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-data-browser" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>Data / Browser</h3><p>Where Character Card Forge keeps its local data and how saved cards display in the browser.</p></div><div class="actions"><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div></div>
+            <div class="settings-grid">
+              <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label>
+              <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-tags" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide"><div class="card-title"><div><h3>Tag Restrictions</h3><p>Optional guardrails for AI-generated tags.</p></div></div>
+            <div class="settings-grid">
+              <label class="toggle-inline setting-toggle"><input id="restrictTags" type="checkbox" /> Restrict AI tags to allowed list</label>
+              <label class="wide-setting">Allowed Tags<textarea id="allowedTags" placeholder="female, male, gyaru, romance, fantasy&#10;One tag per line or comma-separated."></textarea></label>
+            </div>
+          </div>
+        </div>
+
+        <div id="settings-ideas" class="subtab-panel" data-subtab-panel="settings">
+          <div class="card wide idea-settings-card"><div class="card-title"><div><h3>Idea Generator Options</h3><p>Edit the searchable dropdown options used by Idea Generator. One option per line. Removing a line removes it from that field.</p></div><div class="actions"><button id="ideaSettingsApplyBtn" type="button" class="primary">Apply Field</button><button id="ideaSettingsResetFieldBtn" type="button">Reset Field</button><button id="ideaSettingsResetAllBtn" type="button" class="danger-ghost">Reset All Idea Options</button></div></div>
+            <div class="settings-grid idea-settings-grid">
+              <label>Option Field<select id="ideaSettingsField"></select></label>
+              <label class="toggle-inline setting-toggle"><input id="ideaSettingsMulti" type="checkbox" /> Allow multiple selections for this field</label>
+              <label class="wide-setting">Options<textarea id="ideaSettingsOptions" placeholder="One option per line"></textarea></label>
+              <p class="wide-setting small muted">Default multi-select fields are Personality, Subject Of, Engages In, and Engages In (Sexual). Multi-select fields show picked values as chips and keep the dropdown searchable/scroll-limited.</p>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -371,7 +452,27 @@
         <div id="browserLetterStrip" class="browser-letter-strip hidden"></div>
         <div class="browser-layout">
           <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export. Virtual folders appear first in this grid.</p></div></div><div id="browserBreadcrumb" class="browser-breadcrumb"></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
-          <div class="card wide"><div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div><div class="selected-character-actions"><button id="browserAiDescriptionBtn" type="button">AI Description</button><button id="browserDeleteSelectedBtn" type="button" class="danger-ghost" title="Deletes this saved card folder from Character Card Forge only. Front Porch entries are not touched.">Delete Saved Card</button><button id="browserLoadBtn" type="button" class="primary">Load Workspace</button></div></div><div id="browserDescriptionSource" class="description-source-badge hidden"></div><textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea><div class="selected-tags-title">Tags</div><div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div></div>
+          <div class="card wide selected-character-card">
+            <div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div></div>
+            <div id="browserDescriptionSource" class="description-source-badge hidden"></div>
+            <div class="selected-character-icon-actions" aria-label="Selected character actions">
+              <button id="browserAiDescriptionBtn" type="button" class="icon-action-btn ai-icon-action" title="Generate AI description" aria-label="Generate AI description">
+                <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l1.45 4.05L17.5 8.5l-4.05 1.45L12 14l-1.45-4.05L6.5 8.5l4.05-1.45L12 3z"/><path d="M19 13l.95 2.55L22.5 16.5l-2.55.95L19 20l-.95-2.55-2.55-.95 2.55-.95L19 13z"/><path d="M5 14l.75 2 2 .75-2 .75-.75 2-.75-2-2-.75 2-.75L5 14z"/></svg>
+                <span class="sr-only">AI Description</span>
+              </button>
+              <button id="browserLoadBtn" type="button" class="icon-action-btn primary-icon-action" title="Load workspace" aria-label="Load workspace">
+                <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 6.5a2 2 0 0 1 2-2h4.3l2 2H18.5a2 2 0 0 1 2 2v1"/><path d="M3.5 9.5h17l-1.6 8.2a2.2 2.2 0 0 1-2.15 1.8H6.25a2.2 2.2 0 0 1-2.15-1.8L3.5 9.5z"/><path d="M12 12.5v4"/><path d="M9.8 14.8L12 17l2.2-2.2"/></svg>
+                <span class="sr-only">Load Workspace</span>
+              </button>
+              <button id="browserDeleteSelectedBtn" type="button" class="icon-action-btn danger-icon-action" title="Delete saved card from Character Card Forge only. Front Porch entries are not touched." aria-label="Delete saved card">
+                <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16"/><path d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M6.5 7l.85 12.1A2 2 0 0 0 9.35 21h5.3a2 2 0 0 0 2-1.9L17.5 7"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                <span class="sr-only">Delete Saved Card</span>
+              </button>
+            </div>
+            <textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea>
+            <div class="selected-tags-title">Tags</div>
+            <div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div>
+          </div>
         </div>
       </section>
 
@@ -407,6 +508,57 @@
   </div>
   <template id="sectionTemplate"><div class="section-card card" data-section-id=""><div class="section-top"><input class="section-enabled" type="checkbox" /><input class="section-title" /><button class="move-up">↑</button><button class="move-down">↓</button><button class="add-field">Add Field</button><button class="delete-section danger-ghost">Delete</button></div><textarea class="section-desc" placeholder="Section instructions / description"></textarea><div class="fields"></div></div></template>
   <template id="fieldTemplate"><div class="field-row" data-field-id=""><input class="field-enabled" type="checkbox" /><input class="field-label" placeholder="Field label" /><input class="field-hint" placeholder="Hint / rule" /><button class="field-up">↑</button><button class="field-down">↓</button><button class="delete-field danger-ghost">×</button></div></template>
+  <div id="generationOptionsModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card generation-options-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Generate Card Options</h3>
+          <p>Choose per-card generation extras. These do not change your saved template/settings.</p>
+        </div>
+        <button id="closeGenerationOptionsModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="generation-options-grid">
+        <label class="toggle-inline"><input id="generationRunQa" type="checkbox" /> Run pre-generation Q&A for this card</label>
+        <label class="toggle-inline"><input id="generationIncludeTemporaryNotes" type="checkbox" checked /> Include temporary notes below</label>
+      </div>
+      <label>Temporary Generation Notes<textarea id="generationTemporaryNotes" class="vision-description small-textarea" placeholder="Optional one-off direction for this card only. Example: lean into her IT background and make the scenario start around a repaired old PC."></textarea></label>
+      <label>Custom Q&A Questions for This Card Only<textarea id="generationCustomQa" class="vision-description" placeholder="One question per line. Example:
+What was your first computer?
+What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
+      <p class="small muted">Custom Q&A is added only for this generation and is not saved to the Prompt Template Q&A list.</p>
+      <div class="actions modal-actions"><button id="cancelGenerationOptionsBtn" type="button" class="danger-ghost">Cancel</button><button id="startGenerationWithOptionsBtn" type="button" class="primary">Generate Card</button></div>
+    </div>
+  </div>
+
+  <div id="frontPorchExportTargetModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card front-porch-export-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Export to Front Porch AI</h3>
+          <p id="frontPorchExportTargetSummary">Choose where this export should be sent.</p>
+        </div>
+        <button id="closeFrontPorchExportTargetModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="front-porch-export-options">
+        <button id="frontPorchExportStableBtn" type="button" class="primary">Export to Front Porch AI Stable</button>
+        <button id="frontPorchExportBetaBtn" type="button" class="primary">Export to Front Porch AI Beta</button>
+        <button id="frontPorchExportBothBtn" type="button" class="primary">Export to Both</button>
+      </div>
+      <p class="small muted">A timestamped database backup is created for each target. Close Front Porch before exporting if possible.</p>
+      <div class="actions modal-actions"><button id="cancelFrontPorchExportTargetBtn" type="button" class="danger-ghost">Cancel</button></div>
+    </div>
+  </div>
+
+  <div id="browserLoadingModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card browser-loading-modal-card" role="status" aria-live="polite">
+      <div class="browser-loading-spinner" aria-hidden="true"></div>
+      <div>
+        <h3 id="browserLoadingTitle">Loading Character Browser…</h3>
+        <p id="browserLoadingText">Scanning saved cards and refreshing the browser cache. Large libraries can take a moment.</p>
+      </div>
+    </div>
+  </div>
+
   <div id="ideaGeneratorModal" class="modal-backdrop hidden">
     <div class="modal-card idea-generator-modal-card">
       <div class="modal-head">
@@ -460,7 +612,7 @@
       <label>Card / Image URL or selected file<input id="conceptImportUrl" placeholder="https://example.com/character-card.png or selected file name" /></label>
       <div class="actions"><button id="clearConceptImportSourceBtn" type="button" class="danger-ghost">Clear</button></div>
       <label class="toggle-inline"><input id="conceptImportAnalyzeBefore" type="checkbox" /> Analyze before import</label>
-      <p class="small muted">Analyze before import runs the Vision model using the imported image/card image. For Main Concept it fills Character Description / Vision Description too. For Builders it analyzes the image and transfers that description into Builder fields.</p>
+      <p class="small muted">Analyze before import runs the Vision model using the imported image/card image. For Main Concept it fills Vision Description too. For Builders it analyzes the image and transfers that description into Builder fields.</p>
       <div class="actions modal-actions"><button id="conceptImportAsMainBtn" type="button" class="primary">Import as Main Concept</button><button id="conceptImportAsBuildersBtn" type="button">Import into Builders</button></div>
     </div>
   </div>
@@ -472,6 +624,6 @@
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple hidden />
-  <script src="app.js?v=1.0.2"></script>
+  <script src="app.js?v=1.0.3&cache=version-file-read"></script>
 </body>
 </html>
