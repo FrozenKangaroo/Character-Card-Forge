@@ -55,10 +55,15 @@ jobs:
 
       - name: Build Standalone Executable (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;frontend" --add-data "data;data" app.py
-          # Targeting the folder explicitly (no wildcard) preserves the subdirectories upon extraction
-          powershell Compress-Archive -Path "dist/Character-Card-Forge" -DestinationPath "dist/Character-Card-Forge-Windows.zip"
+          # 1. Compile with explicit source-to-destination dot syntax anchors for data folders
+          pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;./frontend" --add-data "data;./data" app.py
+
+          # 2. Avoid PowerShell's buggy Compress-Archive entirely.
+          # Use Windows' native tar tool (built into modern Windows runners) which perfectly handles folder structures.
+          cd dist
+          tar -a -c -f Character-Card-Forge-Windows.zip Character-Card-Forge
 
       - name: Build Standalone Executable (macOS)
         if: matrix.os == 'macos-latest'
