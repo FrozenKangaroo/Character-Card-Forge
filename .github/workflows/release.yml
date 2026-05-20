@@ -27,7 +27,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # Linux dependencies + ImageMagick
+      # Linux dependencies + ImageMagick + FUSE core engine compatibility
       - name: Install Linux System Dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -37,7 +37,7 @@ jobs:
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 libxcb-xinput0 libxcb-xfixes0 \
-            binutils wget imagemagick
+            binutils wget imagemagick libfuse2
 
       # Mac DMG creator utility
       - name: Install Mac System Dependencies
