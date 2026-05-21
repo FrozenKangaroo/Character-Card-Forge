@@ -20,12 +20,40 @@ import sqlite3
 import uuid
 import io
 import socket
+import ssl
 import hashlib
 import traceback
 import webbrowser
 from pathlib import Path
 
 sys.dont_write_bytecode = True
+
+# Use a bundled CA bundle when available.
+# GitHub-built AppImages can inherit Ubuntu/PyInstaller OpenSSL default CA paths
+# that do not exist on Fedora/Nobara systems, causing HTTPS API calls to fail with
+# CERTIFICATE_VERIFY_FAILED. certifi gives the frozen app a portable trust store.
+try:
+    import certifi
+except Exception:  # pragma: no cover - source installs can still use system CAs
+    certifi = None
+
+
+def _portable_ssl_context():
+    if certifi is None:
+        return None
+    try:
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+_PORTABLE_SSL_CONTEXT = _portable_ssl_context()
+
+
+def _safe_urlopen(req, *args, **kwargs):
+    if _PORTABLE_SSL_CONTEXT is not None and "context" not in kwargs:
+        kwargs["context"] = _PORTABLE_SSL_CONTEXT
+    return urllib.request.urlopen(req, *args, **kwargs)
 
 import webview
 from PIL import Image
@@ -1955,7 +1983,7 @@ class Api:
         }
         try:
             req = urllib.request.Request(api_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with _safe_urlopen(req, timeout=15) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
             data = json.loads(raw)
             latest_tag = str(data.get("tag_name") or "").strip()
@@ -2027,7 +2055,7 @@ class Api:
         for attempt in range(retries + 1):
             self._raise_if_cancelled()
             try:
-                return urllib.request.urlopen(req, timeout=timeout)
+                return _safe_urlopen(req, timeout=timeout)
             except urllib.error.HTTPError:
                 # HTTP errors mean the server answered; do not retry/fallback as a network timeout.
                 raise
@@ -2041,6 +2069,8 @@ class Api:
                     "max_attempts": retries + 1,
                     "timeout_seconds": timeout,
                     "error": reason_text[:1000],
+                    "portableCaBundle": bool(_PORTABLE_SSL_CONTEXT),
+                    "certifiBundle": (certifi.where() if certifi else ""),
                 })
                 if attempt >= retries:
                     raise RuntimeError(
@@ -2760,7 +2790,7 @@ class Api:
 
         def read_urllib(url, headers):
             req = _urlrequest.Request(url, headers=headers, method="GET")
-            with _urlrequest.urlopen(req, timeout=30) as response:
+            with _safe_urlopen(req, timeout=30) as response:
                 raw = response.read().decode("utf-8", errors="replace")
                 status = getattr(response, "status", getattr(response, "code", ""))
             return _json.loads(raw), raw, status
@@ -4753,7 +4783,7 @@ class Api:
         req = urllib.request.Request(url, method="GET")
         req.add_header("User-Agent", f"{APP_NAME}/1.0")
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with _safe_urlopen(req, timeout=60) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 content_length = resp.headers.get("Content-Length")
                 if content_length:

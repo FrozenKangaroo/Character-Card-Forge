@@ -1,6 +1,6 @@
 # Ignore our automated deploy script
 release.sh
-
+release_certifi_workflow_patch.sh
 # Python build and distribution artifacts
 build/
 dist/

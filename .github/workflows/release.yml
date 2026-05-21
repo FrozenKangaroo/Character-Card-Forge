@@ -59,6 +59,8 @@ jobs:
         run: |
           # Added VERSION mapping to match local fix behavior
           pyinstaller --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;./frontend" --add-data "data;./data" --add-data "VERSION;." app.py
+          --hidden-import "certifi" \
+          --collect-data "certifi" \
           cd dist
           tar -a -c -f Character-Card-Forge-Windows.zip Character-Card-Forge
 
