@@ -1,4 +1,163 @@
+## Version 1.0.4
+
+- Added editable **NSFW Marker Tags** in Settings → Data / Browser. The default marker is `NSFW`, and cards with any configured marker tag are treated as NSFW for browser privacy modes.
+- Added a **Mark NSFW** button to the selected character tag editor, which adds the first configured NSFW marker tag to the card.
+- AI Browser Analysis now asks the rating model for an `isNsfw` classification and falls back to a dedicated NSFW classifier if the model omits it. When true, the app adds the configured NSFW marker tag and saves it to the project.
+- Renamed the selected-card action tooltip from “Generate AI description” to **Run AI browser analysis**, since the action now updates the browser summary, quality rating/details, and NSFW tag detection.
+- Promoted the release from beta to stable `1.0.4` and updated VERSION files/frontend cache-busting.
+
+## Version 1.0.4-beta22
+
+- Added a backend `ensure_card_rating_details_for_project` repair path that generates/saves missing per-element rating details for already-rated cards.
+- Regenerate AI Description now asks the backend to repair missing detail rows before updating the live browser state.
+- Opening Card Rating Details now self-heals rated cards whose saved project/browser cache has no breakdown rows.
+- Added a guaranteed non-empty backend detail breakdown as a last-resort safety net so a saved overall score cannot sit beside an empty `cardRatingDetails` array.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta22`.
+
+## Version 1.0.4-beta19
+
+- Fixed the Card Rating Details flow so missing per-element ratings trigger a dedicated details-only AI repair pass instead of relying on frontend fake fallback rows.
+- Regenerate AI Description now always attempts to refresh/save rating details, even if the browser description falls back to extracted text, and it preserves existing ratings instead of returning stale frontend-only scores with empty details.
+- The backend now accepts more AI detail shapes, including top-level JSON arrays, JSON strings, text lines, `score_out_of_10`, `ratingOutOf10`, and nested score objects.
+- The Details modal no longer invents all-same fallback rows on the frontend; empty rows now mean the backend genuinely returned/saved no generated detail data.
+- Added debug logging for raw details-repair responses and saved detail source.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta19`.
+
+## Version 1.0.4-beta16
+
+- Hardened the AI Rating Details handoff between backend and frontend. The regenerate response now returns both the app-native `cardRatingDetails` field and compatibility aliases such as `details`, `rating`, `reasoning`, and `source_hash`.
+- Frontend rating parsing now accepts multiple breakdown shapes, including nested `evaluation`/`analysis` objects, `details`, `elementRatings`, `scores`, `ratings`, `breakdown`, and field/status-style rows.
+- After regenerating AI Description, the selected browser card is kept hydrated with the fresh detail rows even if the SQLite browser cache reload lags behind.
+- The Details popup now falls back to the fresh live rating details for the selected card instead of showing an empty breakdown after regeneration.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta16`.
+
+## Version 1.0.4-beta15
+
+- Fixed regenerated AI Description/card ratings saving an overall score but leaving the Details breakdown empty when the model returned detail ratings under alternate key names such as `elementRatings`, `detailedRatings`, `scores`, `ratings`, or nested evaluation objects.
+- Added a repair pass that asks only for the missing per-element rating breakdown if the first rating response has an overall score but no details.
+- Regenerating AI Description now updates the live editor/browser rating state too, preventing later autosaves from overwriting freshly generated `cardRatingDetails` with an older empty value.
+- Workspace saves now preserve existing detailed rating metadata when the rating hash still matches the current card.
+- Added debug logging for regenerated rating detail counts.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta15`.
+
+## Version 1.0.4-beta14
+
+- Added safer AI Card Rating **Improve** safeguards.
+- Improve now warns before generation that weaker models may remove details, alter character intent, or simplify the card.
+- Strengthened the improvement prompt to preserve core facts: names, ages, relationships, setting, backstory, kinks, boundaries, roleplay premise, unique hooks, and first-meeting setup.
+- Added field-by-field improvement preview in the Improve modal so changed/unchanged/added/removed sections are visible before committing.
+- Added an automatic AI lost-detail audit that compares the original and revised card and flags details the user may want to double-check.
+- The Improve modal now shows rating notes, field changes, possible lost details, and the full editable revised card before saving anything.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta14`.
+
+## Version 1.0.4-beta13
+
+- Expanded the AI Card Rating system with a detailed per-element breakdown.
+- Card ratings now ask the AI for an overall score plus individual 0-10 scores for elements such as concept clarity, character identity, personality depth, scenario hook, relationship to `{{user}}`, first message, formatting, specificity, roleplay usability, and continuity/lore.
+- Added a **Details** button to the Card Rating panel in Character Browser.
+- The Details popup shows the overall rating summary plus each element rating with a short reason.
+- Saved card projects, loaded workspaces, and the browser cache now preserve `cardRatingDetails` metadata.
+- Existing cards without detailed ratings still show their old overall rating; regenerate AI Description to create the detailed breakdown.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta13`.
+
+## Version 1.0.4-beta12
+
+- Fixed Card Rating → Improve commit preserving the wrong image.
+- The improvement flow now strips volatile current-editor image fields before saving a different saved card.
+- The saved card's original image is resolved from the project, workspace, asset DB, or legacy card PNG fallback and carried through unchanged.
+- Added protection so current Settings `cardImagePath` cannot overwrite an older card with the last generated image.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta12`.
+
+## Version 1.0.4-beta11
+
+- Fixed the Card Rating **Improve** action for builds where PyWebView/AppImage does not expose the new dedicated improvement backend method.
+- Added compatibility fallback using older exposed bridge methods: `load_character_project`, `revise_card`, and `save_character_workspace`.
+- Added an extra backend bridge alias: `revise_card_from_rating_project` / `reviseCardFromRatingProject`.
+- Improve preview now still works even if the dedicated `generate_card_improvement_from_rating` method is missing from the JavaScript bridge.
+- Commit preview now still works even if the dedicated commit method is missing, by saving through the existing workspace save path.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta11`.
+
+## Version 1.0.4-beta10
+
+- Fixed the Rating Improve button failing with `window.pywebview.api.generate_card_improvement_from_rating is not a function` in packaged/PyWebView builds.
+- Added camelCase backend aliases for rating improvement preview/commit methods so AppImage method exposure is more reliable.
+- Frontend now tries snake_case and camelCase API names and shows a clearer diagnostic if the backend method table is stale.
+- Updated VERSION files, README, and frontend cache-busting to `1.0.4-beta10`.
+
+
+## Version 1.0.4-beta9
+
+- Added AI Card Rating improvement previews.
+- The Card Rating panel now includes an **Improve** button.
+- The AI can apply the rating suggestions to the saved card and generate a revised full-card preview.
+- The preview opens in a modal before anything is committed.
+- Users can review and edit the improved card text, copy the preview, cancel, or commit the changes.
+- Committing refreshes the saved Character Card Forge project, browser description, rating metadata, and browser cache.
+
+## Version 1.0.4-beta8
+
+- Added automatic GitHub update checking on app startup.
+- Added hourly update checks while the app remains open.
+- Checks the latest GitHub release/tag from `FrozenKangaroo/Character-Card-Forge` using tags like `v1.0.3`.
+- Shows an Update Available modal when a newer release is found.
+- Modal shows current version, latest version, a release-notes preview, and an Open GitHub Release button.
+- Added backend version comparison that handles stable and beta-style versions safely.
+- Updated VERSION files, README, and frontend cache-busting to `1.0.4-beta8`.
+
+## Version 1.0.4-beta7
+
+- Made the busy banner float at the top of the app window so task progress stays visible while scrolling.
+- Idea Generator now closes its modal before starting AI generation, allowing the user to keep navigating/using the app while the concept seed generates.
+- Updated VERSION files, README, and frontend cache-busting to `1.0.4-beta7`.
+
 # Character Card Forge
+
+## Version 1.0.4-beta6
+
+- Improved the Settings → Idea Generator editor layout.
+- Increased the default height of the options text box so long option lists are easier to edit without immediately scrolling.
+- Added explicit rows and stronger CSS sizing for the options editor so packaged builds do not collapse it back to a small textarea.
+- Aligned the Option Field, Maximum Random Choices, multi-select toggle, and Options editor into a cleaner settings grid.
+- Styled the multi-select toggle as a full-width control so it no longer sits awkwardly beside the smaller text boxes.
+- Updated VERSION files, README, and frontend cache-busting to `1.0.4-beta6`.
+
+
+## Version 1.0.4-beta5
+
+- Fixed Idea Generator lock icon alignment so lock/unlock buttons line up with the input/select boxes instead of floating beside the field label.
+- Kept the Randomise lock behaviour from beta4 unchanged.
+
+## Version 1.0.4-beta4
+
+- Added lock buttons to Idea Generator fields so Randomise can leave chosen fields unchanged.
+- Locked fields are useful when you want to preserve a seed idea, such as keeping **Gyaru** and **Fantasy World**, while randomising the remaining details.
+- Randomise now skips locked fields and reports how many locked fields were kept unchanged.
+- Locked fields are visually highlighted and use inline SVG lock/unlock icons for AppImage/PyWebView compatibility.
+
+## Version 1.0.4-beta3
+
+- Improved Idea Generator multi-select UX so selected values stay as removable chips below the search box while the input remains a search/add field.
+- Clearing or editing the search box no longer removes selected multi-select chips; use the chip × button to remove selected options.
+- Added a **Randomise** button to Idea Generator. Randomise does not call AI; it simply chooses options from the configured option lists.
+- Randomise respects multi-select fields and never picks the same option twice for a field.
+- Added **Maximum Random Choices per Multi-Select Field** in Settings → Idea Generator to control how many random choices a multi-select field can receive.
+
+## Version 1.0.4-beta2
+
+- Fixed a stale cancellation bug after stopping Emotion Image generation.
+- Quick Save / Image → Generate 4 Images now clears the previous cancellation state before starting a new Stable Diffusion batch.
+- Added a debug log entry (`sd_image_generation_start`) when a normal four-image SD generation begins and resets the cancel state.
+
+## Version 1.0.4-beta1
+
+- Added AI Card Rating generation alongside AI browser descriptions.
+- When an AI Description is generated for a saved card, the app now also asks the AI to rate the card quality out of 10.
+- Ratings judge card craft/usability, including clarity, personality depth, scenario hook, {{user}} relationship/dynamic, formatting, and improvement areas.
+- Character Browser cards now show the rating badge directly on the thumbnail so scores are visible without selecting the card.
+- Selected Character now shows a Card Rating panel under the browser description with the saved score, reasoning, strengths, and suggested improvements.
+- Card ratings are saved into Character Card Forge project files and cached into the browser library database metadata.
+- Loading saved workspaces now restores saved card rating metadata.
+
 
 Character Card Forge is a local desktop app for creating AI character cards with an OpenAI-compatible API. It is aimed at roleplay frontends such as Front Porch AI, SillyTavern, Hammer AI, and other Character Card V2-compatible tools.
 
@@ -548,3 +707,35 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Added URL support for vision/image analysis workflows.
 - Added URL support for card images used by PNG export / import card tools.
 - Added URL attachment support for concept files.
+
+
+
+### v1.0.4
+
+- Added editable NSFW marker tags, defaulting to `NSFW`.
+- Added a one-click Mark NSFW button in the selected-character tag editor.
+- AI Browser Analysis can now add the configured NSFW marker tag when the AI classifies a card as adult/NSFW.
+- Updated the browser action tooltip to reflect that it now performs more than description generation.
+- Promoted the release from beta to stable `1.0.4` and updated VERSION files/frontend cache-busting.
+
+### v1.0.4-beta22
+- Forced a dedicated AI request for per-element rating details when the overall rating response omits the `details` array.
+- Added visible debug-log attempts `card_rating_details_required` and `card_rating_details_required_plain` so missing detail generation can be verified directly.
+- Regenerate AI Description, Details modal repair, and workspace save now all try the required details request before falling back.
+- Saved `cardRatingDetailSource` alongside `cardRatingDetails` in the project and workspace payloads.
+- Updated VERSION files and frontend cache-busting to `1.0.4-beta22`.
+
+### v1.0.4-beta20
+
+- Added backend/frontend self-healing for missing rating detail rows and a guaranteed non-empty save path.
+
+### v1.0.4-beta19
+- Hardened Card Rating Details generation by adding a second details-only AI repair attempt and accepting more response shapes from weaker/OpenAI-compatible models.
+- Fixed Regenerate AI Description so it does not preserve a stale overall rating in the frontend while returning an empty detail array from the backend.
+- Removed frontend-invented all-same fallback detail rows from the Details modal.
+- Added debug log entries for raw details-repair responses and the final detail source.
+
+### v1.0.4-beta18
+- Added deterministic fallback per-element rating rows when the AI returns an overall score but omits the requested details array.
+- Details modal now shows a safe fallback breakdown for existing rated cards with no saved detail rows instead of an empty message.
+- Backend logs when fallback details are created, making missing-model-breakdown cases visible in debug output.

@@ -341,6 +341,7 @@
             <div class="settings-grid">
               <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label>
               <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
+              <label class="wide-setting">NSFW Marker Tags<textarea id="nsfwTags" placeholder="NSFW&#10;One tag per line or comma-separated. Cards with any of these tags are treated as NSFW."></textarea></label>
             </div>
           </div>
         </div>
@@ -358,9 +359,10 @@
           <div class="card wide idea-settings-card"><div class="card-title"><div><h3>Idea Generator Options</h3><p>Edit the searchable dropdown options used by Idea Generator. One option per line. Removing a line removes it from that field.</p></div><div class="actions"><button id="ideaSettingsApplyBtn" type="button" class="primary">Apply Field</button><button id="ideaSettingsResetFieldBtn" type="button">Reset Field</button><button id="ideaSettingsResetAllBtn" type="button" class="danger-ghost">Reset All Idea Options</button></div></div>
             <div class="settings-grid idea-settings-grid">
               <label>Option Field<select id="ideaSettingsField"></select></label>
+              <label>Maximum Random Choices per Multi-Select Field<input id="ideaGeneratorRandomMaxChoices" type="number" min="1" max="20" step="1" value="3" /></label>
               <label class="toggle-inline setting-toggle"><input id="ideaSettingsMulti" type="checkbox" /> Allow multiple selections for this field</label>
-              <label class="wide-setting">Options<textarea id="ideaSettingsOptions" placeholder="One option per line"></textarea></label>
-              <p class="wide-setting small muted">Default multi-select fields are Personality, Subject Of, Engages In, and Engages In (Sexual). Multi-select fields show picked values as chips and keep the dropdown searchable/scroll-limited.</p>
+              <label class="wide-setting idea-settings-options-field">Options<textarea id="ideaSettingsOptions" rows="22" placeholder="One option per line"></textarea></label>
+              <p class="wide-setting small muted">Default multi-select fields are Personality, Subject Of, Engages In, and Engages In (Sexual). Multi-select fields show picked values as chips under the search box; clearing the search text does not remove chips. Use the × on a chip to remove it. Randomise uses these option lists without calling AI.</p>
             </div>
           </div>
         </div>
@@ -456,9 +458,9 @@
             <div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div></div>
             <div id="browserDescriptionSource" class="description-source-badge hidden"></div>
             <div class="selected-character-icon-actions" aria-label="Selected character actions">
-              <button id="browserAiDescriptionBtn" type="button" class="icon-action-btn ai-icon-action" title="Generate AI description" aria-label="Generate AI description">
+              <button id="browserAiDescriptionBtn" type="button" class="icon-action-btn ai-icon-action" title="Run AI browser analysis" aria-label="Run AI browser analysis">
                 <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l1.45 4.05L17.5 8.5l-4.05 1.45L12 14l-1.45-4.05L6.5 8.5l4.05-1.45L12 3z"/><path d="M19 13l.95 2.55L22.5 16.5l-2.55.95L19 20l-.95-2.55-2.55-.95 2.55-.95L19 13z"/><path d="M5 14l.75 2 2 .75-2 .75-.75 2-.75-2-2-.75 2-.75L5 14z"/></svg>
-                <span class="sr-only">AI Description</span>
+                <span class="sr-only">AI Browser Analysis</span>
               </button>
               <button id="browserLoadBtn" type="button" class="icon-action-btn primary-icon-action" title="Load workspace" aria-label="Load workspace">
                 <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 6.5a2 2 0 0 1 2-2h4.3l2 2H18.5a2 2 0 0 1 2 2v1"/><path d="M3.5 9.5h17l-1.6 8.2a2.2 2.2 0 0 1-2.15 1.8H6.25a2.2 2.2 0 0 1-2.15-1.8L3.5 9.5z"/><path d="M12 12.5v4"/><path d="M9.8 14.8L12 17l2.2-2.2"/></svg>
@@ -470,6 +472,17 @@
               </button>
             </div>
             <textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea>
+            <div id="browserRatingPanel" class="browser-rating-panel hidden">
+              <div class="browser-rating-header">
+                <span>Card Rating</span>
+                <span class="browser-rating-header-actions">
+                  <span id="browserRatingScore" class="browser-rating-score"></span>
+                  <button id="browserRatingDetailsBtn" type="button" class="small" title="Show detailed per-element rating breakdown.">Details</button>
+                  <button id="browserImproveFromRatingBtn" type="button" class="small primary" title="Let the AI apply the rating suggestions and preview the improved card before saving.">Improve</button>
+                </span>
+              </div>
+              <textarea id="browserRatingReasoning" class="debug-log browser-rating-reasoning" readonly placeholder="AI rating reasoning appears here..."></textarea>
+            </div>
             <div class="selected-tags-title">Tags</div>
             <div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div>
           </div>
@@ -559,12 +572,80 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
     </div>
   </div>
 
+
+  <div id="ratingDetailsModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card rating-details-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Card Rating Details</h3>
+          <p><strong id="ratingDetailsName">Selected character</strong> · <span id="ratingDetailsOverall">No overall score</span></p>
+        </div>
+        <button id="closeRatingDetailsModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="rating-details-summary" id="ratingDetailsSummary">No overall reasoning was saved for this card.</div>
+      <div id="ratingDetailsList" class="rating-details-list"><div class="empty small">No detailed ratings yet.</div></div>
+    </div>
+  </div>
+
+  <div id="ratingImproveModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card rating-improve-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Preview AI Improvements</h3>
+          <p id="ratingImproveSummary">The AI will apply the Card Rating suggestions and show the revised card before saving.</p>
+        </div>
+        <button id="closeRatingImproveModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="rating-improve-warning"><strong>Review before committing.</strong> Lower-quality models may remove details, alter character intent, or simplify the card. The preview is editable and nothing is saved until you commit.</div>
+      <label>Rating Notes Used<textarea id="ratingImproveNotes" class="debug-log rating-improve-notes" readonly placeholder="Rating reasoning will appear here..."></textarea></label>
+      <div class="rating-improve-review-grid">
+        <div class="rating-improve-review-card">
+          <h4>Field-by-field preview</h4>
+          <div id="ratingImproveFieldDiffs" class="rating-field-diff-list"><div class="empty small">Field changes will appear here after generation.</div></div>
+        </div>
+        <div class="rating-improve-review-card">
+          <h4>Possible lost details</h4>
+          <div id="ratingImproveLostDetails" class="rating-lost-detail-list"><div class="empty small">Lost-detail check will appear here after generation.</div></div>
+        </div>
+      </div>
+      <label>Revised Card Preview<textarea id="ratingImprovePreview" class="output rating-improve-preview" placeholder="The improved card preview will appear here. You can edit it before committing."></textarea></label>
+      <p class="small muted">Review the field changes, possible lost details, and full preview first. Commit updates the saved Character Card Forge project and refreshes its browser description/rating. Cancel leaves the current card unchanged.</p>
+      <div class="actions modal-actions">
+        <button id="cancelRatingImproveBtn" type="button" class="danger-ghost">Cancel</button>
+        <button id="copyRatingImprovePreviewBtn" type="button">Copy Preview</button>
+        <button id="commitRatingImproveBtn" type="button" class="primary">Commit Improved Card</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="updateAvailableModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card update-available-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Update Available</h3>
+          <p id="updateAvailableSummary">A newer Character Card Forge release is available.</p>
+        </div>
+        <button id="closeUpdateAvailableModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="update-version-row">
+        <span>Current: <strong id="updateCurrentVersion">unknown</strong></span>
+        <span>Latest: <strong id="updateLatestVersion">unknown</strong></span>
+      </div>
+      <div id="updateReleaseNotesPreview" class="update-release-preview"></div>
+      <p class="small muted">The app checks GitHub on startup and then once every hour while it is open.</p>
+      <div class="actions modal-actions">
+        <button id="remindLaterUpdateBtn" type="button" class="danger-ghost">Remind Me Later</button>
+        <button id="openUpdateReleaseBtn" type="button" class="primary">Open GitHub Release</button>
+      </div>
+    </div>
+  </div>
+
   <div id="ideaGeneratorModal" class="modal-backdrop hidden">
     <div class="modal-card idea-generator-modal-card">
       <div class="modal-head">
         <div>
           <h3>Idea Generator</h3>
-          <p>Pick broad ingredients and let the AI create a compact Main Concept seed. This does not generate the full card.</p>
+          <p>Pick broad ingredients or randomise from your option lists, then let the AI create a compact Main Concept seed. Multi-select fields keep picked options as chips below the search box. Use the lock icons to keep fields unchanged when randomising.</p>
         </div>
         <button id="closeIdeaGeneratorModalBtn" type="button" class="danger-ghost">Close</button>
       </div>
@@ -583,7 +664,7 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
         <label>Engages In (Sexual)<input id="ideaSexualEngagesIn" list="ideaSexualEngagesInList" placeholder="group sex, sexting, voyeurism..." /></label>
       </div>
       <label>Custom Instructions<textarea id="ideaCustomInstructions" class="vision-description" placeholder="Optional extra direction. Example: Make it a cozy mystery setup with romantic tension, not a full card. Keep it concise and playable."></textarea></label>
-      <div class="actions modal-actions"><button id="clearIdeaGeneratorBtn" type="button" class="danger-ghost">Clear</button><button id="generateIdeaBtn" type="button" class="primary">Generate Idea into Main Concept</button></div>
+      <div class="actions modal-actions"><button id="clearIdeaGeneratorBtn" type="button" class="danger-ghost">Clear</button><button id="randomiseIdeaGeneratorBtn" type="button">Randomise</button><button id="generateIdeaBtn" type="button" class="primary">Generate Idea into Main Concept</button></div>
       <datalist id="ideaArchetypeList"></datalist>
       <datalist id="ideaConflictList"></datalist>
       <datalist id="ideaSettingList"></datalist>
@@ -624,6 +705,6 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple hidden />
-  <script src="app.js?v=1.0.3&cache=version-file-read"></script>
+  <script src="app.js?v=1.0.4"></script>
 </body>
 </html>

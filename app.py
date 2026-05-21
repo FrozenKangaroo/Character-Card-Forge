@@ -22,6 +22,7 @@ import io
 import socket
 import hashlib
 import traceback
+import webbrowser
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -61,17 +62,16 @@ def _candidate_version_files():
         if p not in candidates:
             candidates.append(p)
 
-    # Prefer the VERSION file bundled with frontend assets first. AppImage
-    # builds have been seen to keep stale loose root VERSION files in the
-    # AppDir, while the frontend folder is refreshed because index.html/app.js
-    # must be copied for every build. This keeps the displayed version tied to
-    # the shipped frontend bundle instead of an old AppImage root file.
-    add(APP_DIR / "frontend" / "VERSION")
-    add(BUNDLE_ROOT / "frontend" / "VERSION")
-
-    # Source checkout / bundled resource root fallback.
+    # Source checkout / bundled resource root.
     add(APP_DIR / "VERSION")
     add(BUNDLE_ROOT / "VERSION")
+
+    # AppImage/PyInstaller builders sometimes copy the frontend assets but not
+    # loose root files. Keep a duplicate VERSION beside index.html and prefer it
+    # before any executable/AppDir-level file that may be stale from an older
+    # AppImage build.
+    add(APP_DIR / "frontend" / "VERSION")
+    add(BUNDLE_ROOT / "frontend" / "VERSION")
 
     # PyInstaller one-dir commonly has resources either in _internal or beside
     # the executable. AppImage builders often copy VERSION to the AppDir root.
@@ -514,9 +514,11 @@ DEFAULT_SETTINGS = {
     "restrictTags": False,
     "allowedTags": "",
     "nsfwBrowserMode": "show",
+    "nsfwTags": "NSFW",
     "recentModels": [],
     "ideaGeneratorOptions": {},
     "ideaGeneratorMultiFields": ["personality", "subjectOf", "engagesIn", "sexualEngagesIn"],
+    "ideaGeneratorRandomMaxChoices": 3,
     "browserTagMerges": {},
     "browserVirtualFolders": [],
     "browserVirtualFolderAssignments": {},
@@ -880,6 +882,12 @@ class Api:
                     existing_tags = json.loads(existing_d.get("tags_json") or "[]")
                 except Exception:
                     existing_tags = []
+                try:
+                    existing_extra = json.loads(existing_d.get("metadata_json") or "{}")
+                    if not isinstance(existing_extra, dict):
+                        existing_extra = {}
+                except Exception:
+                    existing_extra = {}
                 metadata = {
                     "projectHash": existing_d.get("project_hash") or "",
                     "outputHash": existing_d.get("output_hash") or "",
@@ -893,6 +901,7 @@ class Api:
                     "tags": existing_tags if isinstance(existing_tags, list) else [],
                     "outputPreview": existing_d.get("output_preview") or "",
                     "hasEmotionImages": bool(existing_d.get("has_emotion_images")),
+                    "extra": existing_extra,
                 }
             if virtual_folder_id is None:
                 chosen_folder = str(existing_d.get("virtual_folder_id") or "").strip() if existing_d else ""
@@ -1197,6 +1206,12 @@ class Api:
                 tags = []
         except Exception:
             tags = []
+        try:
+            extra = json.loads(row.get("metadata_json") or "{}")
+            if not isinstance(extra, dict):
+                extra = {}
+        except Exception:
+            extra = {}
         updated_ts = float(row.get("updated_ts") or 0)
         return {
             "name": row.get("name") or Path(row.get("folder_path") or "").name,
@@ -1206,6 +1221,10 @@ class Api:
             "thumbnail": row.get("thumbnail_data_url") or "",
             "browserDescription": row.get("browser_description") or "",
             "browserDescriptionSource": row.get("browser_description_source") or "extracted",
+            "cardRating": extra.get("cardRating") or "",
+            "cardRatingReasoning": extra.get("cardRatingReasoning") or "",
+            "cardRatingDetails": extra.get("cardRatingDetails") if isinstance(extra.get("cardRatingDetails"), list) else [],
+            "cardRatingSourceHash": extra.get("cardRatingSourceHash") or "",
             "tags": tags,
             "virtualFolderId": str(row.get("virtual_folder_id") or ""),
             "outputPreview": row.get("output_preview") or "",
@@ -1251,6 +1270,10 @@ class Api:
         if not browser_description:
             browser_description = self._fallback_browser_description(output, concept)
             browser_description_source = "extracted"
+        card_rating = str(project.get("cardRating") or workspace.get("cardRating") or "").strip()
+        card_rating_reasoning = str(project.get("cardRatingReasoning") or workspace.get("cardRatingReasoning") or "").strip()
+        card_rating_source_hash = str(project.get("cardRatingSourceHash") or workspace.get("cardRatingSourceHash") or "").strip()
+        card_rating_details = project.get("cardRatingDetails") if isinstance(project.get("cardRatingDetails"), list) else (workspace.get("cardRatingDetails") if isinstance(workspace.get("cardRatingDetails"), list) else [])
         tags = project.get("tags") if isinstance(project.get("tags"), list) else []
         if not tags:
             tags = self._extract_tags_from_output(output, project.get("template") or self.template)
@@ -1269,7 +1292,13 @@ class Api:
                 "tags": tags,
                 "outputPreview": output[:500],
                 "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
-                "extra": {"conceptHash": self._hash_text(concept)},
+                "extra": {
+                    "conceptHash": self._hash_text(concept),
+                    "cardRating": card_rating,
+                    "cardRatingReasoning": card_rating_reasoning,
+                    "cardRatingDetails": card_rating_details,
+                    "cardRatingSourceHash": card_rating_source_hash,
+                },
             })
         else:
             virtual_folder_id = self._library_upsert_card(path, folder, name, old_assignment, path.stat().st_mtime, {
@@ -1285,7 +1314,13 @@ class Api:
                 "tags": tags,
                 "outputPreview": output[:500],
                 "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
-                "extra": {"conceptHash": self._hash_text(concept)},
+                "extra": {
+                    "conceptHash": self._hash_text(concept),
+                    "cardRating": card_rating,
+                    "cardRatingReasoning": card_rating_reasoning,
+                    "cardRatingDetails": card_rating_details,
+                    "cardRatingSourceHash": card_rating_source_hash,
+                },
             })
         if virtual_folder_id != str(project.get("virtualFolderId") or ""):
             try:
@@ -1307,7 +1342,13 @@ class Api:
                     "tags": tags,
                     "outputPreview": output[:500],
                     "hasEmotionImages": any((folder / f"{e}.png").exists() for e in EMOTION_OPTIONS),
-                    "extra": {"conceptHash": self._hash_text(concept)},
+                    "extra": {
+                    "conceptHash": self._hash_text(concept),
+                    "cardRating": card_rating,
+                    "cardRatingReasoning": card_rating_reasoning,
+                    "cardRatingDetails": card_rating_details,
+                    "cardRatingSourceHash": card_rating_source_hash,
+                },
                 })
             except Exception:
                 pass
@@ -1664,6 +1705,11 @@ class Api:
         settings["allowedTags"] = str(allowed_tags_value or "").strip()
         nsfw_mode = str(settings.get("nsfwBrowserMode") or "show").strip().lower()
         settings["nsfwBrowserMode"] = nsfw_mode if nsfw_mode in {"show", "blur", "hide"} else "show"
+        nsfw_tags_value = settings.get("nsfwTags", DEFAULT_SETTINGS.get("nsfwTags", "NSFW"))
+        if isinstance(nsfw_tags_value, list):
+            nsfw_tags_value = ", ".join(str(x).strip() for x in nsfw_tags_value if str(x).strip())
+        nsfw_tags_value = str(nsfw_tags_value or DEFAULT_SETTINGS.get("nsfwTags", "NSFW")).strip()
+        settings["nsfwTags"] = nsfw_tags_value or "NSFW"
         settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
         settings["sdModel"] = str(settings.get("sdModel") or "").strip()
         settings["streamAi"] = bool(settings.get("streamAi"))
@@ -1692,6 +1738,10 @@ class Api:
             if field in idea_fields and field not in clean_multi:
                 clean_multi.append(field)
         settings["ideaGeneratorMultiFields"] = clean_multi or list(DEFAULT_SETTINGS.get("ideaGeneratorMultiFields", []))
+        try:
+            settings["ideaGeneratorRandomMaxChoices"] = max(1, min(20, int(float(settings.get("ideaGeneratorRandomMaxChoices", DEFAULT_SETTINGS.get("ideaGeneratorRandomMaxChoices", 3))))))
+        except Exception:
+            settings["ideaGeneratorRandomMaxChoices"] = int(DEFAULT_SETTINGS.get("ideaGeneratorRandomMaxChoices", 3))
 
         merges = settings.get("browserTagMerges") if isinstance(settings.get("browserTagMerges"), dict) else {}
         clean_merges = {}
@@ -1855,6 +1905,94 @@ class Api:
 
     def get_app_version(self):
         return _read_app_version()
+
+    def _parse_version_for_compare(self, value):
+        """Parse v1.2.3-beta4 style tags into a comparable tuple.
+
+        Stable releases sort above pre-releases with the same numeric version.
+        Unknown/malformed values sort very low instead of crashing update checks.
+        """
+        raw = str(value or "").strip()
+        raw = re.sub(r"^[vV]", "", raw)
+        raw = raw.split("+", 1)[0].strip()
+        if not raw:
+            return ((0, 0, 0), -1, 0, "")
+        main, sep, pre = raw.partition("-")
+        nums = []
+        for part in main.split("."):
+            m = re.match(r"^(\d+)", part.strip())
+            nums.append(int(m.group(1)) if m else 0)
+        while len(nums) < 3:
+            nums.append(0)
+        nums = tuple(nums[:4])
+        if not sep:
+            return (nums, 3, 0, "")
+        pre_l = pre.lower()
+        rank = 0
+        if pre_l.startswith("alpha"):
+            rank = 0
+        elif pre_l.startswith("beta"):
+            rank = 1
+        elif pre_l.startswith(("rc", "release-candidate")):
+            rank = 2
+        m = re.search(r"(\d+)", pre_l)
+        pre_num = int(m.group(1)) if m else 0
+        return (nums, rank, pre_num, pre_l)
+
+    def _is_newer_version(self, latest, current):
+        return self._parse_version_for_compare(latest) > self._parse_version_for_compare(current)
+
+    def check_for_updates(self):
+        """Check GitHub Releases for a newer public Character Card Forge build."""
+        current = self.get_app_version()
+        owner = "FrozenKangaroo"
+        repo = "Character-Card-Forge"
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"CharacterCardForge/{current or 'unknown'}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            req = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            latest_tag = str(data.get("tag_name") or "").strip()
+            latest_version = re.sub(r"^[vV]", "", latest_tag).strip()
+            if not latest_version:
+                latest_version = str(data.get("name") or "").strip()
+            release_url = str(data.get("html_url") or f"https://github.com/{owner}/{repo}/releases/latest")
+            body = str(data.get("body") or "").strip()
+            published_at = str(data.get("published_at") or "")
+            name = str(data.get("name") or latest_tag or latest_version or "Latest release")
+            newer = bool(latest_version and current and current != "unknown" and self._is_newer_version(latest_version, current))
+            result = {
+                "ok": True,
+                "currentVersion": current,
+                "latestVersion": latest_version,
+                "latestTag": latest_tag,
+                "latestName": name,
+                "releaseUrl": release_url,
+                "publishedAt": published_at,
+                "isNewer": newer,
+                "bodyPreview": body[:1200],
+            }
+            self._log_event("update_check_complete", {k: result.get(k) for k in ("currentVersion", "latestVersion", "latestTag", "isNewer", "releaseUrl")})
+            return result
+        except Exception as e:
+            self._log_event("update_check_failed", {"currentVersion": current, "error": str(e)})
+            return {"ok": False, "currentVersion": current, "error": str(e)}
+
+    def open_external_url(self, url):
+        try:
+            target = str(url or "").strip()
+            if not re.match(r"^https://github\.com/FrozenKangaroo/Character-Card-Forge(?:/|$)", target):
+                return {"ok": False, "error": "Only Character Card Forge GitHub links can be opened from this action."}
+            webbrowser.open(target)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def get_data_locations(self):
         return {
@@ -4286,6 +4424,13 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def revise_card_from_rating_project(self, project_path, settings=None):
+        """Compatibility bridge for PyWebView builds: improve a saved project from its AI rating."""
+        return self.generate_card_improvement_from_rating(project_path, settings)
+
+    def reviseCardFromRatingProject(self, project_path, settings=None):
+        return self.generate_card_improvement_from_rating(project_path, settings)
+
     def _safe_upload_name(self, filename, fallback="upload"):
         """Return a filesystem-safe name while preserving the original extension.
 
@@ -5288,13 +5433,19 @@ class Api:
             "output": output,
             "settings": self._normalise_settings(project.get("settings") or {}),
             "template": project.get("template") or self.template,
-            "imagePath": (project.get("imagePath") or workspace.get("cardImagePath") or ""),
+            "imagePath": (project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or ""),
+            "cardImagePath": (project.get("cardImagePath") or project.get("imagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or ""),
+            "imageDataUrl": project.get("imageDataUrl") or workspace.get("imageDataUrl") or project.get("cardImageDataUrl") or workspace.get("cardImageDataUrl") or "",
             "sourcePath": project.get("sourcePath") or "",
             "projectPath": project.get("projectPath") or "",
             "builderState": project.get("builderState") or workspace.get("builderState") or {},
             "qnaAnswers": project.get("qnaAnswers") or workspace.get("qnaAnswers") or "",
             "browserDescription": project.get("browserDescription") or workspace.get("browserDescription") or "",
             "browserDescriptionSourceHash": project.get("browserDescriptionSourceHash") or workspace.get("browserDescriptionSourceHash") or "",
+            "cardRating": project.get("cardRating") or workspace.get("cardRating") or "",
+            "cardRatingReasoning": project.get("cardRatingReasoning") or workspace.get("cardRatingReasoning") or "",
+            "cardRatingDetails": project.get("cardRatingDetails") if isinstance(project.get("cardRatingDetails"), list) else (workspace.get("cardRatingDetails") if isinstance(workspace.get("cardRatingDetails"), list) else []),
+            "cardRatingSourceHash": project.get("cardRatingSourceHash") or workspace.get("cardRatingSourceHash") or "",
             "tags": project.get("tags") or workspace.get("tags") or self._extract_tags_from_output(output, project.get("template") or self.template),
             "virtualFolderId": str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or ""),
             "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
@@ -5313,6 +5464,7 @@ class Api:
             local_image_path = self._ensure_local_card_image_path(raw_image_path, "card", "load_project_payload")
             if local_image_path:
                 loaded["imagePath"] = local_image_path
+                loaded["cardImagePath"] = local_image_path
                 if isinstance(loaded.get("settings"), dict):
                     loaded["settings"]["cardImagePath"] = local_image_path
         project_path = project.get("projectPath") or ""
@@ -5326,6 +5478,7 @@ class Api:
                 local_image_path = self._ensure_local_card_image_path(loaded.get("imageDataUrl"), "card", "hydrate_project_image_data")
             if local_image_path:
                 loaded["imagePath"] = local_image_path
+                loaded["cardImagePath"] = local_image_path
                 if isinstance(loaded.get("settings"), dict):
                     loaded["settings"]["cardImagePath"] = local_image_path
         return loaded
@@ -5835,6 +5988,1156 @@ class Api:
             self._log_event('browser_description_generation_failed', {'error': str(e)})
             return fallback
 
+    def _card_rating_source_hash(self, output, concept='', browser_description=''):
+        return self._hash_text("\n---CARD-RATING---\n" + str(output or '') + "\n---CONCEPT---\n" + str(concept or '') + "\n---BROWSER-DESCRIPTION---\n" + str(browser_description or ''))
+
+    def _normalise_card_rating_value(self, value):
+        try:
+            if value is None or value == "":
+                return ""
+            m = re.search(r"\d+(?:\.\d+)?", str(value))
+            if not m:
+                return ""
+            num = float(m.group(0))
+            if num < 0:
+                num = 0
+            if num > 10:
+                num = 10
+            if abs(num - round(num)) < 0.05:
+                return str(int(round(num)))
+            return f"{num:.1f}".rstrip("0").rstrip(".")
+        except Exception:
+            return ""
+
+    def _first_non_empty_value(self, obj, keys, default=""):
+        """Return the first present/non-empty value from a dict without treating 0 as missing."""
+        if not isinstance(obj, dict):
+            return default
+        for key in keys:
+            if key in obj:
+                value = obj.get(key)
+                if value is not None and value != "":
+                    return value
+        return default
+
+    def _card_rating_detail_key_candidates(self):
+        return [
+            "details", "detailRatings", "detail_ratings", "detailedRatings", "detailed_ratings",
+            "elementRatings", "element_ratings", "elements", "elementScores", "element_scores",
+            "criteria", "criteriaRatings", "criteria_ratings", "criteriaScores", "criteria_scores",
+            "breakdown", "breakdownByElement", "breakdown_by_element", "categoryBreakdown", "category_breakdown",
+            "categories", "categoryRatings", "category_ratings", "scores", "ratings", "ratingDetails", "rating_details",
+            "perElementRatings", "per_element_ratings", "aspectRatings", "aspect_ratings", "sectionRatings", "section_ratings",
+        ]
+
+    def _normalise_card_rating_details(self, value):
+        """Return a compact list of per-category rating objects for UI display.
+
+        The rating provider can be annoyingly creative. Accept normal JSON arrays,
+        dict maps, nested aliases, JSON strings, and common ``score_out_of_10``-style
+        keys, while still refusing arbitrary project metadata as rows.
+        """
+        details = []
+        try:
+            if isinstance(value, str):
+                raw_text = value.strip()
+                if not raw_text:
+                    return []
+                try:
+                    return self._normalise_card_rating_details(json.loads(raw_text))
+                except Exception:
+                    # Last-resort text parser for lines like:
+                    # Concept Clarity: 9/10 - Clear hook and premise.
+                    rows = []
+                    for line in raw_text.splitlines():
+                        m = re.match(r"^\s*(?:[-*•]\s*)?(?P<name>[A-Za-z][A-Za-z0-9 /{}()&+._\-]{2,80})\s*[:=\-–—]\s*(?P<score>\d+(?:\.\d+)?)\s*(?:/\s*10)?(?:\s*[-–—:]\s*(?P<reason>.*))?$", line.strip())
+                        if m:
+                            rows.append({"name": m.group('name').strip(), "rating": m.group('score'), "reason": (m.group('reason') or '').strip()})
+                    value = rows
+            iterable = []
+            name_keys = ["name", "category", "element", "criteria", "criterion", "field", "section", "title", "aspect", "label"]
+            score_keys = ["rating", "score", "value", "points", "grade", "ratingOutOf10", "rating_out_of_10", "scoreOutOf10", "score_out_of_10", "pointsOutOf10", "points_out_of_10"]
+            reason_keys = ["reason", "reasoning", "comment", "comments", "note", "notes", "feedback", "explanation", "rationale", "why", "justification", "shortReason", "short_reason"]
+            if isinstance(value, dict):
+                # A single row object: {"name": "Concept", "score": 8, "comment": "..."}
+                single_name = self._first_non_empty_value(value, name_keys)
+                single_score = self._first_non_empty_value(value, score_keys)
+                if single_name and single_score != "":
+                    iterable = [value]
+                else:
+                    # A container object: {"elementRatings": [...]} or {"scores": {"Concept": 8}}
+                    for key in self._card_rating_detail_key_candidates():
+                        if key in value:
+                            nested = self._normalise_card_rating_details(value.get(key))
+                            if nested:
+                                return nested
+                    skip_keys = {
+                        "ok", "success", "error", "errors", "projectPath", "project_path", "path",
+                        "rating", "score", "overall", "overallRating", "overall_rating", "cardRating", "card_rating",
+                        "reasoning", "reason", "summary", "strengths", "improvements", "areas_to_improve", "areasToImprove",
+                        "browser_description", "browserDescription", "browserDescriptionSource", "browserDescriptionSourceHash",
+                        "name", "title", "source", "sourceHash", "source_hash", "cardRatingReasoning", "cardRatingSourceHash",
+                        "result", "evaluation", "analysis", "rating_result", "ratingResult", "workspace", "settings", "output", "concept",
+                    }
+                    for k, v in value.items():
+                        if str(k) in skip_keys:
+                            continue
+                        if isinstance(v, dict):
+                            item = dict(v)
+                            item.setdefault("name", k)
+                        else:
+                            item = {"name": k, "rating": v, "reason": ""}
+                        iterable.append(item)
+            elif isinstance(value, list):
+                iterable = value
+            else:
+                iterable = []
+            seen = set()
+            for item in iterable:
+                if isinstance(item, str):
+                    parsed = self._normalise_card_rating_details(item)
+                    for row in parsed:
+                        if row:
+                            details.append(row)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                name = str(self._first_non_empty_value(item, name_keys) or "").strip()
+                if not name:
+                    continue
+                key = re.sub(r"\s+", " ", name.lower()).strip()
+                if key in seen:
+                    continue
+                seen.add(key)
+                raw_rating = self._first_non_empty_value(item, score_keys)
+                if isinstance(raw_rating, dict):
+                    raw_rating = self._first_non_empty_value(raw_rating, ["rating", "score", "value", "points", "grade", "outOf10", "out_of_10"])
+                rating = self._normalise_card_rating_value(raw_rating)
+                reason = str(self._first_non_empty_value(item, reason_keys) or "").strip()
+                if not reason:
+                    reason = str(self._first_non_empty_value(item, ["status", "state"]) or "").strip()
+                if len(reason) > 260:
+                    reason = reason[:260].rsplit(" ", 1)[0].rstrip() + "…"
+                # Keep rows that have a usable score or a reason; this lets a
+                # provider omit one score while still showing its comment.
+                if not rating and not reason:
+                    continue
+                details.append({"name": name[:80], "rating": rating, "reason": reason})
+                if len(details) >= 12:
+                    break
+        except Exception:
+            return []
+        return details
+
+    def _parse_card_rating_response(self, text):
+        raw = re.sub(r'(?is)^```(?:json)?\s*|\s*```$', '', str(text or '')).strip()
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}", raw, re.S)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except Exception:
+                    data = None
+            if data is None:
+                m = re.search(r"\[.*\]", raw, re.S)
+                if m:
+                    try:
+                        data = json.loads(m.group(0))
+                    except Exception:
+                        data = None
+        rating = ""
+        reasoning = ""
+        details = []
+        if isinstance(data, list):
+            details = self._normalise_card_rating_details(data)
+        if isinstance(data, dict):
+            # Some providers wrap the useful JSON one level down.
+            payloads = [data]
+            for key in ("result", "evaluation", "cardRating", "card_rating", "rating_result", "ratingResult", "analysis"):
+                nested = data.get(key)
+                if isinstance(nested, dict):
+                    payloads.append(nested)
+            for payload in payloads:
+                if not isinstance(payload, dict):
+                    continue
+                if not rating:
+                    rating = self._normalise_card_rating_value(self._first_non_empty_value(payload, [
+                        "rating", "score", "overall", "overallRating", "overall_rating", "cardRating", "card_rating", "quality", "qualityScore", "quality_score", "ratingOutOf10", "rating_out_of_10", "scoreOutOf10", "score_out_of_10"
+                    ]))
+                if not details:
+                    for key in self._card_rating_detail_key_candidates():
+                        if key in payload:
+                            details = self._normalise_card_rating_details(payload.get(key))
+                            if details:
+                                break
+                if not details:
+                    details = self._normalise_card_rating_details(payload)
+                if not reasoning:
+                    reasoning_parts = []
+                    for key in ("reasoning", "reason", "summary", "overallReasoning", "overall_reasoning", "commentary", "comments", "feedback"):
+                        value = payload.get(key)
+                        if value:
+                            reasoning_parts.append(str(value).strip())
+                    for key, label in (("strengths", "Strengths"), ("improvements", "Areas to improve"), ("areas_to_improve", "Areas to improve"), ("areasToImprove", "Areas to improve"), ("suggestions", "Suggestions")):
+                        value = payload.get(key)
+                        if isinstance(value, list):
+                            lines = [str(v).strip() for v in value if str(v).strip()]
+                            if lines:
+                                reasoning_parts.append(label + ":\n" + "\n".join(f"- {x}" for x in lines[:6]))
+                        elif value:
+                            reasoning_parts.append(f"{label}: {str(value).strip()}")
+                    reasoning = "\n\n".join(x for x in reasoning_parts if x).strip()
+                if rating and reasoning and details:
+                    break
+        if not details:
+            details = self._normalise_card_rating_details(raw)
+        if not rating:
+            m = re.search(r"(?:rating|score)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*/\s*10", raw, re.I)
+            if not m:
+                m = re.search(r"\b(\d+(?:\.\d+)?)\s*/\s*10\b", raw, re.I)
+            if m:
+                rating = self._normalise_card_rating_value(m.group(1))
+        if not reasoning:
+            reasoning = raw.strip()
+            reasoning = re.sub(r"(?i)^\s*(?:rating|score)\s*[:=]?\s*\d+(?:\.\d+)?\s*/?\s*10\s*[-–—:]*\s*", "", reasoning).strip()
+        if len(reasoning) > 1800:
+            reasoning = reasoning[:1800].rsplit(" ", 1)[0].rstrip() + "…"
+        return rating, reasoning, details
+
+    def _card_rating_expected_detail_names(self):
+        return [
+            "Concept Clarity", "Character Identity", "Personality Depth", "Scenario Hook",
+            "Relationship to {{user}}", "First Message", "Formatting", "Specificity",
+            "Roleplay Usability", "Continuity/Lore",
+        ]
+
+    def _generate_required_card_rating_details(self, output, concept, browser_description, rating, reasoning, settings=None, reason_label='missing_details'):
+        """Force a dedicated AI request for true per-element rating details.
+
+        The normal card-rating prompt can be ignored by some models, which may return only
+        {"rating": ..., "reasoning": ...}.  This helper is intentionally separate and logs
+        as text_generation_request attempt=card_rating_details_required so the debug log proves
+        whether the second request happened.
+        """
+        try:
+            merged = self._normalise_settings({**self.settings, **(settings or {})})
+            validation = self._validate_text_api_settings(merged)
+            if not validation.get('ok'):
+                self._log_event('card_rating_details_required_skipped_settings', {
+                    'reason': reason_label,
+                    'error': validation.get('error'),
+                    'hasRating': bool(self._normalise_card_rating_value(rating)),
+                })
+                return []
+            if not self._normalise_card_rating_value(rating):
+                self._log_event('card_rating_details_required_skipped_no_rating', {'reason': reason_label})
+                return []
+
+            sections = self._parse_sections(output or '')
+            compact = {
+                "overall_rating": self._normalise_card_rating_value(rating),
+                "overall_reasoning": str(reasoning or '')[:1400],
+                "name": self._extract_name(output or ''),
+                "description": sections.get("description", "")[:1600],
+                "personality": sections.get("personality", "")[:2000],
+                "scenario": sections.get("scenario", "")[:2000],
+                "first_message": sections.get("first_message", "")[:1400],
+                "example_dialogues": sections.get("example_dialogues", "")[:1000],
+                "tags": sections.get("tags", "")[:500],
+                "concept": str(concept or '')[:1400],
+                "browser_description": str(browser_description or '')[:900],
+            }
+            expected = self._card_rating_expected_detail_names()
+            expected_text = ", ".join(expected)
+            local_settings = dict(merged)
+            local_settings['maxOutputTokens'] = min(2400, int(local_settings.get('maxOutputTokens') or 2400))
+            local_settings['temperature'] = min(0.2, float(local_settings.get('temperature', 0.2) or 0.2))
+            model_name = (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip()
+            self._log_event('card_rating_details_required_start', {
+                'reason': reason_label,
+                'rating': self._normalise_card_rating_value(rating),
+                'model': model_name,
+            })
+
+            prompt = "\n".join([
+                "You previously rated this fictional AI character card overall, but the saved project has no per-element breakdown.",
+                "Your task is ONLY to generate the missing Card Rating Details rows.",
+                "Do NOT repeat only the overall rating. Do NOT return only reasoning.",
+                "Return ONLY valid JSON with this exact top-level key: details.",
+                "Schema: {\"details\":[{\"name\":\"Concept Clarity\",\"rating\":8,\"reason\":\"one short sentence\"}]}",
+                "Include exactly 10 detail objects, in this exact order: " + expected_text + ".",
+                "Each rating must be numeric 0-10. Use varied scores where some elements are stronger or weaker.",
+                "Each reason must be specific to the card, not generic fallback wording.",
+                "No markdown. No prose outside JSON. No extra top-level keys.",
+                "",
+                "CARD DATA JSON:",
+                json.dumps(compact, ensure_ascii=False, indent=2),
+            ]).strip()
+
+            check = self._context_check(prompt, merged, mode_label='Card rating details required')
+            if not check.get('ok'):
+                self._log_event('card_rating_details_required_skipped_context', {'reason': reason_label, 'error': check.get('error')})
+                return []
+            text = self._chat_once(prompt, local_settings, model_name, 'card_rating_details_required')
+            self._log_event('card_rating_details_required_raw', {'reason': reason_label, 'preview': str(text or '')[:1200]})
+            if self._looks_like_text_refusal(text):
+                self._log_event('card_rating_details_required_refusal', {'reason': reason_label})
+                return []
+            _rating, _reasoning, details = self._parse_card_rating_response(text)
+            details = self._normalise_card_rating_details(details)
+            if not details:
+                raw = re.sub(r'(?is)^```(?:json)?\s*|\s*```$', '', str(text or '')).strip()
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    m_obj = re.search(r"\{.*\}", raw, re.S)
+                    m_arr = re.search(r"\[.*\]", raw, re.S)
+                    data = None
+                    if m_obj:
+                        try:
+                            data = json.loads(m_obj.group(0))
+                        except Exception:
+                            data = None
+                    if data is None and m_arr:
+                        try:
+                            data = json.loads(m_arr.group(0))
+                        except Exception:
+                            data = None
+                details = self._normalise_card_rating_details(data if data is not None else raw)
+            if details:
+                self._log_event('card_rating_details_required_parsed', {'reason': reason_label, 'count': len(details)})
+                return details
+
+            # Some models behave better with plain text than JSON after ignoring a JSON-only request.
+            plain_prompt = "\n".join([
+                "Generate the missing Card Rating Details for this fictional AI character card.",
+                "Return exactly 10 lines and nothing else.",
+                "Line format: Element Name: score/10 - one specific reason",
+                "Elements, in order: " + expected_text + ".",
+                "Use varied numeric scores where appropriate.",
+                "",
+                "CARD DATA JSON:",
+                json.dumps(compact, ensure_ascii=False, indent=2),
+            ]).strip()
+            check = self._context_check(plain_prompt, merged, mode_label='Card rating details required plain')
+            if not check.get('ok'):
+                self._log_event('card_rating_details_required_plain_skipped_context', {'reason': reason_label, 'error': check.get('error')})
+                return []
+            text2 = self._chat_once(plain_prompt, local_settings, model_name, 'card_rating_details_required_plain')
+            self._log_event('card_rating_details_required_plain_raw', {'reason': reason_label, 'preview': str(text2 or '')[:1200]})
+            if self._looks_like_text_refusal(text2):
+                return []
+            _rating2, _reasoning2, details2 = self._parse_card_rating_response(text2)
+            details2 = self._normalise_card_rating_details(details2 or text2)
+            if details2:
+                self._log_event('card_rating_details_required_plain_parsed', {'reason': reason_label, 'count': len(details2)})
+                return details2
+            self._log_event('card_rating_details_required_empty', {'reason': reason_label})
+            return []
+        except Exception as e:
+            self._log_event('card_rating_details_required_failed', {'reason': reason_label, 'error': str(e)})
+            return []
+
+    def _repair_missing_card_rating_details(self, output, concept, browser_description, rating, reasoning, settings):
+        """Ask for only the missing per-element breakdown when the first rating call omitted it."""
+        forced = self._generate_required_card_rating_details(
+            output, concept, browser_description, rating, reasoning, settings,
+            reason_label='ensure_repair_missing_details'
+        )
+        if forced:
+            return forced
+        try:
+            merged = self._normalise_settings({**self.settings, **(settings or {})})
+            if not self._validate_text_api_settings(merged).get('ok'):
+                return []
+            sections = self._parse_sections(output or '')
+            compact = {
+                "overall_rating": rating,
+                "overall_reasoning": str(reasoning or '')[:1200],
+                "name": self._extract_name(output or ''),
+                "description": sections.get("description", "")[:1400],
+                "personality": sections.get("personality", "")[:1800],
+                "scenario": sections.get("scenario", "")[:1800],
+                "first_message": sections.get("first_message", "")[:1200],
+                "example_dialogues": sections.get("example_dialogues", "")[:900],
+                "tags": sections.get("tags", "")[:400],
+                "concept": str(concept or '')[:1200],
+                "browser_description": str(browser_description or '')[:700],
+            }
+            expected = ", ".join(self._card_rating_expected_detail_names())
+            prompts = [
+                "\n".join([
+                    "The previous card-quality rating response did not include the required per-element breakdown.",
+                    "Create ONLY the missing breakdown for this fictional AI character card.",
+                    "Return ONLY valid JSON in exactly this shape:",
+                    "{\"details\":[{\"name\":\"Concept Clarity\",\"rating\":0-10,\"reason\":\"one short sentence\"}]}",
+                    "Include exactly these elements, in this order: " + expected + ".",
+                    "Use 0-10 numeric ratings. Vary the scores where the card has stronger/weaker areas.",
+                    "No markdown. No prose outside JSON. No extra top-level keys.",
+                    "",
+                    "CARD DATA JSON:",
+                    json.dumps(compact, ensure_ascii=False, indent=2),
+                ]).strip(),
+                "\n".join([
+                    "Return ONLY a JSON array of 10 rating objects for this fictional AI character card.",
+                    "Every object must have name, rating, and reason.",
+                    "Names, in order: " + expected + ".",
+                    "rating must be a number from 0 to 10. reason must be one concise sentence.",
+                    "Do not include the overall rating. Do not use markdown.",
+                    "CARD DATA JSON:",
+                    json.dumps(compact, ensure_ascii=False, indent=2),
+                ]).strip(),
+            ]
+            local_settings = dict(merged)
+            local_settings['maxOutputTokens'] = min(2000, int(local_settings.get('maxOutputTokens') or 2000))
+            local_settings['temperature'] = min(0.25, float(local_settings.get('temperature', 0.25) or 0.25))
+            model_name = (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip()
+            for idx, prompt in enumerate(prompts, start=1):
+                check = self._context_check(prompt, merged, mode_label='Card rating details repair')
+                if not check.get('ok'):
+                    self._log_event('card_rating_details_repair_skipped_context', {"error": check.get('error'), "attempt": idx})
+                    continue
+                text = self._chat_once(prompt, local_settings, model_name, 'card_rating_details')
+                self._log_event('card_rating_details_repair_raw', {'attempt': idx, 'preview': str(text or '')[:1200]})
+                if self._looks_like_text_refusal(text):
+                    continue
+                parsed_rating, parsed_reasoning, parsed_details = self._parse_card_rating_response(text)
+                if parsed_details:
+                    return parsed_details
+                raw = re.sub(r'(?is)^```(?:json)?\s*|\s*```$', '', str(text or '')).strip()
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    m_obj = re.search(r"\{.*\}", raw, re.S)
+                    m_arr = re.search(r"\[.*\]", raw, re.S)
+                    data = None
+                    if m_obj:
+                        try:
+                            data = json.loads(m_obj.group(0))
+                        except Exception:
+                            data = None
+                    if data is None and m_arr:
+                        try:
+                            data = json.loads(m_arr.group(0))
+                        except Exception:
+                            data = None
+                parsed = self._normalise_card_rating_details(data if data is not None else raw)
+                if parsed:
+                    return parsed
+        except Exception as e:
+            self._log_event('card_rating_details_repair_failed', {'error': str(e)})
+        return []
+
+    def _fallback_card_rating_details(self, output, concept='', browser_description='', rating='', reasoning=''):
+        """Create a conservative per-element breakdown when the model gives an overall score but omits details.
+
+        This prevents the UI from having a 9/10 card with an empty Details modal.  The rows are
+        intentionally labelled in their wording as a fallback-style breakdown: useful enough for the
+        user to inspect, but not pretending the model supplied bespoke per-element comments.
+        """
+        try:
+            base_text = self._normalise_card_rating_value(rating)
+            if not base_text:
+                return []
+            base = float(base_text)
+            sections = self._parse_sections(output or '')
+            output_text = str(output or '')
+            concept_text = str(concept or '')
+            desc_text = str(browser_description or '')
+
+            def has_section(name, min_len=80):
+                return len(str(sections.get(name, '') or '').strip()) >= min_len
+
+            def clamp_score(delta=0.0):
+                score = max(0.0, min(10.0, base + float(delta)))
+                if abs(score - round(score)) < 0.05:
+                    return str(int(round(score)))
+                return f"{score:.1f}".rstrip('0').rstrip('.')
+
+            def row(name, delta, good, weak):
+                present_reason = good if delta >= -0.2 else weak
+                return {"name": name, "rating": clamp_score(delta), "reason": present_reason[:220]}
+
+            has_name = bool(self._extract_name(output_text))
+            has_desc = has_section('description', 100) or len(desc_text) >= 80
+            has_personality = has_section('personality', 160)
+            has_scenario = has_section('scenario', 120)
+            has_first = has_section('first_message', 80) or has_section('first message', 80)
+            user_anchor = '{{user}}' in output_text or '{{ user }}' in output_text or '{{char}}' in output_text
+            dialogue_present = has_section('example_dialogues', 120) or has_section('example dialogue', 120)
+            headings = len(re.findall(r'(?m)^\s*(?:#{1,3}\s*)?[A-Za-z][A-Za-z /{}()\-]{2,40}\s*[:：]\s*$', output_text))
+            output_len = len(output_text.strip())
+            has_lore = bool(re.search(r'(?i)\b(backstory|history|lore|family|past|secret|work|job|school|relationship|friend|rival)\b', output_text))
+
+            details = [
+                row('Concept Clarity', 0 if (concept_text.strip() or has_desc or has_scenario) else -0.8,
+                    'The core premise is readable enough to support the overall rating.',
+                    'The premise could use clearer framing so the roleplay starts with less guesswork.'),
+                row('Character Identity', 0.2 if (has_name and has_desc) else -0.5,
+                    'Name/identity and descriptive cues are present enough for the character to feel defined.',
+                    'The card would benefit from stronger identity and visual/role definition.'),
+                row('Personality Depth', 0.2 if has_personality else -0.6,
+                    'The personality section gives the model useful behavioral direction.',
+                    'More concrete traits, contradictions, and speech behavior would strengthen the personality.'),
+                row('Scenario Hook', 0.1 if has_scenario else -0.7,
+                    'The scenario gives the chat a playable starting situation.',
+                    'The scenario hook needs more setup, stakes, or immediate direction.'),
+                row('Relationship to {{user}}', 0.1 if user_anchor else -0.6,
+                    'The card anchors the dynamic around {{user}} well enough for interaction.',
+                    'The relationship with {{user}} should be stated more directly.'),
+                row('First Message', 0.1 if has_first else -0.7,
+                    'The opening message appears usable as a roleplay launch point.',
+                    'A stronger first message would make the card easier to start from.'),
+                row('Formatting', 0 if (headings >= 2 or output_len < 5000) else -0.4,
+                    'The card is structured well enough for the frontend/model to read.',
+                    'Formatting could be cleaner or more concise to reduce bloat.'),
+                row('Specificity', 0.1 if output_len >= 1200 else -0.5,
+                    'There is enough specific information to guide the character beyond a generic archetype.',
+                    'More specific hooks, habits, boundaries, and details would improve consistency.'),
+                row('Roleplay Usability', 0.2 if (has_scenario and has_first and has_personality) else -0.4,
+                    'The card gives enough direction to support an ongoing chat.',
+                    'Usability would improve with clearer behavior rules, scene setup, and opening momentum.'),
+                row('Continuity/Lore', 0.1 if (has_lore or dialogue_present) else -0.3,
+                    'The card includes enough supporting context to maintain continuity.',
+                    'More lore, relationship context, or example dialogue would help long chats stay consistent.'),
+            ]
+            return self._normalise_card_rating_details(details)
+        except Exception as e:
+            self._log_event('card_rating_details_fallback_failed', {'error': str(e)})
+            return []
+
+
+    def _guaranteed_card_rating_details(self, output, concept='', browser_description='', rating='', reasoning=''):
+        """Last-ditch deterministic breakdown so rated cards never save with an empty details array.
+
+        The AI repair pass should normally create the real per-element comments. This method is
+        deliberately simple, local, and non-AI: it only runs if every AI/detail parser path failed.
+        """
+        try:
+            base_text = self._normalise_card_rating_value(rating) or "5"
+            base = float(base_text)
+        except Exception:
+            base = 5.0
+        text = "\n".join([str(output or ''), str(concept or ''), str(browser_description or ''), str(reasoning or '')])
+        lower = text.lower()
+
+        def present(pattern):
+            return bool(re.search(pattern, lower, re.I | re.S))
+
+        def score(delta):
+            value = max(0.0, min(10.0, base + float(delta)))
+            if abs(value - round(value)) < 0.05:
+                return str(int(round(value)))
+            return f"{value:.1f}".rstrip('0').rstrip('.')
+
+        row_specs = [
+            ("Concept Clarity", 0.2 if (concept or browser_description or present(r"\b(scenario|premise|hook|setup)\b")) else -0.5,
+             "Core premise is present, but this is a deterministic safety breakdown because no AI element details were saved."),
+            ("Character Identity", 0.1 if present(r"\b(name|description|appearance|age|occupation|role)\b") else -0.4,
+             "Identity cues appear present enough for the model to track the character."),
+            ("Personality Depth", 0.2 if present(r"\b(personality|trait|flaw|motivation|fear|habit|speech)\b") else -0.5,
+             "Personality direction appears present, though true AI per-element notes were not returned."),
+            ("Scenario Hook", 0.1 if present(r"\b(scenario|scene|first meet|opening|hook|event)\b") else -0.6,
+             "The setup appears playable enough to support the overall rating."),
+            ("Relationship to {{user}}", 0.1 if ('{{user}}' in text or '{{ user }}' in text or present(r"\b(user|relationship|dynamic)\b")) else -0.6,
+             "The card appears to include a usable relationship anchor for {{user}}."),
+            ("First Message", 0.1 if present(r"\b(first message|greeting|opening message|\*.*{{user}})\b") else -0.5,
+             "Opening-message support appears present, but regenerate can replace this with AI-specific feedback."),
+            ("Formatting", -0.2 if len(text) > 6500 else 0.1,
+             "Formatting appears readable enough for the app/model to consume."),
+            ("Specificity", 0.2 if len(text) > 1800 else -0.3,
+             "The card appears to include enough specific material to avoid feeling generic."),
+            ("Roleplay Usability", 0.1 if present(r"\b(scenario|first message|personality|{{user}})\b") else -0.4,
+             "The saved card appears usable for chat, but true per-element AI notes were missing."),
+            ("Continuity/Lore", 0.1 if present(r"\b(backstory|history|lore|family|friend|secret|past|job|school)\b") else -0.3,
+             "Supporting continuity/lore appears present enough for the overall score."),
+        ]
+        return [{"name": name, "rating": score(delta), "reason": reason[:240]} for name, delta, reason in row_specs]
+
+    def _ensure_card_rating_details(self, output, concept, browser_description, rating, reasoning, settings=None, existing_details=None, existing_source=''):
+        """Return non-empty normalized rating details whenever a rating exists.
+
+        Order of preference:
+        1. Already parsed/saved real details.
+        2. Details-only AI repair prompt.
+        3. Heuristic fallback based on card structure.
+        4. Guaranteed deterministic rows, so the frontend/database never store [] beside a rating.
+        """
+        details = self._normalise_card_rating_details(existing_details or [])
+        if details:
+            return details, (existing_source or 'existing')
+        if not self._normalise_card_rating_value(rating):
+            return [], 'none'
+        try:
+            repaired = self._repair_missing_card_rating_details(output, concept, browser_description, rating, reasoning, settings or self.settings)
+            repaired = self._normalise_card_rating_details(repaired)
+            if repaired:
+                self._log_event('card_rating_details_ensure_repaired', {'count': len(repaired)})
+                return repaired, 'ai_repair'
+        except Exception as e:
+            self._log_event('card_rating_details_ensure_repair_failed', {'error': str(e)})
+        try:
+            fallback = self._fallback_card_rating_details(output, concept, browser_description, rating, reasoning)
+            fallback = self._normalise_card_rating_details(fallback)
+            if fallback:
+                self._log_event('card_rating_details_ensure_fallback', {'count': len(fallback)})
+                return fallback, 'fallback'
+        except Exception as e:
+            self._log_event('card_rating_details_ensure_fallback_failed', {'error': str(e)})
+        guaranteed = self._normalise_card_rating_details(self._guaranteed_card_rating_details(output, concept, browser_description, rating, reasoning))
+        if guaranteed:
+            self._log_event('card_rating_details_ensure_guaranteed', {'count': len(guaranteed)})
+            return guaranteed, 'guaranteed'
+        return [], 'none'
+
+    def _boolish_from_value(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"true", "yes", "y", "1", "nsfw", "adult", "explicit"}:
+            return True
+        if text in {"false", "no", "n", "0", "sfw", "safe", "clean"}:
+            return False
+        return None
+
+    def _parse_nsfw_flag_from_rating_text(self, text):
+        try:
+            data = self._loads_model_json(text)
+        except Exception:
+            data = None
+        keys = [
+            "isNsfw", "is_nsfw", "nsfw", "adult", "adultContent", "adult_content",
+            "containsAdultContent", "contains_adult_content", "explicit", "explicitContent",
+            "explicit_content", "needsNsfwTag", "needs_nsfw_tag", "markNsfw", "mark_nsfw",
+        ]
+        def walk(obj):
+            if isinstance(obj, dict):
+                for key in keys:
+                    if key in obj:
+                        parsed = self._boolish_from_value(obj.get(key))
+                        if parsed is not None:
+                            return parsed
+                for key in ("result", "evaluation", "analysis", "metadata", "safety", "classification"):
+                    if key in obj:
+                        found = walk(obj.get(key))
+                        if found is not None:
+                            return found
+            return None
+        found = walk(data)
+        if found is not None:
+            return found
+        raw = str(text or "")
+        m = re.search(r"(?i)\b(?:isNsfw|is_nsfw|nsfw|adultContent|explicitContent|markNsfw)\b\s*[:=]\s*(true|false|yes|no|1|0|sfw|nsfw|adult|explicit)", raw)
+        if m:
+            return self._boolish_from_value(m.group(1))
+        return None
+
+    def _generate_card_nsfw_detection(self, output, concept='', browser_description='', settings=None, reason_label='missing_nsfw_flag'):
+        """Ask the text model whether this saved card should receive the editable NSFW marker tag."""
+        output = output or ''
+        if not output.strip() and not str(concept or '').strip():
+            return None
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        if not self._validate_text_api_settings(merged).get('ok'):
+            return None
+        try:
+            sections = self._parse_sections(output)
+            compact = {
+                "name": self._extract_name(output),
+                "description": sections.get("description", "")[:1600],
+                "personality": sections.get("personality", "")[:1800],
+                "scenario": sections.get("scenario", "")[:1800],
+                "first_message": sections.get("first_message", "")[:1200],
+                "example_dialogues": sections.get("example_dialogues", "")[:900],
+                "tags": sections.get("tags", "")[:500],
+                "concept": str(concept or '')[:1200],
+                "browser_description": str(browser_description or '')[:700],
+            }
+            prompt = "\n".join([
+                "Classify this fictional AI character card for library tagging only.",
+                "Return ONLY valid JSON with exactly this shape: {\"isNsfw\": true/false, \"reason\": \"short reason\"}",
+                "Set isNsfw true when the card contains explicit sexual content, porn/adult-industry content, fetish/kink roleplay, nudity/explicit sexual imagery, or is clearly intended for adult/NSFW roleplay.",
+                "Set isNsfw false for non-explicit romance, flirting, swimsuits, violence, angst, or mature themes without explicit sexual/adult-roleplay intent.",
+                "Do not judge whether the content is good or bad; this only decides whether the saved card should receive the user-configured NSFW marker tag.",
+                "",
+                "CARD DATA JSON:",
+                json.dumps(compact, ensure_ascii=False, indent=2),
+            ]).strip()
+            check = self._context_check(prompt, merged, mode_label='Card NSFW detection')
+            if not check.get('ok'):
+                self._log_event('card_nsfw_detection_skipped_context', {'reason': reason_label, 'error': check.get('error')})
+                return None
+            local_settings = dict(merged)
+            local_settings['maxOutputTokens'] = min(250, int(local_settings.get('maxOutputTokens') or 250))
+            local_settings['temperature'] = min(0.15, float(local_settings.get('temperature', 0.15) or 0.15))
+            model_name = (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip()
+            text = self._chat_once(prompt, local_settings, model_name, 'card_nsfw_detection')
+            flag = self._parse_nsfw_flag_from_rating_text(text)
+            self._log_event('card_nsfw_detection_result', {'reason': reason_label, 'isNsfw': flag, 'preview': str(text or '')[:600]})
+            return flag
+        except Exception as e:
+            self._log_event('card_nsfw_detection_failed', {'reason': reason_label, 'error': str(e)})
+            return None
+
+    def _generate_card_rating(self, output, concept='', browser_description='', settings=None):
+        """Rate saved card quality for Character Browser. Returns rating/reasoning or blanks on failure."""
+        output = output or ''
+        concept = concept or ''
+        browser_description = browser_description or ''
+        if not output.strip():
+            return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": self._card_rating_source_hash(output, concept, browser_description), "source": "none"}
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        source_hash = self._card_rating_source_hash(output, concept, browser_description)
+        if not self._validate_text_api_settings(merged).get('ok'):
+            return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": source_hash, "source": "none"}
+        try:
+            sections = self._parse_sections(output)
+            compact = {
+                "name": self._extract_name(output),
+                "description": sections.get("description", "")[:2200],
+                "personality": sections.get("personality", "")[:2600],
+                "scenario": sections.get("scenario", "")[:2600],
+                "first_message": sections.get("first_message", "")[:1800],
+                "example_dialogues": sections.get("example_dialogues", "")[:1400],
+                "tags": sections.get("tags", "")[:600],
+                "concept": concept[:1800],
+                "browser_description": browser_description[:900],
+            }
+            prompt = "\n".join([
+                "Evaluate the craft quality of this fictional AI character card for roleplay use.",
+                "Rate the CARD QUALITY out of 10. Do not rate morality, taste, genre, or whether the premise is wholesome; rate how usable and well-built the card is.",
+                "Criteria: clear concept, consistent personality, playable scenario hook, relationship/dynamic with {{user}}, useful first message, formatting, specificity, and whether the card gives enough direction without being bloated.",
+                "Return ONLY compact JSON with exactly these top-level keys: rating, reasoning, details, isNsfw.",
+                "The details key is REQUIRED and must be a non-empty array. Do not rename it to scores, ratings, categories, breakdown, or elementRatings.",
+                "Set isNsfw true if the card contains explicit sexual content, porn/adult-industry content, fetish/kink roleplay, nudity/explicit sexual imagery, or is clearly intended for adult/NSFW roleplay; otherwise false. Do not let NSFW status lower or raise the quality rating by itself.",
+                "{\"rating\": number from 0 to 10, \"reasoning\": \"2-5 concise sentences explaining the overall score, strengths, and areas to improve.\", \"details\": [{\"name\": \"Concept Clarity\", \"rating\": number from 0 to 10, \"reason\": \"one short sentence\"}], \"isNsfw\": true/false}",
+                "Include exactly these detail elements, in this order: " + ", ".join(self._card_rating_expected_detail_names()) + ".",
+                "Do not use markdown. Do not include extra keys except optional strengths/improvements arrays.",
+                "",
+                "CARD DATA JSON:",
+                json.dumps(compact, ensure_ascii=False, indent=2),
+            ]).strip()
+            check = self._context_check(prompt, merged, mode_label='Card rating')
+            if not check.get('ok'):
+                self._log_event('card_rating_skipped_context', {"error": check.get('error')})
+                return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": source_hash, "source": "none"}
+            local_settings = dict(merged)
+            local_settings['maxOutputTokens'] = min(1400, int(local_settings.get('maxOutputTokens') or 1400))
+            local_settings['temperature'] = min(0.35, float(local_settings.get('temperature', 0.35) or 0.35))
+            text = self._chat_once(prompt, local_settings, (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip(), 'card_rating')
+            if self._looks_like_text_refusal(text):
+                return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": source_hash, "source": "none"}
+            rating, reasoning, details = self._parse_card_rating_response(text)
+            is_nsfw = self._parse_nsfw_flag_from_rating_text(text)
+            if is_nsfw is None:
+                is_nsfw = self._generate_card_nsfw_detection(output, concept, browser_description, merged, reason_label='primary_rating_missing_nsfw_flag')
+            if not rating:
+                self._log_event('card_rating_parse_failed', {"preview": str(text or '')[:1200]})
+                return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": source_hash, "source": "none"}
+            detail_source = "ai" if details else ""
+            if not details:
+                self._log_event('card_rating_details_missing', {"rating": rating, "preview": str(text or '')[:1200]})
+                forced_details = self._generate_required_card_rating_details(
+                    output, concept, browser_description, rating, reasoning, merged,
+                    reason_label='primary_rating_response_missing_details'
+                )
+                forced_details = self._normalise_card_rating_details(forced_details)
+                if forced_details:
+                    details = forced_details
+                    detail_source = "ai_required"
+            details, ensured_source = self._ensure_card_rating_details(
+                output, concept, browser_description, rating, reasoning, merged,
+                existing_details=details, existing_source=detail_source
+            )
+            detail_source = ensured_source or detail_source or "none"
+            self._log_event('card_rating_details_final', {"count": len(details or []), "rating": rating, "detailSource": detail_source, "isNsfw": is_nsfw})
+            return {"rating": rating, "reasoning": reasoning, "details": details, "isNsfw": is_nsfw, "sourceHash": source_hash, "source": "ai", "detailSource": detail_source}
+        except Exception as e:
+            self._log_event('card_rating_generation_failed', {'error': str(e)})
+            return {"rating": "", "reasoning": "", "details": [], "isNsfw": None, "sourceHash": source_hash, "source": "none"}
+
+
+
+    def _section_display_name_for_diff(self, section_key, template=None):
+        """Return a human-readable section title for rating-improvement diffs."""
+        key = str(section_key or '').strip()
+        if not key:
+            return 'Unknown Section'
+        tmpl = template if isinstance(template, dict) else (self.template or DEFAULT_TEMPLATE)
+        try:
+            for sec in tmpl.get('sections', []):
+                if not isinstance(sec, dict):
+                    continue
+                title = str(sec.get('title') or '').strip()
+                if not title:
+                    continue
+                canon = self._canonical_heading_with_template(title, tmpl) or self._canonical_heading(title)
+                if canon == key:
+                    return title
+        except Exception:
+            pass
+        return key.replace('_', ' ').strip().title()
+
+    def _card_improvement_field_diffs(self, original, revised, template=None):
+        """Summarise which card sections changed between old and revised output."""
+        try:
+            tmpl = template if isinstance(template, dict) else (self.template or DEFAULT_TEMPLATE)
+            old_sections = self._parse_sections(original or '', tmpl)
+            new_sections = self._parse_sections(revised or '', tmpl)
+            ordered_keys = []
+            for sec in tmpl.get('sections', []):
+                if not isinstance(sec, dict):
+                    continue
+                title = str(sec.get('title') or '').strip()
+                if not title:
+                    continue
+                key = self._canonical_heading_with_template(title, tmpl) or self._canonical_heading(title)
+                if key and key not in ordered_keys:
+                    ordered_keys.append(key)
+            for key in list(old_sections.keys()) + list(new_sections.keys()):
+                if key and key not in ordered_keys:
+                    ordered_keys.append(key)
+            if not ordered_keys:
+                ordered_keys = ['full_card']
+                old_sections = {'full_card': str(original or '').strip()}
+                new_sections = {'full_card': str(revised or '').strip()}
+            diffs = []
+            for key in ordered_keys:
+                old = str(old_sections.get(key, '') or '').strip()
+                new = str(new_sections.get(key, '') or '').strip()
+                if not old and not new:
+                    continue
+                if old and new:
+                    status = 'unchanged' if old == new else 'changed'
+                elif old and not new:
+                    status = 'removed'
+                else:
+                    status = 'added'
+                diffs.append({
+                    'name': self._section_display_name_for_diff(key, tmpl),
+                    'key': key,
+                    'status': status,
+                    'oldLength': len(old),
+                    'newLength': len(new),
+                    'delta': len(new) - len(old),
+                    'oldPreview': (old[:220].rsplit(' ', 1)[0].rstrip() + '…') if len(old) > 240 else old,
+                    'newPreview': (new[:220].rsplit(' ', 1)[0].rstrip() + '…') if len(new) > 240 else new,
+                })
+            return diffs[:40]
+        except Exception as e:
+            self._log_event('card_rating_improvement_field_diff_failed', {'error': str(e)})
+            return []
+
+    def _parse_lost_detail_response(self, text):
+        """Parse AI lost-detail audit into a compact list plus summary."""
+        raw = re.sub(r'(?is)^```(?:json)?\s*|\s*```$', '', str(text or '')).strip()
+        data = None
+        try:
+            data = json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}|\[.*\]", raw, re.S)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except Exception:
+                    data = None
+        summary = ''
+        items = []
+        if isinstance(data, dict):
+            summary = str(data.get('summary') or data.get('note') or '').strip()
+            for key in ('possiblyRemovedDetails', 'possibleRemovedDetails', 'lostDetails', 'removedDetails', 'possibly_removed_details', 'details'):
+                value = data.get(key)
+                if isinstance(value, list):
+                    items = [str(v).strip() for v in value if str(v).strip()]
+                    break
+                if isinstance(value, str) and value.strip():
+                    items = [line.strip(' -•\t') for line in value.splitlines() if line.strip(' -•\t')]
+                    break
+        elif isinstance(data, list):
+            items = [str(v).strip() for v in data if str(v).strip()]
+        if not items:
+            for line in raw.splitlines():
+                cleaned = line.strip()
+                cleaned = re.sub(r'^[-*•\d.)\s]+', '', cleaned).strip()
+                if cleaned and not re.match(r'(?i)^(possibly removed details|lost details|summary)\s*[:：]?$', cleaned):
+                    items.append(cleaned)
+        clean_items = []
+        seen = set()
+        for item in items:
+            item = re.sub(r'\s+', ' ', item).strip(' -•\t')
+            if not item or item.lower() in {'none', 'nothing', 'no details removed', 'no obvious details removed'}:
+                continue
+            if len(item) > 220:
+                item = item[:220].rsplit(' ', 1)[0].rstrip() + '…'
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                clean_items.append(item)
+            if len(clean_items) >= 12:
+                break
+        if len(summary) > 420:
+            summary = summary[:420].rsplit(' ', 1)[0].rstrip() + '…'
+        return {'summary': summary, 'items': clean_items}
+
+    def _generate_lost_detail_check(self, original, revised, concept='', settings=None):
+        """Ask the AI to audit whether the improvement accidentally removed important facts."""
+        try:
+            original = str(original or '').strip()
+            revised = str(revised or '').strip()
+            if not original or not revised:
+                return {'items': [], 'summary': '', 'source': 'none'}
+            merged = self._normalise_settings({**self.settings, **(settings or {})})
+            prompt = "\n".join([
+                "Compare the ORIGINAL and REVISED fictional AI character cards.",
+                "Your job is NOT to judge writing quality. Only identify important facts, constraints, or roleplay hooks that may have been removed, weakened, contradicted, or changed in the revised card.",
+                "Be conservative: list only details a human reviewer should double-check.",
+                "Return JSON only in this shape:",
+                "{\"summary\": \"one short sentence\", \"possiblyRemovedDetails\": [\"detail 1\", \"detail 2\"]}",
+                "If nothing obvious was lost, return an empty array.",
+                "Important facts include names, ages, relationships, setting, backstory, jobs, kinks, boundaries, roleplay premise, first-meeting setup, and recurring character-specific details.",
+                "",
+                "ORIGINAL MAIN CONCEPT",
+                str(concept or '').strip() or "(No concept supplied.)",
+                "",
+                "ORIGINAL CARD",
+                original,
+                "",
+                "REVISED CARD",
+                revised,
+            ]).strip()
+            check = self._context_check(prompt, merged, mode_label='Card improvement lost-detail check')
+            if not check.get('ok'):
+                return {'items': [], 'summary': 'Lost-detail check skipped: ' + str(check.get('error') or 'context too large'), 'source': 'skipped'}
+            local_settings = dict(merged)
+            local_settings['streamAi'] = False
+            local_settings['_streamTarget'] = ''
+            model = (local_settings.get('aiSuggestionModel') or local_settings.get('model') or '').strip()
+            text = self._chat_once(prompt, local_settings, model, 'card_improvement_lost_detail_check')
+            parsed = self._parse_lost_detail_response(text)
+            parsed['source'] = 'ai'
+            return parsed
+        except Exception as e:
+            self._log_event('card_rating_improvement_lost_detail_failed', {'error': str(e)})
+            return {'items': [], 'summary': f'Lost-detail check failed: {e}', 'source': 'error'}
+
+    def generate_card_improvement_from_rating(self, project_path, settings=None):
+        """Generate a preview revision that applies the saved AI rating suggestions."""
+        try:
+            path = Path(project_path)
+            if not path.exists():
+                return {"ok": False, "error": "Character project not found."}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            output = str(project.get("output") or "").strip()
+            concept = str(project.get("concept") or "").strip()
+            rating = str(project.get("cardRating") or "").strip()
+            reasoning = str(project.get("cardRatingReasoning") or "").strip()
+            if not output:
+                return {"ok": False, "error": "This project has no generated card text to improve."}
+            if not reasoning:
+                return {"ok": False, "error": "Generate an AI Card Rating first so the model has improvement notes to apply."}
+
+            active_settings = self._normalise_settings({**self.settings, **(settings or project.get("settings") or {})})
+            settings_check = self._validate_text_api_settings(active_settings)
+            if not settings_check.get("ok"):
+                return settings_check
+            template = project.get("template") or self.template
+            if not isinstance(template, dict):
+                template = self.template
+            sections = [str(sec.get("title") or "").strip() for sec in template.get("sections", []) if isinstance(sec, dict) and sec.get("enabled", True) and str(sec.get("title") or "").strip()]
+            name = self._extract_name(output) or project.get("name") or "the character"
+            prompt = "\n".join([
+                "Revise this fictional AI character card by applying the improvement suggestions from its AI Card Rating.",
+                "Return the COMPLETE revised character card only, not a diff, not commentary, and not markdown fences.",
+                "SAFETY / PRESERVATION RULES:",
+                "- Do not remove or contradict existing facts.",
+                "- Do not change names, ages, relationships, setting, backstory, kinks, boundaries, or roleplay premise unless the rating notes explicitly demand it.",
+                "- Do not simplify the card by deleting specific details. Preserve unique hooks, jobs, locations, history, and first-meeting setup.",
+                "- Improve wording, clarity, specificity, and roleplay usefulness while preserving the card's intent.",
+                "Keep the same character name unless the current card is obviously missing/invalid.",
+                "Preserve the premise, genre, relationship dynamic, and tone. Improve craft/usability; do not sanitize, moralize, or replace the user's chosen scenario.",
+                "Focus on the rating feedback: make the concept clearer, deepen personality consistency, sharpen the scenario hook, improve {{user}} involvement, strengthen the first message, and clean formatting where needed.",
+                "Keep the same section order and headings when possible.",
+                f"Expected section order: {', '.join(sections) if sections else 'preserve the current card headings'}",
+                f"Current character name: {name}",
+                f"Current rating: {rating + '/10' if rating else 'not scored'}",
+                "",
+                "AI CARD RATING REASONING / IMPROVEMENT NOTES",
+                reasoning,
+                "",
+                "ORIGINAL MAIN CONCEPT",
+                concept or "(No original concept supplied.)",
+                "",
+                "CURRENT CHARACTER CARD",
+                output,
+            ]).strip()
+            check = self._context_check(prompt, active_settings, mode_label="Card rating improvement")
+            if not check.get("ok"):
+                return check
+            local_settings = dict(active_settings)
+            # Preview generation should not stream into the main Output box.
+            local_settings["streamAi"] = False
+            local_settings["_streamTarget"] = ""
+            revised = self._clean_generated_output(self._chat(prompt, local_settings))
+            if not revised or self._looks_like_text_refusal(revised):
+                return {"ok": False, "error": "The model did not return a usable revised card."}
+            validation = self.validate_output_against_template(revised, template, active_settings)
+            field_diffs = self._card_improvement_field_diffs(output, revised, template)
+            lost_check = self._generate_lost_detail_check(output, revised, concept, active_settings)
+            self._log_event("card_rating_improvement_preview", {
+                "project": str(path),
+                "rating": rating,
+                "validation": validation,
+                "changedFields": len([d for d in field_diffs if d.get('status') != 'unchanged']),
+                "lostDetailCount": len(lost_check.get('items') or [])
+            })
+            return {
+                "ok": True,
+                "projectPath": str(path),
+                "name": str(project.get("name") or name),
+                "rating": rating,
+                "reasoning": reasoning,
+                "output": revised,
+                "validation": validation,
+                "fieldDiffs": field_diffs,
+                "lostDetails": lost_check.get('items') or [],
+                "lostDetailSummary": lost_check.get('summary') or '',
+                "lostDetailSource": lost_check.get('source') or '',
+            }
+        except Exception as e:
+            self._log_event("card_rating_improvement_failed", {"project": str(project_path), "error": str(e)})
+            return {"ok": False, "error": f"Could not generate card improvement preview: {e}"}
+
+    # CamelCase aliases for PyWebView/AppImage builds that sometimes expose or
+    # cache method tables differently from the browser JavaScript context.
+    def generateCardImprovementFromRating(self, project_path, settings=None):
+        return self.generate_card_improvement_from_rating(project_path, settings)
+
+    def improveCardFromRating(self, project_path, settings=None):
+        return self.generate_card_improvement_from_rating(project_path, settings)
+
+    def applyCardImprovementPreview(self, project_path, revised_output, settings=None):
+        return self.apply_card_improvement_preview(project_path, revised_output, settings)
+
+    def commitCardImprovementPreview(self, project_path, revised_output, settings=None):
+        return self.apply_card_improvement_preview(project_path, revised_output, settings)
+
+    def _strip_volatile_image_settings(self, settings_obj):
+        """Remove current-editor image fields from settings before saving a different saved card.
+
+        The global Settings object often contains the most recently generated/selected
+        image.  When committing an AI Rating improvement for an older saved card,
+        those volatile fields must not override the card's own saved image.
+        """
+        out = dict(settings_obj or {}) if isinstance(settings_obj, dict) else {}
+        for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+            out.pop(key, None)
+        return out
+
+    def _project_saved_card_image_source(self, project, project_path=None, reason="project_saved_card_image"):
+        """Resolve the original image belonging to a saved project, not the current editor image."""
+        project = project if isinstance(project, dict) else {}
+        workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+        settings_obj = project.get("settings") if isinstance(project.get("settings"), dict) else {}
+        workspace_settings = workspace.get("settings") if isinstance(workspace.get("settings"), dict) else {}
+        candidates = []
+
+        def add(value):
+            if value is None:
+                return
+            value = str(value or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+
+        for obj in (project, workspace, settings_obj, workspace_settings):
+            if not isinstance(obj, dict):
+                continue
+            for key in ("cardImagePath", "imagePath", "imageDataUrl", "cardImageDataUrl"):
+                add(obj.get(key))
+
+        # First preserve an explicit image field if it still exists or can be materialized.
+        for candidate in candidates:
+            local = self._ensure_local_card_image_path(candidate, "card", reason)
+            if local:
+                self._log_event("card_rating_improvement_image_preserved", {"method": "explicit_project_image", "path": local, "project": str(project_path or "")})
+                return local
+
+        # Then use the saved project's own asset DB / JSON / legacy card PNG fallbacks.
+        if project_path:
+            selected = candidates[0] if candidates else ""
+            local = self._resolve_front_porch_export_image(selected, project_path=project_path, loaded_project=project, reason=reason)
+            if local:
+                self._log_event("card_rating_improvement_image_preserved", {"method": "project_asset_or_legacy", "path": local, "project": str(project_path)})
+                return local
+
+        self._log_event("card_rating_improvement_image_missing", {"project": str(project_path or ""), "candidateCount": len(candidates)})
+        return candidates[0] if candidates else ""
+
+    def apply_card_improvement_preview(self, project_path, revised_output, settings=None):
+        """Commit a previewed AI rating improvement back into the saved character project."""
+        try:
+            path = Path(project_path)
+            if not path.exists():
+                return {"ok": False, "error": "Character project not found."}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            revised_output = str(revised_output or "").strip()
+            if not revised_output:
+                return {"ok": False, "error": "The preview is empty. Nothing was committed."}
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            workspace = dict(workspace)
+
+            # Preserve the saved card's own image before merging any live editor settings.
+            # Otherwise the current Settings cardImagePath can overwrite an older card with
+            # the last generated image from another workspace.
+            image_path = self._project_saved_card_image_source(project, path, "card_rating_improvement_commit")
+
+            project_settings = project.get("settings") if isinstance(project.get("settings"), dict) else {}
+            incoming_settings = self._strip_volatile_image_settings(settings or {})
+            merged_settings = {**project_settings, **incoming_settings}
+            if image_path:
+                merged_settings["cardImagePath"] = image_path
+
+            workspace["output"] = revised_output
+            workspace["concept"] = project.get("concept") or workspace.get("concept") or ""
+            workspace["template"] = project.get("template") or workspace.get("template") or self.template
+            workspace["settings"] = merged_settings
+            workspace["builderState"] = project.get("builderState") or workspace.get("builderState") or {}
+            workspace["qnaAnswers"] = project.get("qnaAnswers") or workspace.get("qnaAnswers") or ""
+            workspace["emotionImages"] = project.get("emotionImages") or workspace.get("emotionImages") or []
+            workspace["generatedImages"] = project.get("generatedImages") or workspace.get("generatedImages") or []
+            workspace["characterTabs"] = project.get("characterTabs") or workspace.get("characterTabs") or []
+            workspace["emotionManifest"] = project.get("emotionManifest") or workspace.get("emotionManifest") or ""
+            workspace["visionDescription"] = project.get("visionDescription") or workspace.get("visionDescription") or ""
+            workspace["conceptAttachments"] = project.get("conceptAttachments") or workspace.get("conceptAttachments") or []
+            workspace["virtualFolderId"] = str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or "")
+            workspace["cardImagePath"] = image_path
+            workspace["imagePath"] = image_path
+            workspace["_disableSettingsCardImageFallback"] = True
+            # Force fresh description/rating for the revised card instead of carrying stale scores forward.
+            workspace["browserDescription"] = ""
+            workspace["browserDescriptionSource"] = ""
+            workspace["cardRating"] = ""
+            workspace["cardRatingReasoning"] = ""
+            workspace["cardRatingDetails"] = []
+            workspace["cardRatingSourceHash"] = ""
+            result = self.save_character_workspace(workspace)
+            if result.get("ok"):
+                self._log_event("card_rating_improvement_committed", {"oldProject": str(path), "newProject": result.get("projectPath"), "preservedImage": image_path})
+            return result
+        except Exception as e:
+            self._log_event("card_rating_improvement_commit_failed", {"project": str(project_path), "error": str(e)})
+            return {"ok": False, "error": f"Could not commit improved card: {e}"}
+
     def _clean_character_tag(self, value):
         tag = str(value or "").strip().strip(",;|/\\").strip().strip('"\'`“”‘’')
         tag = re.sub(r"^[-•*]+\s*", "", tag).strip()
@@ -5873,6 +7176,44 @@ class Api:
                 seen.add(key)
                 cleaned.append(tag)
         return cleaned[:30]
+
+    def _nsfw_tags_from_settings(self, settings=None):
+        """Return the editable list of tags that should mark a card as NSFW.
+
+        The visible default is "NSFW", but stored card tags are normalized by
+        _clean_character_tag, so matching is case-insensitive and normally becomes
+        the lower-case tag "nsfw" in card data.
+        """
+        try:
+            merged = settings if isinstance(settings, dict) else self.settings
+            raw = (merged or {}).get("nsfwTags", DEFAULT_SETTINGS.get("nsfwTags", "NSFW"))
+            if isinstance(raw, list):
+                pieces = raw
+            else:
+                pieces = re.split(r"[,\n]+", str(raw or ""))
+            tags = self._clean_character_tags(pieces)
+            return tags or [self._clean_character_tag("NSFW") or "nsfw"]
+        except Exception:
+            return ["nsfw"]
+
+    def _primary_nsfw_tag(self, settings=None):
+        tags = self._nsfw_tags_from_settings(settings)
+        return tags[0] if tags else "nsfw"
+
+    def _tag_list_has_nsfw_marker(self, tags, settings=None):
+        nsfw_keys = {self._normalise_tag_key(t) for t in self._nsfw_tags_from_settings(settings)}
+        return any(self._normalise_tag_key(self._clean_character_tag(t)) in nsfw_keys for t in (tags or []))
+
+    def _add_nsfw_tag_to_list(self, tags, settings=None):
+        clean_tags = self._clean_character_tags(tags or [])
+        if self._tag_list_has_nsfw_marker(clean_tags, settings):
+            return clean_tags, False
+        tag = self._primary_nsfw_tag(settings)
+        if tag:
+            clean_tags.append(tag)
+            self._log_event("nsfw_tag_added", {"tag": tag})
+            return self._clean_character_tags(clean_tags), True
+        return clean_tags, False
 
     def _extract_tags_from_output(self, output, template=None):
         try:
@@ -6100,14 +7441,86 @@ class Api:
             concept = project.get("concept") or ""
             if not output.strip() and not concept.strip():
                 return {"ok": False, "error": "This project has no card text to summarize."}
-            desc = self._generate_browser_description(output, concept, settings or project.get("settings") or self.settings)
+            active_settings = settings or project.get("settings") or self.settings
+            desc = self._generate_browser_description(output, concept, active_settings)
             source = "ai" if self._last_browser_description_source == "ai" else "extracted"
+            # Always try to refresh the rating/details when the user explicitly presses
+            # Regenerate AI Description. Older builds only rated when the description
+            # source was AI; if the description fell back to extracted text, the response
+            # could keep a stale overall score in the frontend while returning no details.
+            existing_rating = str(project.get("cardRating") or "").strip()
+            existing_reasoning = str(project.get("cardRatingReasoning") or "").strip()
+            existing_details = project.get("cardRatingDetails") if isinstance(project.get("cardRatingDetails"), list) else []
+            rating_info = self._generate_card_rating(output, concept, desc, active_settings)
+            rating = str(rating_info.get("rating") or existing_rating or "").strip()
+            reasoning = str(rating_info.get("reasoning") or existing_reasoning or "").strip()
+            details = rating_info.get("details") if isinstance(rating_info.get("details"), list) else []
+            detail_source = str(rating_info.get("detailSource") or "").strip()
+            if rating and not details:
+                self._log_event("browser_description_rating_details_missing_post_rating", {"project": str(path), "rating": rating})
+                forced_details = self._generate_required_card_rating_details(
+                    output, concept, desc, rating, reasoning, active_settings,
+                    reason_label='regenerate_browser_description_post_rating'
+                )
+                forced_details = self._normalise_card_rating_details(forced_details)
+                if forced_details:
+                    details = forced_details
+                    detail_source = "ai_required_post_rating"
+            if not details and existing_details:
+                details = existing_details
+                detail_source = detail_source or "existing"
+            if rating:
+                details, ensured_source = self._ensure_card_rating_details(
+                    output, concept, desc, rating, reasoning, active_settings,
+                    existing_details=details, existing_source=detail_source
+                )
+                detail_source = ensured_source or detail_source or "none"
+            source_hash = rating_info.get("sourceHash") or self._card_rating_source_hash(output, concept, desc)
+            nsfw_flag = rating_info.get("isNsfw", None)
+            if nsfw_flag is None:
+                nsfw_flag = self._generate_card_nsfw_detection(output, concept, desc, active_settings, reason_label='regenerate_browser_description_missing_nsfw_flag')
+            nsfw_tag_added = False
+            if nsfw_flag is True:
+                current_tags = project.get("tags") if isinstance(project.get("tags"), list) else self._extract_tags_from_output(output, project.get("template") or self.template)
+                new_tags, nsfw_tag_added = self._add_nsfw_tag_to_list(current_tags, active_settings)
+                if nsfw_tag_added:
+                    output = self._replace_tags_section(output, new_tags, project.get("template") or self.template)
+                    project["output"] = output
+                    project["tags"] = new_tags
+                    source_hash = self._card_rating_source_hash(output, concept, desc)
+                    try:
+                        (path.parent / "latest_output.md").write_text(output, encoding="utf-8")
+                    except Exception:
+                        pass
+            self._log_event("browser_description_rating_regenerated", {
+                "project": str(path),
+                "source": source,
+                "rating": rating,
+                "detailCount": len(details or []) if isinstance(details, list) else 0,
+                "detailSource": detail_source,
+                "hadExistingRating": bool(existing_rating),
+                "isNsfw": nsfw_flag,
+                "nsfwTagAdded": nsfw_tag_added,
+            })
             project["browserDescription"] = desc
             project["browserDescriptionSourceHash"] = self._browser_description_source_hash(output, concept)
             project["browserDescriptionSource"] = source
+            project["cardRating"] = rating
+            project["cardRatingReasoning"] = reasoning
+            project["cardRatingDetails"] = details if isinstance(details, list) else []
+            project["cardRatingSourceHash"] = source_hash
+            project["cardRatingDetailSource"] = detail_source
             workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            workspace["output"] = project.get("output") or output
+            if isinstance(project.get("tags"), list):
+                workspace["tags"] = project.get("tags")
             workspace["browserDescription"] = desc
             workspace["browserDescriptionSource"] = source
+            workspace["cardRating"] = project["cardRating"]
+            workspace["cardRatingReasoning"] = project["cardRatingReasoning"]
+            workspace["cardRatingDetails"] = project["cardRatingDetails"]
+            workspace["cardRatingSourceHash"] = project["cardRatingSourceHash"]
+            workspace["cardRatingDetailSource"] = detail_source
             project["workspace"] = workspace
             project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -6115,10 +7528,122 @@ class Api:
                 self._refresh_library_cache_for_project(path, force=True)
             except Exception:
                 pass
-            return {"ok": True, "browserDescription": desc, "browserDescriptionSource": source, "projectPath": str(path)}
+            details = project.get("cardRatingDetails") if isinstance(project.get("cardRatingDetails"), list) else []
+            rating = project.get("cardRating") or ""
+            reasoning = project.get("cardRatingReasoning") or ""
+            source_hash = project.get("cardRatingSourceHash") or ""
+            return {
+                "ok": True,
+                "success": True,
+                "browserDescription": desc,
+                "browserDescriptionSource": source,
+                "cardRating": rating,
+                "cardRatingReasoning": reasoning,
+                "cardRatingDetails": details,
+                "cardRatingSourceHash": source_hash,
+                "cardRatingDetailSource": detail_source,
+                # Alias keys keep older/newer frontend handlers from silently dropping the breakdown.
+                "rating": rating,
+                "reasoning": reasoning,
+                "details": details,
+                "detailSource": detail_source,
+                "sourceHash": source_hash,
+                "source_hash": source_hash,
+                "projectPath": str(path),
+                "isNsfw": nsfw_flag,
+                "nsfwTagAdded": nsfw_tag_added,
+                "tags": project.get("tags") if isinstance(project.get("tags"), list) else [],
+            }
         except Exception as e:
             self._log_event("regenerate_browser_description_failed", {"project": str(project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not regenerate browser description: {e}"}
+
+    def ensure_card_rating_details_for_project(self, project_path, settings=None):
+        """Generate/save missing per-element rating details for an already-rated project.
+
+        This is used as a repair path from the Details modal and after regenerating the
+        browser description. It reads the saved project from disk, repairs missing details,
+        writes them back to both project and workspace, and refreshes the browser cache.
+        """
+        try:
+            path = Path(project_path)
+            if not path.exists():
+                return {"ok": False, "error": "Character project not found."}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            output = project.get("output") or workspace.get("output") or ""
+            concept = project.get("concept") or workspace.get("concept") or ""
+            browser_description = project.get("browserDescription") or workspace.get("browserDescription") or self._fallback_browser_description(output, concept)
+            rating = str(project.get("cardRating") or workspace.get("cardRating") or "").strip()
+            reasoning = str(project.get("cardRatingReasoning") or workspace.get("cardRatingReasoning") or "").strip()
+            existing_details = project.get("cardRatingDetails") if isinstance(project.get("cardRatingDetails"), list) else (workspace.get("cardRatingDetails") if isinstance(workspace.get("cardRatingDetails"), list) else [])
+            active_settings = settings or project.get("settings") or self.settings
+
+            # If the project somehow has reasoning but no score, try a full rating pass first.
+            detail_source = "existing" if existing_details else ""
+            if not rating and output.strip():
+                rating_info = self._generate_card_rating(output, concept, browser_description, active_settings)
+                rating = str(rating_info.get("rating") or "").strip()
+                reasoning = str(rating_info.get("reasoning") or reasoning or "").strip()
+                existing_details = rating_info.get("details") if isinstance(rating_info.get("details"), list) else existing_details
+                detail_source = str(rating_info.get("detailSource") or detail_source or "").strip()
+
+            if rating and not existing_details:
+                forced_details = self._generate_required_card_rating_details(
+                    output, concept, browser_description, rating, reasoning, active_settings,
+                    reason_label='details_modal_or_project_repair'
+                )
+                forced_details = self._normalise_card_rating_details(forced_details)
+                if forced_details:
+                    existing_details = forced_details
+                    detail_source = "ai_required_project_repair"
+            details, ensured_source = self._ensure_card_rating_details(
+                output, concept, browser_description, rating, reasoning, active_settings,
+                existing_details=existing_details, existing_source=detail_source
+            )
+            detail_source = ensured_source or detail_source or "none"
+
+            source_hash = project.get("cardRatingSourceHash") or workspace.get("cardRatingSourceHash") or self._card_rating_source_hash(output, concept, browser_description)
+            project["cardRating"] = rating
+            project["cardRatingReasoning"] = reasoning
+            project["cardRatingDetails"] = details
+            project["cardRatingSourceHash"] = source_hash
+            project["cardRatingDetailSource"] = detail_source
+            workspace["cardRating"] = rating
+            workspace["cardRatingReasoning"] = reasoning
+            workspace["cardRatingDetails"] = details
+            workspace["cardRatingSourceHash"] = source_hash
+            workspace["cardRatingDetailSource"] = detail_source
+            project["workspace"] = workspace
+            project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                self._refresh_library_cache_for_project(path, force=True)
+            except Exception:
+                pass
+            self._log_event("card_rating_details_project_ensured", {"project": str(path), "rating": rating, "detailCount": len(details or []), "detailSource": detail_source})
+            return {
+                "ok": True,
+                "success": True,
+                "cardRating": rating,
+                "cardRatingReasoning": reasoning,
+                "cardRatingDetails": details,
+                "cardRatingSourceHash": source_hash,
+                "cardRatingDetailSource": detail_source,
+                "rating": rating,
+                "reasoning": reasoning,
+                "details": details,
+                "detailSource": detail_source,
+                "sourceHash": source_hash,
+                "source_hash": source_hash,
+                "projectPath": str(path),
+            }
+        except Exception as e:
+            self._log_event("ensure_card_rating_details_failed", {"project": str(project_path), "error": str(e)})
+            return {"ok": False, "error": f"Could not ensure card rating details: {e}"}
 
     def update_character_project_tags(self, project_path, tags):
         try:
@@ -6191,11 +7716,19 @@ class Api:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         folder = self._character_export_dir(safe_name)
         settings = self._normalise_settings(workspace.get("settings") or self.settings)
-        image_path = workspace.get("cardImagePath") or workspace.get("imagePath") or settings.get("cardImagePath") or ""
+        disable_settings_image_fallback = bool(workspace.get("_disableSettingsCardImageFallback") or workspace.get("_preserveExistingCardImage"))
+        image_path = workspace.get("cardImagePath") or workspace.get("imagePath") or ("" if disable_settings_image_fallback else (settings.get("cardImagePath") or ""))
         original_image_path = str(image_path or "").strip()
         local_image_path = self._ensure_local_card_image_path(original_image_path, "card", "save_character_workspace") if original_image_path else ""
-        if not local_image_path:
+        if not local_image_path and not disable_settings_image_fallback:
             local_image_path = self._resolve_workspace_card_image_path(workspace, original_image_path, "save_character_workspace_generated_base64")
+        elif not local_image_path and disable_settings_image_fallback and original_image_path:
+            # Only try candidates that are directly tied to this saved workspace; do not
+            # allow the live Settings cardImagePath to supply a different character image.
+            stripped_workspace = dict(workspace)
+            stripped_settings = self._strip_volatile_image_settings(stripped_workspace.get("settings") or {})
+            stripped_workspace["settings"] = stripped_settings
+            local_image_path = self._resolve_workspace_card_image_path(stripped_workspace, original_image_path, "save_character_workspace_preserve_image")
         if local_image_path:
             image_path = local_image_path
             settings["cardImagePath"] = local_image_path
@@ -6232,6 +7765,57 @@ class Api:
         if not browser_description:
             browser_description = self._generate_browser_description(output, concept, settings)
             browser_description_source = "ai" if self._last_browser_description_source == "ai" else "extracted"
+        card_rating_source_hash = self._card_rating_source_hash(output, concept, browser_description)
+        previous_rating_hash = str(previous_project.get("cardRatingSourceHash") or "").strip()
+        card_rating = str(workspace.get("cardRating") or "").strip()
+        card_rating_reasoning = str(workspace.get("cardRatingReasoning") or "").strip()
+        card_rating_details = workspace.get("cardRatingDetails") if isinstance(workspace.get("cardRatingDetails"), list) else []
+        if (not card_rating) and previous_rating_hash == card_rating_source_hash:
+            card_rating = str(previous_project.get("cardRating") or "").strip()
+            card_rating_reasoning = str(previous_project.get("cardRatingReasoning") or "").strip()
+            card_rating_details = previous_project.get("cardRatingDetails") if isinstance(previous_project.get("cardRatingDetails"), list) else []
+        if card_rating and (not card_rating_details) and previous_rating_hash == card_rating_source_hash:
+            previous_details = previous_project.get("cardRatingDetails") if isinstance(previous_project.get("cardRatingDetails"), list) else []
+            if previous_details:
+                card_rating_details = previous_details
+        rating_info = {}
+        if (not card_rating) and str(browser_description_source or "").lower() == "ai":
+            rating_info = self._generate_card_rating(output, concept, browser_description, settings)
+            card_rating = str(rating_info.get("rating") or "").strip()
+            card_rating_reasoning = str(rating_info.get("reasoning") or "").strip()
+            card_rating_details = rating_info.get("details") if isinstance(rating_info.get("details"), list) else []
+            card_rating_source_hash = str(rating_info.get("sourceHash") or card_rating_source_hash).strip()
+        card_rating_detail_source = str(workspace.get("cardRatingDetailSource") or previous_project.get("cardRatingDetailSource") or "").strip()
+        if card_rating and not card_rating_details:
+            forced_details = self._generate_required_card_rating_details(
+                output, concept, browser_description, card_rating, card_rating_reasoning, settings,
+                reason_label='save_workspace_missing_details'
+            )
+            forced_details = self._normalise_card_rating_details(forced_details)
+            if forced_details:
+                card_rating_details = forced_details
+                card_rating_detail_source = "ai_required_save_workspace"
+            card_rating_details, _detail_source = self._ensure_card_rating_details(
+                output, concept, browser_description, card_rating, card_rating_reasoning, settings,
+                existing_details=card_rating_details, existing_source=card_rating_detail_source
+            )
+            card_rating_detail_source = _detail_source or card_rating_detail_source or "none"
+        ai_rating_nsfw_flag = rating_info.get("isNsfw", None) if isinstance(rating_info, dict) else None
+        if ai_rating_nsfw_flag is True:
+            current_tags = self._extract_tags_from_output(output, template)
+            new_tags, added_nsfw = self._add_nsfw_tag_to_list(current_tags, settings)
+            if added_nsfw:
+                output = self._replace_tags_section(output, new_tags, template)
+                workspace["output"] = output
+                workspace["tags"] = new_tags
+                card_rating_source_hash = self._card_rating_source_hash(output, concept, browser_description)
+                self._log_event("save_workspace_nsfw_tag_added_from_ai_rating", {"tag": self._primary_nsfw_tag(settings), "name": safe_name})
+        if card_rating or card_rating_reasoning or card_rating_details:
+            workspace["cardRating"] = card_rating
+            workspace["cardRatingReasoning"] = card_rating_reasoning
+            workspace["cardRatingDetails"] = card_rating_details
+            workspace["cardRatingSourceHash"] = card_rating_source_hash
+            workspace["cardRatingDetailSource"] = card_rating_detail_source
         # Keep latest text files simple and inspectable.
         (folder / "latest_output.md").write_text(output, encoding="utf-8")
         if workspace.get("qnaAnswers"):
@@ -6267,6 +7851,11 @@ class Api:
                 "browserDescription": browser_description,
                 "browserDescriptionSourceHash": browser_source_hash,
                 "browserDescriptionSource": browser_description_source,
+                "cardRating": card_rating,
+                "cardRatingReasoning": card_rating_reasoning,
+                "cardRatingDetails": card_rating_details,
+                "cardRatingSourceHash": card_rating_source_hash,
+                "cardRatingDetailSource": card_rating_detail_source,
                 "tags": tags,
                 "virtualFolderId": virtual_folder_id,
                 "projectPath": str(latest_project),
@@ -7096,6 +8685,13 @@ class Api:
         The generated images are NOT embedded automatically. The user selects one,
         then Character Card V2 PNG export uses that selected image.
         """
+        # Start every standard image batch with a fresh cancellation state.
+        # Emotion-image generation shares the same backend cancel event, and a
+        # user-cancelled emotion job can leave that event set after returning.
+        # Without clearing it here, the next Quick Save / Image generation can
+        # fail instantly with the stale "Task cancelled by user" error.
+        self._reset_cancel()
+        self._log_event("sd_image_generation_start", {"count": 4, "cancelStateReset": True})
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or paste a card first so I can read the Stable Diffusion Prompt section."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})

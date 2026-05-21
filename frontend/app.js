@@ -12,6 +12,10 @@ let currentTask = "";
 let currentVisionImagePath = "";
 let lastQnaAnswers = "";
 let currentBrowserDescription = "";
+let currentCardRating = "";
+let currentCardRatingReasoning = "";
+let currentCardRatingDetails = [];
+let currentCardRatingSourceHash = "";
 let selectedCharacterProjectPath = "";
 let characterBrowserCards = [];
 let browserSortMode = "date_desc";
@@ -38,6 +42,14 @@ let conceptImportUrlValue = "";
 let currentLoadedType = "";
 let characterOutputTabs = [];
 let activeOutputTabIndex = 0;
+let updateCheckTimer = null;
+let updateCheckInProgress = false;
+let lastShownUpdateVersion = '';
+let updateReleaseUrl = '';
+let ratingImprovementProjectPath = '';
+let ratingImproveFieldDiffs = [];
+let ratingImproveLostDetails = [];
+let ratingImproveLostSummary = '';
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -50,7 +62,7 @@ const NEW_USER_TIPS = [
   'Concept Attachments are best for scripts, transcripts, subtitles, and notes you want the AI to learn from before generating.',
   'Character Browser uses SQLite caching, so refreshing should stay quick unless saved card files actually changed.',
   'Virtual folders only organize the browser. They do not move your physical saved card folders on disk.',
-  'Use AI Description in Character Browser when the card description is only physical appearance and you want a useful scenario summary.',
+  'Use AI Browser Analysis when the card description is only physical appearance and you want a useful scenario summary, quality rating, and NSFW-tag detection.',
   'Tag filters are faceted: active filters shrink the tag list to tags that still exist in the current result set.',
   'Merge Tags is display-only unless you choose a rename action. It is safe for cleaning up noisy tag lists.',
   'Fetch SD Models in Settings before image generation if you switch between anime, Pony, or realistic checkpoints.',
@@ -72,6 +84,77 @@ function showRandomTip(forceDifferent = false) {
 function updateAppVersionDisplay() {
   const el = $('#appVersionText');
   if (el) { const shown = (!appVersion || appVersion === 'unknown') ? 'unknown' : appVersion; el.textContent = `Version ${shown}`; }
+}
+
+function closeUpdateAvailableModal() {
+  const modal = $('#updateAvailableModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function isUpdateAvailableModalOpen() {
+  const modal = $('#updateAvailableModal');
+  return !!(modal && !modal.classList.contains('hidden'));
+}
+
+function showUpdateAvailableModal(info) {
+  const modal = $('#updateAvailableModal');
+  if (!modal || !info) return;
+  const current = String(info.currentVersion || appVersion || 'unknown').trim() || 'unknown';
+  const latest = String(info.latestVersion || info.latestTag || 'unknown').trim() || 'unknown';
+  updateReleaseUrl = String(info.releaseUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/releases/latest');
+  const summary = $('#updateAvailableSummary');
+  if (summary) summary.textContent = `Character Card Forge ${latest} is available on GitHub.`;
+  const currentEl = $('#updateCurrentVersion');
+  if (currentEl) currentEl.textContent = current;
+  const latestEl = $('#updateLatestVersion');
+  if (latestEl) latestEl.textContent = latest;
+  const preview = $('#updateReleaseNotesPreview');
+  if (preview) {
+    const body = String(info.bodyPreview || '').trim();
+    preview.textContent = body ? body : '';
+  }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  lastShownUpdateVersion = latest;
+}
+
+async function openUpdateReleasePage() {
+  const url = updateReleaseUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/releases/latest';
+  try {
+    const res = await window.pywebview.api.open_external_url(url);
+    if (res && !res.ok) throw new Error(res.error || 'Could not open release page.');
+  } catch (err) {
+    try { window.open(url, '_blank'); }
+    catch (_) { setStatus(`Update available: ${url}`, 'ok'); }
+  }
+}
+
+async function checkForAppUpdates(manual = false) {
+  if (updateCheckInProgress) return;
+  updateCheckInProgress = true;
+  try {
+    const res = await window.pywebview.api.check_for_updates();
+    if (res?.ok && res.isNewer && res.latestVersion) {
+      if (manual || !isUpdateAvailableModalOpen()) showUpdateAvailableModal(res);
+    } else if (manual) {
+      const latest = res?.latestVersion || res?.latestTag || 'unknown';
+      if (res?.ok) setStatus(`No newer release found. Latest GitHub release is ${latest}.`, 'ok');
+      else setStatus(res?.error || 'Could not check for updates.', 'error');
+    }
+  } catch (err) {
+    if (manual) setStatus(err.message || String(err), 'error');
+    try { await writeClientDebugEvent('update_check_frontend_error', { error: err.message || String(err) }); } catch (_) {}
+  } finally {
+    updateCheckInProgress = false;
+  }
+}
+
+function startUpdateChecks() {
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
+  setTimeout(() => checkForAppUpdates(false), 3500);
+  updateCheckTimer = setInterval(() => checkForAppUpdates(false), 60 * 60 * 1000);
 }
 
 function setTextareaValue(id, value) {
@@ -158,6 +241,10 @@ function setCharacterOutputTabs(cards) {
 function clearGenerationArtifacts() {
   lastQnaAnswers = '';
   currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
   emotionImageState = [];
   characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
   activeOutputTabIndex = 0;
@@ -615,6 +702,7 @@ async function init() {
   updateAvailability();
   startDebugLogAutoRefresh();
   try { await writeClientDebugEvent('client_bridge_ready', { availableApiMethods: Object.keys(window.pywebview?.api || {}).sort().slice(0, 120) }); } catch (_) {}
+  startUpdateChecks();
 }
 
 function hydrateSettings() {
@@ -646,6 +734,8 @@ function hydrateSettings() {
   const restrictTags = $('#restrictTags'); if (restrictTags) restrictTags.checked = !!settings.restrictTags;
   const allowedTags = $('#allowedTags'); if (allowedTags) allowedTags.value = settings.allowedTags || '';
   const nsfwBrowserMode = $('#nsfwBrowserMode'); if (nsfwBrowserMode) nsfwBrowserMode.value = settings.nsfwBrowserMode || 'show';
+  const nsfwTags = $('#nsfwTags'); if (nsfwTags) nsfwTags.value = settings.nsfwTags || 'NSFW';
+  const ideaRandomMax = $('#ideaGeneratorRandomMaxChoices'); if (ideaRandomMax) ideaRandomMax.value = Math.max(1, Math.min(20, Number(settings.ideaGeneratorRandomMaxChoices || DEFAULT_IDEA_RANDOM_MAX_CHOICES)));
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
   renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
   $('#sdSteps').value = settings.sdSteps ?? 28;
@@ -741,6 +831,10 @@ function applyLoadedState(state) {
     $('#outputText').value = state.output;
   }
   currentBrowserDescription = state.browserDescription || state.libraryDescription || '';
+  currentCardRating = state.cardRating || '';
+  currentCardRatingReasoning = state.cardRatingReasoning || '';
+  currentCardRatingDetails = Array.isArray(state.cardRatingDetails) ? state.cardRatingDetails : [];
+  currentCardRatingSourceHash = state.cardRatingSourceHash || '';
   lastQnaAnswers = typeof state.qnaAnswers === 'string' ? state.qnaAnswers : '';
   const qaBox = $('#qaAnswersText');
   if (qaBox) qaBox.value = lastQnaAnswers;
@@ -1174,6 +1268,8 @@ function collectSettings() {
     restrictTags: !!($('#restrictTags') && $('#restrictTags').checked),
     allowedTags: ($('#allowedTags') ? $('#allowedTags').value.trim() : ''),
     nsfwBrowserMode: ($('#nsfwBrowserMode') ? $('#nsfwBrowserMode').value : 'show'),
+    nsfwTags: ($('#nsfwTags') ? $('#nsfwTags').value.trim() : 'NSFW'),
+    ideaGeneratorRandomMaxChoices: Math.max(1, Math.min(20, Number(($('#ideaGeneratorRandomMaxChoices') ? $('#ideaGeneratorRandomMaxChoices').value : DEFAULT_IDEA_RANDOM_MAX_CHOICES) || DEFAULT_IDEA_RANDOM_MAX_CHOICES))),
     sdBaseUrl: $('#sdBaseUrl').value.trim() || 'http://127.0.0.1:7860',
     sdModel: ($('#sdModel') ? $('#sdModel').value.trim() : ''),
     sdSteps: Number($('#sdSteps').value || 28),
@@ -1720,6 +1816,10 @@ function saveTemplateDebounced() {
 function bindActions() {
   $('#newCardBtn').addEventListener('click', newCard);
   $('#nextTipBtn')?.addEventListener('click', () => showRandomTip(true));
+  $('#closeUpdateAvailableModalBtn')?.addEventListener('click', closeUpdateAvailableModal);
+  $('#remindLaterUpdateBtn')?.addEventListener('click', closeUpdateAvailableModal);
+  $('#openUpdateReleaseBtn')?.addEventListener('click', openUpdateReleasePage);
+  $('#updateAvailableModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'updateAvailableModal') closeUpdateAvailableModal(); });
   $('#newCardOutputBtn').addEventListener('click', newCard);
   $('#loadTemplateBtn').addEventListener('click', loadSelectedTemplate);
   $('#saveTemplateAsBtn').addEventListener('click', saveTemplateAs);
@@ -1822,6 +1922,7 @@ function bindActions() {
   $('#ideaGender')?.addEventListener('change', populateIdeaGeneratorOptions);
   $('#closeIdeaGeneratorModalBtn')?.addEventListener('click', closeIdeaGeneratorModal);
   $('#clearIdeaGeneratorBtn')?.addEventListener('click', clearIdeaGenerator);
+  $('#randomiseIdeaGeneratorBtn')?.addEventListener('click', randomiseIdeaGenerator);
   $('#generateIdeaBtn')?.addEventListener('click', generateIdeaIntoMainConcept);
   $('#ideaSettingsField')?.addEventListener('change', (e) => switchIdeaSettingsField(e.target.value));
   $('#ideaSettingsApplyBtn')?.addEventListener('click', () => applyIdeaSettingsField(true));
@@ -1853,6 +1954,15 @@ function bindActions() {
   $('#aiTagMergeAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('merge'));
   $('#aiTagRenameAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('rename'));
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
+  $('#browserImproveFromRatingBtn')?.addEventListener('click', generateRatingImprovementPreview);
+  $('#browserRatingDetailsBtn')?.addEventListener('click', showSelectedRatingDetailsModal);
+  $('#closeRatingDetailsModalBtn')?.addEventListener('click', closeRatingDetailsModal);
+  $('#ratingDetailsModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'ratingDetailsModal') closeRatingDetailsModal(); });
+  $('#closeRatingImproveModalBtn')?.addEventListener('click', closeRatingImproveModal);
+  $('#cancelRatingImproveBtn')?.addEventListener('click', closeRatingImproveModal);
+  $('#commitRatingImproveBtn')?.addEventListener('click', commitRatingImprovementPreview);
+  $('#copyRatingImprovePreviewBtn')?.addEventListener('click', copyRatingImprovementPreview);
+  $('#ratingImproveModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'ratingImproveModal') closeRatingImproveModal(); });
   $('#browserLoadBtn')?.addEventListener('click', loadSelectedCharacterWorkspace);
   $('#browserDeleteSelectedBtn')?.addEventListener('click', deleteSelectedCharacterCard);
   $('#browserExportPngBtn')?.addEventListener('click', () => exportSelectedCharacter('chara_v2_png'));
@@ -3464,6 +3574,10 @@ function collectWorkspacePayload() {
     conceptAttachments: conceptAttachments || [],
     cardImagePath: settings.cardImagePath || $('#cardImagePath')?.value || '',
     browserDescription: currentBrowserDescription || '',
+    cardRating: currentCardRating || '',
+    cardRatingReasoning: currentCardRatingReasoning || '',
+    cardRatingDetails: Array.isArray(currentCardRatingDetails) ? currentCardRatingDetails : [],
+    cardRatingSourceHash: currentCardRatingSourceHash || '',
     name: currentOutputTabName(),
     characterTabs: characterOutputTabs || [],
   };
@@ -3569,7 +3683,12 @@ async function refreshCharacterBrowser(showStatus=true, options={}) {
     }
     browserSelectedProjects = new Set([...browserSelectedProjects].filter(path => characterBrowserCards.some(c => c.projectPath === path)));
     renderCharacterBrowser();
-    renderSelectedCharacterTags(characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath));
+    if (selectedCharacterProjectPath && characterBrowserCards.some(c => c.projectPath === selectedCharacterProjectPath)) {
+      selectCharacterBrowserCard(selectedCharacterProjectPath);
+    } else {
+      renderSelectedCharacterTags(null);
+      updateBrowserRatingPanel(null);
+    }
     if (showStatus) setStatus(`Character Browser refreshed: ${characterBrowserCards.length} character(s).`, 'ok');
   } catch (err) {
     if (showStatus) setStatus(err.message || String(err), 'error');
@@ -4084,13 +4203,33 @@ function browserUpdatedTime(card) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function configuredNsfwTagValues() {
+  const raw = (settings && settings.nsfwTags) || 'NSFW';
+  const values = Array.isArray(raw) ? raw : String(raw || '').split(/[,\n]+/);
+  const cleaned = [];
+  const seen = new Set();
+  values.forEach(value => {
+    const tag = normaliseBrowserTag(value).replace(/^[-•*]+\s*/, '');
+    const key = browserTagKey(tag);
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      cleaned.push(tag);
+    }
+  });
+  return cleaned.length ? cleaned : ['NSFW'];
+}
+
+function primaryNsfwTagValue() {
+  return configuredNsfwTagValues()[0] || 'NSFW';
+}
+
 function browserNsfwTags() {
-  return new Set(['nsfw','adult','explicit','hentai','porn','erotic','sexual','sex','nude','nudity','fetish','bdsm','japanese-adult','jav']);
+  return new Set(configuredNsfwTagValues().map(browserTagKey).filter(Boolean));
 }
 
 function browserCardIsNsfw(card) {
   const nsfw = browserNsfwTags();
-  return cardEffectiveTags(card).some(tag => nsfw.has(browserTagKey(tag)) || /(^|[-_])(nsfw|adult|hentai|porn|explicit|erotic|sexual|nude|fetish|bdsm)([-_]|$)/i.test(String(tag || '')));
+  return cardEffectiveTags(card).some(tag => nsfw.has(browserTagKey(tag)));
 }
 
 function browserPrivacyMode() {
@@ -4293,17 +4432,39 @@ async function applyAiTagSuggestions(mode, items=null) {
 
 async function regenerateSelectedBrowserDescription() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
-  setBusy('AI DESCRIPTION — READING CHARACTER CARD…');
+  setBusy('AI BROWSER ANALYSIS — READING CHARACTER CARD…');
   try {
     const res = await window.pywebview.api.regenerate_browser_description_for_project(selectedCharacterProjectPath, settings || {});
-    if (!res.ok) throw new Error(res.error || 'Could not regenerate description.');
+    if (!res.ok) throw new Error(res.error || 'Could not run AI browser analysis.');
     const card = getSelectedBrowserCard();
+    let returnedDetails = ratingDetailsFromApiResult(res, card?.cardRatingDetails || []);
+    let detailSource = String(res.cardRatingDetailSource || res.detailSource || '').trim();
+    if (!returnedDetails.length) {
+      setBusy('AI BROWSER ANALYSIS — repairing missing rating details…');
+      const ensured = await ensureRatingDetailsForSelectedCard(card, 'regenerate-description');
+      if (ensured.length) {
+        returnedDetails = ensured;
+        detailSource = detailSource || 'ensured';
+      }
+    }
     if (card) {
       card.browserDescription = res.browserDescription || card.browserDescription || '';
       card.browserDescriptionSource = res.browserDescriptionSource || 'ai';
+      card.cardRating = res.cardRating || res.rating || card.cardRating || '';
+      card.cardRatingReasoning = res.cardRatingReasoning || res.reasoning || card.cardRatingReasoning || '';
+      card.cardRatingDetails = returnedDetails;
+      card.cardRatingDetailSource = detailSource;
+      card.cardRatingSourceHash = res.cardRatingSourceHash || res.sourceHash || res.source_hash || card.cardRatingSourceHash || '';
+      if (Array.isArray(res.tags) && res.tags.length) card.tags = res.tags;
     }
+    currentBrowserDescription = res.browserDescription || '';
+    currentCardRating = res.cardRating || res.rating || '';
+    currentCardRatingReasoning = res.cardRatingReasoning || res.reasoning || '';
+    currentCardRatingDetails = returnedDetails;
+    currentCardRatingSourceHash = res.cardRatingSourceHash || res.sourceHash || res.source_hash || '';
     const preview = $('#browserPreview');
     if (preview) preview.value = res.browserDescription || '';
+    updateBrowserRatingPanel(card || { cardRating: res.cardRating || res.rating || '', cardRatingReasoning: res.cardRatingReasoning || res.reasoning || '', cardRatingDetails: returnedDetails });
     const sourceBadge = $('#browserDescriptionSource');
     if (sourceBadge) {
       const source = res.browserDescriptionSource || 'ai';
@@ -4313,7 +4474,24 @@ async function regenerateSelectedBrowserDescription() {
       sourceBadge.classList.toggle('extracted-source', String(source).toLowerCase() !== 'ai');
     }
     await refreshCharacterBrowser(false);
-    setStatus('AI browser description updated.', 'ok');
+    // If the SQLite browser cache ever lags behind the just-saved project, keep
+    // the visible selected card hydrated with the fresh response so the Details
+    // modal cannot fall back to an empty/stale array.
+    const refreshedCard = getSelectedBrowserCard();
+    if (refreshedCard && selectedCharacterProjectPath === (res.projectPath || selectedCharacterProjectPath)) {
+      refreshedCard.cardRating = refreshedCard.cardRating || currentCardRating;
+      refreshedCard.cardRatingReasoning = refreshedCard.cardRatingReasoning || currentCardRatingReasoning;
+      if (Array.isArray(res.tags) && res.tags.length) refreshedCard.tags = res.tags;
+      if (!normaliseRatingDetails(refreshedCard.cardRatingDetails || []).length && currentCardRatingDetails.length) {
+        refreshedCard.cardRatingDetails = currentCardRatingDetails;
+        updateBrowserRatingPanel(refreshedCard);
+      }
+    }
+    const detailCount = normaliseRatingDetails(currentCardRatingDetails || []).length;
+    const detailHint = detailCount ? ` with ${detailCount} detail ratings${detailSource ? ` (${detailSource})` : ''}` : '';
+    const ratingMsg = currentCardRating ? ` Rating: ${currentCardRating}/10${detailHint}.` : '';
+    const nsfwMsg = res.nsfwTagAdded ? ` Added ${primaryNsfwTagValue()} tag.` : '';
+    setStatus(`AI browser analysis updated.${ratingMsg}${nsfwMsg}`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -4348,11 +4526,12 @@ function tagEditorMarkup(tags) {
       <div class="tag-editor-row">
         <input id="browserTagInput" type="text" placeholder="Add tag..." />
         <button id="browserAddTagBtn" type="button">Add</button>
+        <button id="browserMarkNsfwBtn" type="button" title="Add the first configured NSFW marker tag to this card">Mark NSFW</button>
         <button id="browserSaveTagsBtn" type="button" class="primary">Save Tags</button>
         <button id="browserCancelTagsBtn" type="button">Cancel</button>
       </div>
       <div id="browserEditableTagList" class="editable-tag-list">${tags.map(tag => `<button type="button" class="editable-tag" data-tag="${escapeAttr(tag)}" title="Remove tag">${escapeHtml(tag)} ×</button>`).join('')}</div>
-      <div class="tag-editor-hint">Click a character tag to filter. In edit mode, click a tag to remove it.</div>
+      <div class="tag-editor-hint">Click a character tag to filter. In edit mode, click a tag to remove it. NSFW privacy uses the tags configured in Settings → Tags.</div>
     </div>`;
 }
 
@@ -4380,6 +4559,7 @@ function addEditorTag(tag) {
 function wireTagEditor() {
   $('#browserEditTagsBtn')?.addEventListener('click', () => $('#browserTagEditor')?.classList.toggle('hidden'));
   $('#browserCancelTagsBtn')?.addEventListener('click', () => renderSelectedCharacterTags(getSelectedBrowserCard()));
+  $('#browserMarkNsfwBtn')?.addEventListener('click', () => addEditorTag(primaryNsfwTagValue()));
   $('#browserAddTagBtn')?.addEventListener('click', () => {
     const input = $('#browserTagInput');
     if (!input) return;
@@ -4497,6 +4677,697 @@ function folderCardCount(folderId) {
   return browserFolderCardCards(folderId, characterBrowserCards).length;
 }
 
+function cardRatingValue(card) {
+  const raw = card ? (card.cardRating ?? card.rating ?? '') : '';
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const match = text.match(/\d+(?:\.\d+)?/);
+  if (!match) return '';
+  let num = Number(match[0]);
+  if (!Number.isFinite(num)) return '';
+  num = Math.max(0, Math.min(10, num));
+  return Math.abs(num - Math.round(num)) < 0.05 ? String(Math.round(num)) : String(Math.round(num * 10) / 10);
+}
+
+function cardRatingBadgeHtml(card) {
+  const rating = cardRatingValue(card);
+  if (!rating) return '';
+  const reason = String(card?.cardRatingReasoning || '').trim();
+  const detailCount = normaliseRatingDetails(card?.cardRatingDetails || []).length;
+  const title = reason ? `Card Rating: ${rating}/10${detailCount ? ` (${detailCount} details)` : ''} — ${reason}` : `Card Rating: ${rating}/10${detailCount ? ` (${detailCount} details)` : ''}`;
+  return `<div class="character-rating-badge" title="${escapeAttr(title)}">★ ${escapeHtml(rating)}/10</div>`;
+}
+
+function normaliseTextForDiff(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function sectionKeyFromTitle(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function parseCardSectionsForDiff(text) {
+  const knownTitles = (template?.sections || [])
+    .map(sec => String(sec?.title || '').trim())
+    .filter(Boolean);
+  const knownKeys = new Map(knownTitles.map(title => [sectionKeyFromTitle(title), title]));
+  const sections = new Map();
+  let currentKey = 'full_card';
+  let currentTitle = 'Full Card';
+  const ensure = () => {
+    if (!sections.has(currentKey)) sections.set(currentKey, { key: currentKey, name: currentTitle, lines: [] });
+  };
+  ensure();
+  String(text || '').split(/\r?\n/).forEach(rawLine => {
+    const line = rawLine.trim();
+    const headingRaw = line.replace(/^[-#*\s]+/, '').replace(/[:：]\s*$/, '').trim();
+    const headingKey = sectionKeyFromTitle(headingRaw);
+    const looksLikeKnown = knownKeys.has(headingKey);
+    const looksLikeHeading = looksLikeKnown || (/^[A-Za-z][A-Za-z0-9 /&(){}'’-]{1,70}$/.test(headingRaw) && /[:：]\s*$/.test(line));
+    if (looksLikeHeading && headingRaw.length <= 90) {
+      currentKey = headingKey || headingRaw.toLowerCase();
+      currentTitle = knownKeys.get(headingKey) || headingRaw;
+      ensure();
+      return;
+    }
+    ensure();
+    sections.get(currentKey).lines.push(rawLine);
+  });
+  return [...sections.values()].reduce((acc, item) => {
+    const body = item.lines.join('\n').trim();
+    if (body || item.key !== 'full_card') acc[item.key] = { name: item.name, body };
+    return acc;
+  }, {});
+}
+
+function computeFieldDiffsForPreview(original, revised) {
+  const oldSections = parseCardSectionsForDiff(original || '');
+  const newSections = parseCardSectionsForDiff(revised || '');
+  const ordered = [];
+  (template?.sections || []).forEach(sec => {
+    const title = String(sec?.title || '').trim();
+    const key = sectionKeyFromTitle(title);
+    if (key && !ordered.includes(key)) ordered.push(key);
+  });
+  Object.keys(oldSections).concat(Object.keys(newSections)).forEach(key => {
+    if (!ordered.includes(key)) ordered.push(key);
+  });
+  return ordered.map(key => {
+    const oldBody = oldSections[key]?.body || '';
+    const newBody = newSections[key]?.body || '';
+    if (!oldBody && !newBody) return null;
+    let status = 'changed';
+    if (normaliseTextForDiff(oldBody) === normaliseTextForDiff(newBody)) status = 'unchanged';
+    else if (oldBody && !newBody) status = 'removed';
+    else if (!oldBody && newBody) status = 'added';
+    return {
+      name: oldSections[key]?.name || newSections[key]?.name || key.replace(/_/g, ' '),
+      key,
+      status,
+      oldLength: oldBody.length,
+      newLength: newBody.length,
+      delta: newBody.length - oldBody.length
+    };
+  }).filter(Boolean).slice(0, 40);
+}
+
+function normaliseImprovementFieldDiffs(value, original='', revised='') {
+  if (Array.isArray(value) && value.length) {
+    return value.map(item => ({
+      name: String(item?.name || item?.field || item?.section || 'Section').trim(),
+      status: String(item?.status || (item?.changed === false ? 'unchanged' : 'changed')).toLowerCase(),
+      oldLength: Number(item?.oldLength || 0),
+      newLength: Number(item?.newLength || 0),
+      delta: Number(item?.delta || 0)
+    })).filter(item => item.name).slice(0, 40);
+  }
+  return computeFieldDiffsForPreview(original, revised);
+}
+
+function renderRatingImproveFieldDiffs(diffs) {
+  const box = $('#ratingImproveFieldDiffs');
+  if (!box) return;
+  const list = Array.isArray(diffs) ? diffs : [];
+  if (!list.length) {
+    box.innerHTML = '<div class="empty small">Field-by-field preview will appear after the improved card is generated.</div>';
+    return;
+  }
+  box.innerHTML = list.map(item => {
+    const status = ['changed','unchanged','added','removed'].includes(item.status) ? item.status : 'changed';
+    const label = status.charAt(0).toUpperCase() + status.slice(1);
+    const delta = Number.isFinite(Number(item.delta)) && Number(item.delta) !== 0 ? ` · ${Number(item.delta) > 0 ? '+' : ''}${Number(item.delta)} chars` : '';
+    return `<div class="rating-field-diff-row ${escapeAttr(status)}"><span class="rating-field-name">${escapeHtml(item.name)}</span><span class="rating-field-status">${escapeHtml(label)}${escapeHtml(delta)}</span></div>`;
+  }).join('');
+}
+
+function renderRatingImproveLostDetails(items, summary='') {
+  const box = $('#ratingImproveLostDetails');
+  if (!box) return;
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  const summaryText = String(summary || '').trim();
+  if (!list.length && !summaryText) {
+    box.innerHTML = '<div class="empty small">Lost-detail check will appear after the improved card is generated.</div>';
+    return;
+  }
+  const summaryHtml = summaryText ? `<p class="rating-lost-summary">${escapeHtml(summaryText)}</p>` : '';
+  const listHtml = list.length
+    ? `<ul>${list.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    : '<div class="ok small">No obvious removed details were flagged. Still review the preview manually.</div>';
+  box.innerHTML = summaryHtml + listHtml;
+}
+
+function closeRatingImproveModal() {
+  const modal = $('#ratingImproveModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function showRatingImproveModal({ card=null, output='', loading=false, fieldDiffs=null, lostDetails=null, lostDetailSummary='' } = {}) {
+  const modal = $('#ratingImproveModal');
+  if (!modal) return;
+  const summary = $('#ratingImproveSummary');
+  const notes = $('#ratingImproveNotes');
+  const preview = $('#ratingImprovePreview');
+  const commit = $('#commitRatingImproveBtn');
+  const copy = $('#copyRatingImprovePreviewBtn');
+  const rating = cardRatingValue(card);
+  const name = card?.name || 'selected card';
+  if (summary) summary.textContent = loading
+    ? `Generating an improved preview for ${name}${rating ? ` (${rating}/10)` : ''}…`
+    : `Previewing AI improvements for ${name}${rating ? ` (${rating}/10)` : ''}.`;
+  if (notes) notes.value = card?.cardRatingReasoning || 'No rating reasoning was saved for this card.';
+  if (preview) preview.value = output || (loading ? 'Generating improved card preview…' : '');
+  ratingImproveFieldDiffs = loading ? [] : normaliseImprovementFieldDiffs(fieldDiffs || [], '', output || '');
+  ratingImproveLostDetails = Array.isArray(lostDetails) ? lostDetails : [];
+  ratingImproveLostSummary = String(lostDetailSummary || '').trim();
+  renderRatingImproveFieldDiffs(ratingImproveFieldDiffs);
+  renderRatingImproveLostDetails(ratingImproveLostDetails, ratingImproveLostSummary);
+  if (commit) commit.disabled = !!loading || !String(output || '').trim();
+  if (copy) copy.disabled = !!loading || !String(output || '').trim();
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function availableApiMethodNames(pattern = /./) {
+  const api = window.pywebview?.api;
+  if (!api) return '';
+  try { return Object.keys(api).filter(k => pattern.test(k)).sort().join(', '); }
+  catch (_) { return ''; }
+}
+
+async function callCardImprovementPreviewBackend(projectPath, activeSettings) {
+  const api = window.pywebview?.api;
+  if (!api) return { ok: false, error: 'Backend API is not available yet.' };
+
+  const directFn = api.generate_card_improvement_from_rating
+    || api.generateCardImprovementFromRating
+    || api.improveCardFromRating
+    || api.revise_card_from_rating_project
+    || api.reviseCardFromRatingProject;
+  if (directFn) return await directFn.call(api, projectPath, activeSettings || {});
+
+  // Compatibility fallback for AppImage/pywebview builds whose method table was
+  // generated before the dedicated rating-improvement backend method existed.
+  // It uses older, already-exposed bridge methods: load_character_project + revise_card.
+  const loadFn = api.load_character_project;
+  const reviseFn = api.revise_card;
+  if (!loadFn || !reviseFn) {
+    const available = availableApiMethodNames(/improve|rating|card|character|revise|load/i);
+    return {
+      ok: false,
+      error: 'Card improvement backend is not available in this build, and the compatibility fallback is missing required methods.' + (available ? ` Available related API methods: ${available}` : '')
+    };
+  }
+
+  const loaded = await loadFn.call(api, projectPath);
+  if (!loaded || !loaded.ok) return loaded || { ok: false, error: 'Could not load selected character project.' };
+
+  const rating = String(loaded.cardRating || getSelectedBrowserCard()?.cardRating || '').trim();
+  const reasoning = String(loaded.cardRatingReasoning || getSelectedBrowserCard()?.cardRatingReasoning || '').trim();
+  if (!reasoning) {
+    return { ok: false, error: 'Generate an AI Card Rating first so the model has improvement notes to apply.' };
+  }
+
+  const followup = [
+    'Apply the AI Card Rating suggestions to improve this character card.',
+    'Return the COMPLETE revised card only, not a diff and not commentary.',
+    'PRESERVE CORE FACTS: do not remove or contradict existing facts.',
+    'Do not change names, ages, relationships, setting, backstory, kinks, boundaries, or roleplay premise unless explicitly instructed.',
+    'Improve wording, clarity, specificity, and roleplay usefulness while preserving the card\'s intent.',
+    'Preserve the character name, premise, tone, relationship dynamic with {{user}}, and enabled section order.',
+    'Do not simplify the card by deleting unique hooks, jobs, locations, history, or first-meeting setup.',
+    'Improve craft/usability: make the concept clearer, deepen personality consistency, sharpen the scenario hook, improve {{user}} involvement, strengthen the first message, and clean formatting where needed.',
+    rating ? `Current AI Card Rating: ${rating}/10` : '',
+    '',
+    'AI CARD RATING REASONING / IMPROVEMENT NOTES:',
+    reasoning
+  ].filter(Boolean).join('\n');
+
+  const volatileImageKeys = ['cardImagePath', 'imagePath', 'imageDataUrl', 'cardImageDataUrl'];
+  const cleanedActiveSettings = { ...(activeSettings || {}) };
+  volatileImageKeys.forEach((key) => { delete cleanedActiveSettings[key]; });
+  const mergedSettings = { ...(loaded.settings || {}), ...cleanedActiveSettings, streamAi: false, _streamTarget: '' };
+  const originalImage = loaded.cardImagePath || loaded.imagePath || loaded.imageDataUrl || getSelectedBrowserCard()?.cardImagePath || getSelectedBrowserCard()?.imagePath || '';
+  if (originalImage) mergedSettings.cardImagePath = originalImage;
+  const res = await reviseFn.call(api, loaded.output || '', followup, loaded.concept || '', loaded.template || {}, mergedSettings);
+  if (!res || !res.ok) return res || { ok: false, error: 'The revision backend did not return a result.' };
+  const revisedOutput = res.output || '';
+  return {
+    ok: true,
+    projectPath,
+    name: loaded.name || getSelectedBrowserCard()?.name || '',
+    rating,
+    reasoning,
+    output: revisedOutput,
+    validation: res.validation || null,
+    fieldDiffs: computeFieldDiffsForPreview(loaded.output || '', revisedOutput),
+    lostDetails: [],
+    lostDetailSummary: 'Lost-detail audit requires the newer rating-improvement backend. Review the field changes and full preview carefully.',
+    fallbackMode: 'revise_card'
+  };
+}
+
+async function callApplyCardImprovementBackend(projectPath, revisedOutput, activeSettings) {
+  const api = window.pywebview?.api;
+  if (!api) return { ok: false, error: 'Backend API is not available yet.' };
+
+  const directFn = api.apply_card_improvement_preview
+    || api.applyCardImprovementPreview
+    || api.commitCardImprovementPreview;
+  if (directFn) return await directFn.call(api, projectPath, revisedOutput, activeSettings || {});
+
+  // Compatibility fallback: load the original project, replace only the output,
+  // then save through the existing workspace save endpoint.
+  const loadFn = api.load_character_project;
+  const saveFn = api.save_character_workspace;
+  if (!loadFn || !saveFn) {
+    const available = availableApiMethodNames(/improve|rating|card|character|apply|commit|save|load/i);
+    return {
+      ok: false,
+      error: 'Card improvement commit backend is not available in this build, and the compatibility fallback is missing required methods.' + (available ? ` Available related API methods: ${available}` : '')
+    };
+  }
+
+  const loaded = await loadFn.call(api, projectPath);
+  if (!loaded || !loaded.ok) return loaded || { ok: false, error: 'Could not load selected character project.' };
+
+  const volatileImageKeys = ['cardImagePath', 'imagePath', 'imageDataUrl', 'cardImageDataUrl'];
+  const cleanedActiveSettings = { ...(activeSettings || {}) };
+  volatileImageKeys.forEach((key) => { delete cleanedActiveSettings[key]; });
+  const originalImage = loaded.cardImagePath
+    || loaded.imagePath
+    || loaded.imageDataUrl
+    || getSelectedBrowserCard()?.cardImagePath
+    || getSelectedBrowserCard()?.imagePath
+    || '';
+  const savedSettings = { ...(loaded.settings || {}), ...cleanedActiveSettings };
+  if (originalImage) savedSettings.cardImagePath = originalImage;
+
+  const workspace = {
+    ...(loaded.workspace || {}),
+    name: loaded.name || getSelectedBrowserCard()?.name || '',
+    concept: loaded.concept || '',
+    output: revisedOutput || '',
+    template: loaded.template || {},
+    settings: savedSettings,
+    cardImagePath: originalImage,
+    imagePath: originalImage,
+    imageDataUrl: loaded.imageDataUrl || '',
+    _disableSettingsCardImageFallback: true,
+    browserDescription: loaded.browserDescription || getSelectedBrowserCard()?.browserDescription || '',
+    browserDescriptionSource: loaded.browserDescriptionSource || getSelectedBrowserCard()?.browserDescriptionSource || '',
+    cardRating: '',
+    cardRatingReasoning: '',
+    cardRatingDetails: [],
+    cardRatingSourceHash: '',
+    tags: loaded.tags || getSelectedBrowserCard()?.tags || [],
+    virtualFolderId: loaded.virtualFolderId || getSelectedBrowserCard()?.virtualFolderId || '',
+    qnaAnswers: loaded.qnaAnswers || '',
+    builderState: loaded.builderState || {},
+    emotionImages: loaded.emotionImages || [],
+    generatedImages: loaded.generatedImages || [],
+    characterTabs: loaded.characterTabs || [],
+    emotionManifest: loaded.emotionManifest || '',
+    visionDescription: loaded.visionDescription || '',
+    conceptAttachments: loaded.conceptAttachments || []
+  };
+
+  const res = await saveFn.call(api, workspace);
+  if (!res || !res.ok) return res || { ok: false, error: 'Workspace save did not return a result.' };
+  return { ...res, ok: true, fallbackMode: 'save_character_workspace' };
+}
+
+async function generateRatingImprovementPreview() {
+  if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
+  const card = getSelectedBrowserCard();
+  if (!cardRatingValue(card) && !String(card?.cardRatingReasoning || '').trim()) {
+    setStatus('Generate an AI Card Rating first, then use Improve.', 'error');
+    return;
+  }
+  settings = collectSettings();
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  const okToImprove = window.confirm(
+    'Lower-quality models may remove details, alter character intent, or simplify the card. Review all changes before committing.\n\nContinue and generate an improved preview?'
+  );
+  if (!okToImprove) return;
+  ratingImprovementProjectPath = selectedCharacterProjectPath;
+  showRatingImproveModal({ card, loading: true });
+  setBusy('AI CARD IMPROVEMENT — GENERATING PREVIEW…');
+  try {
+    const res = await callCardImprovementPreviewBackend(selectedCharacterProjectPath, settings || {});
+    if (!res.ok) throw new Error(res.error || 'Could not generate improved preview.');
+    ratingImprovementProjectPath = res.projectPath || selectedCharacterProjectPath;
+    showRatingImproveModal({
+      card,
+      output: res.output || '',
+      fieldDiffs: res.fieldDiffs || [],
+      lostDetails: res.lostDetails || [],
+      lostDetailSummary: res.lostDetailSummary || ''
+    });
+    if (res.validation && res.validation.ok === false) {
+      setStatus(`Improved preview generated, but structure check found ${res.validation.missing?.length || 0} missing item(s). Review before committing.`, 'error');
+    } else {
+      setStatus('Improved card preview generated. Review it before committing.', 'ok');
+    }
+  } catch (err) {
+    closeRatingImproveModal();
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function commitRatingImprovementPreview() {
+  const projectPath = ratingImprovementProjectPath || selectedCharacterProjectPath;
+  const preview = $('#ratingImprovePreview')?.value || '';
+  if (!projectPath) { setStatus('No selected project to update.', 'error'); return; }
+  if (!preview.trim()) { setStatus('Preview is empty. Nothing to commit.', 'error'); return; }
+  settings = collectSettings();
+  setBusy('COMMITTING AI CARD IMPROVEMENT…');
+  try {
+    const res = await callApplyCardImprovementBackend(projectPath, preview, settings || {});
+    if (!res.ok) throw new Error(res.error || 'Could not commit improved card.');
+    closeRatingImproveModal();
+    ratingImprovementProjectPath = '';
+    const newPath = res.projectPath || projectPath;
+    selectedCharacterProjectPath = newPath;
+    await refreshCharacterBrowser(false);
+    if (newPath) selectCharacterBrowserCard(newPath);
+    setStatus(`Improved card committed and saved to ${res.folder || 'Character Browser'}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function copyRatingImprovementPreview() {
+  const text = $('#ratingImprovePreview')?.value || '';
+  if (!text.trim()) { setStatus('No preview to copy.', 'error'); return; }
+  navigator.clipboard?.writeText(text).then(
+    () => setStatus('Improved card preview copied.', 'ok'),
+    () => setStatus('Could not copy preview.', 'error')
+  );
+}
+
+const RATING_DETAIL_KEYS = [
+  'cardRatingDetails', 'details', 'detailRatings', 'detail_ratings', 'detailedRatings', 'detailed_ratings',
+  'elementRatings', 'element_ratings', 'elements', 'elementScores', 'element_scores',
+  'criteria', 'criteriaRatings', 'criteria_ratings', 'criteriaScores', 'criteria_scores',
+  'breakdown', 'breakdownByElement', 'breakdown_by_element', 'categoryBreakdown', 'category_breakdown',
+  'categories', 'categoryRatings', 'category_ratings', 'scores', 'ratings', 'ratingDetails', 'rating_details',
+  'perElementRatings', 'per_element_ratings', 'aspectRatings', 'aspect_ratings', 'sectionRatings', 'section_ratings'
+];
+
+const RATING_DETAIL_INTERNAL_KEYS = new Set([
+  'ok', 'success', 'error', 'errors', 'projectpath', 'project_path', 'path', 'filepath', 'file_path',
+  'browserdescription', 'browser_description', 'browserdescriptionsource', 'browser_description_source',
+  'browserdescriptionsourcehash', 'browser_description_source_hash',
+  'cardrating', 'card_rating', 'cardratingreasoning', 'card_rating_reasoning',
+  'cardratingsourcehash', 'card_rating_source_hash', 'sourcehash', 'source_hash',
+  'source', 'hash', 'updated_at', 'created_at', 'workspace', 'settings', 'output', 'concept'
+]);
+
+function firstRatingDetailValue(obj, keys) {
+  if (!obj || typeof obj !== 'object') return '';
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      const value = obj[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+  }
+  return '';
+}
+
+function ratingDetailHasRowShape(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  const rowName = firstRatingDetailValue(obj, ['name', 'category', 'element', 'criteria', 'criterion', 'field', 'section', 'title', 'aspect', 'label']);
+  const rowScore = firstRatingDetailValue(obj, ['rating', 'score', 'value', 'points', 'grade', 'status']);
+  return !!(rowName && rowScore !== '');
+}
+
+function ratingDetailPrimitiveLooksLikeScore(value) {
+  if (value === undefined || value === null) return false;
+  const text = String(value).trim();
+  if (!text || text.length > 24) return false;
+  if (/^(?:verified|changed|missing|present|weak|ok|good|great|excellent|needs work)$/i.test(text)) return true;
+  const m = text.match(/^\s*(\d+(?:\.\d+)?)\s*(?:\/\s*10)?\s*$/);
+  if (m) {
+    const n = Number(m[1]);
+    return Number.isFinite(n) && n >= 0 && n <= 10;
+  }
+  return /^[ABCDF][+-]?$/i.test(text);
+}
+
+function ratingDetailsPayloadFrom(value, depth = 0, allowObjectMap = false) {
+  if (!value || depth > 4) return [];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return ratingDetailsPayloadFrom(parsed, depth + 1, allowObjectMap);
+    } catch (_) {
+      return [];
+    }
+  }
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'object') return [];
+
+  if (ratingDetailHasRowShape(value)) return [value];
+
+  // Only descend into known detail container keys. This avoids treating the whole
+  // character/project object as a fake rating map, which caused rows like
+  // cardRatingReasoning, cardRatingSourceHash and projectPath to appear as scores.
+  for (const key of RATING_DETAIL_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      const nested = ratingDetailsPayloadFrom(value[key], depth + 1, true);
+      if (nested.length) return nested;
+    }
+  }
+
+  for (const key of ['result', 'evaluation', 'analysis', 'ratingResult', 'rating_result']) {
+    if (value[key] && typeof value[key] === 'object') {
+      const nested = ratingDetailsPayloadFrom(value[key], depth + 1, false);
+      if (nested.length) return nested;
+    }
+  }
+
+  if (!allowObjectMap) return [];
+
+  const rows = [];
+  for (const [key, val] of Object.entries(value)) {
+    const lowered = String(key || '').toLowerCase();
+    if (RATING_DETAIL_INTERNAL_KEYS.has(lowered)) continue;
+    if (RATING_DETAIL_KEYS.includes(key)) continue;
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const item = { name: key, ...val };
+      if (ratingDetailHasRowShape(item)) rows.push(item);
+    } else if (ratingDetailPrimitiveLooksLikeScore(val)) {
+      rows.push({ name: key, rating: val, reason: '' });
+    }
+  }
+  return rows;
+}
+
+function normaliseRatingDetails(details) {
+  const payload = ratingDetailsPayloadFrom(details, 0, false);
+  if (!Array.isArray(payload)) return [];
+  const seen = new Set();
+  return payload.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const name = String(firstRatingDetailValue(item, ['name', 'category', 'element', 'criteria', 'criterion', 'field', 'section', 'title', 'aspect', 'label']) || '').trim();
+    if (!name) return null;
+    const lowered = name.toLowerCase();
+    if (RATING_DETAIL_INTERNAL_KEYS.has(lowered)) return null;
+    const key = lowered.replace(/\s+/g, ' ').trim();
+    if (seen.has(key)) return null;
+
+    const rawRating = firstRatingDetailValue(item, ['rating', 'score', 'value', 'points', 'grade']);
+    const status = String(firstRatingDetailValue(item, ['status', 'state']) || '').trim();
+    const rating = String(rawRating ?? '').trim();
+    // A row needs either a sane score/grade or a short status. Long free-text
+    // values are probably reasoning that accidentally got bound as a score.
+    if (rating && !ratingDetailPrimitiveLooksLikeScore(rating)) return null;
+    if (!rating && status && !ratingDetailPrimitiveLooksLikeScore(status)) return null;
+    if (!rating && !status) return null;
+
+    seen.add(key);
+    const reason = String(firstRatingDetailValue(item, ['reason', 'reasoning', 'comment', 'comments', 'note', 'notes', 'feedback', 'explanation', 'rationale']) || status || '').trim();
+    return { name: name.slice(0, 80), rating, reason, status };
+  }).filter(Boolean).slice(0, 12);
+}
+
+function ratingDetailsFromApiResult(res, fallback = []) {
+  const direct = normaliseRatingDetails(res?.cardRatingDetails);
+  if (direct.length) return direct;
+  const aliases = normaliseRatingDetails(res);
+  if (aliases.length) return aliases;
+  return normaliseRatingDetails(fallback);
+}
+
+async function ensureRatingDetailsForSelectedCard(card = null, reason = 'manual') {
+  const target = card || getSelectedBrowserCard();
+  const projectPath = target?.projectPath || selectedCharacterProjectPath || '';
+  if (!projectPath || !window.pywebview?.api?.ensure_card_rating_details_for_project) return [];
+  try {
+    const res = await window.pywebview.api.ensure_card_rating_details_for_project(projectPath, settings || {});
+    if (!res || !res.ok) return [];
+    const details = ratingDetailsFromApiResult(res, []);
+
+    // Important: bind the repaired details back to the card that was requested,
+    // not whichever browser card happens to be selected when the async call
+    // finishes. Otherwise Details can leak rows from the previous/next card.
+    const matchedCard = characterBrowserCards.find(c => c.projectPath === projectPath) || target;
+    if (matchedCard) {
+      matchedCard.cardRating = res.cardRating || res.rating || matchedCard.cardRating || '';
+      matchedCard.cardRatingReasoning = res.cardRatingReasoning || res.reasoning || matchedCard.cardRatingReasoning || '';
+      matchedCard.cardRatingDetails = details;
+      matchedCard.cardRatingDetailSource = res.cardRatingDetailSource || res.detailSource || matchedCard.cardRatingDetailSource || '';
+      matchedCard.cardRatingSourceHash = res.cardRatingSourceHash || res.sourceHash || res.source_hash || matchedCard.cardRatingSourceHash || '';
+    }
+    if (projectPath === selectedCharacterProjectPath) {
+      currentCardRating = res.cardRating || res.rating || currentCardRating || '';
+      currentCardRatingReasoning = res.cardRatingReasoning || res.reasoning || currentCardRatingReasoning || '';
+      currentCardRatingDetails = details;
+      currentCardRatingSourceHash = res.cardRatingSourceHash || res.sourceHash || res.source_hash || currentCardRatingSourceHash || '';
+      updateBrowserRatingPanel(matchedCard || { cardRating: currentCardRating, cardRatingReasoning: currentCardRatingReasoning, cardRatingDetails: details });
+    }
+    return details;
+  } catch (err) {
+    console.warn('Could not ensure rating details:', err);
+    return [];
+  }
+}
+
+const RATING_EXPECTED_DETAIL_NAMES = [
+  'Concept Clarity', 'Character Identity', 'Personality Depth', 'Scenario Hook',
+  'Relationship to {{user}}', 'First Message', 'Formatting', 'Specificity',
+  'Roleplay Usability', 'Continuity/Lore'
+];
+
+function fallbackRatingDetailsForCard(card) {
+  const rating = cardRatingValue(card);
+  if (!rating) return [];
+  const reason = String(card?.cardRatingReasoning || '').trim();
+  const reasonHint = reason
+    ? 'Fallback display from the saved overall rating; run AI Browser Analysis to save true per-element reasoning.'
+    : 'Fallback display from the saved overall rating; no per-element reasoning was saved.';
+  return RATING_EXPECTED_DETAIL_NAMES.map(name => ({
+    name,
+    rating,
+    reason: reasonHint,
+    status: 'fallback'
+  }));
+}
+
+function renderRatingDetailsHtml(details) {
+  const rows = normaliseRatingDetails(details);
+  if (!rows.length) {
+    return '<div class="empty small">No detailed element ratings were saved for this card yet. Run AI Browser Analysis to create the new breakdown.</div>';
+  }
+  return rows.map(item => {
+    const score = item.rating ? `${escapeHtml(item.rating)}/10` : escapeHtml(item.status || '—');
+    return `
+      <div class="rating-detail-row">
+        <div class="rating-detail-score">${score}</div>
+        <div class="rating-detail-body">
+          <div class="rating-detail-name">${escapeHtml(item.name)}</div>
+          <div class="rating-detail-reason">${escapeHtml(item.reason || 'No short reasoning saved for this element.')}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function closeRatingDetailsModal() {
+  const modal = $('#ratingDetailsModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function showRatingDetailsModal(card) {
+  const chosen = card || getSelectedBrowserCard();
+  if (!chosen) { setStatus('Select a character first.', 'error'); return; }
+  const modal = $('#ratingDetailsModal');
+  if (!modal) return;
+  const modalProjectPath = chosen.projectPath || '';
+  modal.dataset.ratingProjectPath = modalProjectPath;
+  const name = $('#ratingDetailsName');
+  const overall = $('#ratingDetailsOverall');
+  const summary = $('#ratingDetailsSummary');
+  const list = $('#ratingDetailsList');
+
+  function paint(activeCard, rows) {
+    // Do not let a slower repair from a previous Details click overwrite the
+    // modal after the user has opened Details for another card.
+    if ((modal.dataset.ratingProjectPath || '') !== modalProjectPath) return;
+    const rating = cardRatingValue(activeCard);
+    if (name) name.textContent = activeCard.name || 'Selected character';
+    if (overall) overall.textContent = rating ? `${rating}/10 overall` : 'No overall score';
+    if (summary) summary.textContent = activeCard.cardRatingReasoning || 'No overall reasoning was saved for this card.';
+    if (list) list.innerHTML = renderRatingDetailsHtml(rows || []);
+  }
+
+  // Only use detail rows stored on the card that was clicked. Do not fall back
+  // to currentCardRatingDetails here; that global belongs to the previously
+  // loaded/generated workspace and can contain another card's breakdown.
+  let rows = normaliseRatingDetails(chosen.cardRatingDetails || []);
+  paint(chosen, rows);
+  modal.classList.remove('hidden');
+
+  // If the browser cache/state has the overall score but no per-element rows,
+  // repair from the backend when the user opens Details. This checks the saved
+  // project on disk, saves repaired details, and updates only the requested card.
+  if (!rows.length && (cardRatingValue(chosen) || String(chosen.cardRatingReasoning || '').trim())) {
+    if (list) list.innerHTML = '<div class="empty small">No saved breakdown found. Repairing rating details now…</div>';
+    const ensured = await ensureRatingDetailsForSelectedCard(chosen, 'details-modal');
+    if ((modal.dataset.ratingProjectPath || '') !== modalProjectPath) return;
+    const refreshed = characterBrowserCards.find(c => c.projectPath === modalProjectPath) || chosen;
+    rows = ensured.length ? ensured : normaliseRatingDetails(refreshed.cardRatingDetails || []);
+    paint(refreshed, rows);
+    if (rows.length) setStatus(`Rating details repaired and saved (${rows.length} rows).`, 'ok');
+  }
+}
+
+async function showSelectedRatingDetailsModal() {
+  await showRatingDetailsModal(getSelectedBrowserCard());
+}
+
+function updateBrowserRatingPanel(card) {
+  const panel = $('#browserRatingPanel');
+  const score = $('#browserRatingScore');
+  const box = $('#browserRatingReasoning');
+  const improveBtn = $('#browserImproveFromRatingBtn');
+  const detailsBtn = $('#browserRatingDetailsBtn');
+  if (!panel || !score || !box) return;
+  const rating = cardRatingValue(card);
+  const reasoning = String(card?.cardRatingReasoning || '').trim();
+  const details = normaliseRatingDetails(card?.cardRatingDetails || []);
+  const hasRating = !!(rating || reasoning || details.length);
+  panel.classList.toggle('hidden', !hasRating);
+  score.textContent = rating ? `${rating}/10` : 'No score';
+  box.value = reasoning || (rating ? 'No rating reasoning was saved for this card.' : '');
+  if (detailsBtn) {
+    detailsBtn.disabled = !hasRating;
+    detailsBtn.title = details.length ? 'Show detailed per-element rating breakdown.' : 'No detailed breakdown saved yet. Run AI Browser Analysis to create one.';
+  }
+  if (improveBtn) {
+    improveBtn.disabled = !hasRating || !selectedCharacterProjectPath;
+    improveBtn.title = hasRating
+      ? 'Let the AI apply the rating suggestions and preview the improved card before saving.'
+      : 'Generate an AI Card Rating first.';
+  }
+}
+
 function renderCharacterBrowser() {
   const grid = $('#characterGrid');
   if (!grid) return;
@@ -4539,7 +5410,7 @@ function renderCharacterBrowser() {
     return `
     <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
-      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
+      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary-source ${String(card.browserDescriptionSource || '').toLowerCase() === 'ai' ? 'ai-source' : 'extracted-source'}">${escapeHtml(descriptionSourceLabel(card.browserDescriptionSource))}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
@@ -4639,6 +5510,7 @@ function selectCharacterBrowserCard(projectPath) {
     sourceBadge.classList.toggle('extracted-source', !!card && String(card.browserDescriptionSource || '').toLowerCase() !== 'ai');
   }
   $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
+  updateBrowserRatingPanel(card);
   renderSelectedCharacterTags(card);
 }
 
@@ -4900,8 +5772,70 @@ const IDEA_FIELD_LABELS = {
 };
 
 const DEFAULT_IDEA_MULTI_FIELDS = ['personality', 'subjectOf', 'engagesIn', 'sexualEngagesIn'];
+const DEFAULT_IDEA_RANDOM_MAX_CHOICES = 3;
 const IDEA_OPTION_LIMIT = 80;
 let ideaSettingsEditorLoadedField = 'personality';
+
+function ideaRandomLockableFieldIds() {
+  return ['ideaGender', ...Object.keys(IDEA_FIELD_TO_LIST)];
+}
+
+function ideaLockSvg(locked = false) {
+  if (locked) {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2h1.2c.99 0 1.8.81 1.8 1.8v7.4c0 .99-.81 1.8-1.8 1.8H5.8A1.8 1.8 0 0 1 4 19.2v-7.4c0-.99.81-1.8 1.8-1.8H7Zm2 0h6V8a3 3 0 1 0-6 0v2Zm3 3.25a1.5 1.5 0 0 0-.75 2.8V18h1.5v-1.95a1.5 1.5 0 0 0-.75-2.8Z"/></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 10h2.2c.99 0 1.8.81 1.8 1.8v7.4c0 .99-.81 1.8-1.8 1.8H5.8A1.8 1.8 0 0 1 4 19.2v-7.4c0-.99.81-1.8 1.8-1.8H14V8a3 3 0 0 0-5.68-1.34L6.58 5.67A5 5 0 0 1 16 8v2Zm-4 3.25a1.5 1.5 0 0 0-.75 2.8V18h1.5v-1.95a1.5 1.5 0 0 0-.75-2.8Z"/></svg>';
+}
+
+function isIdeaFieldLocked(id) {
+  const el = $('#' + id);
+  return !!(el && el.dataset.ideaRandomLocked === '1');
+}
+
+function setIdeaFieldLocked(id, locked) {
+  const el = $('#' + id);
+  if (!el) return;
+  const isLocked = !!locked;
+  el.dataset.ideaRandomLocked = isLocked ? '1' : '0';
+  const label = el.closest('label');
+  if (label) label.classList.toggle('idea-field-locked', isLocked);
+  const btn = label ? label.querySelector(`.idea-random-lock-btn[data-idea-lock-for="${id}"]`) : null;
+  if (btn) {
+    btn.classList.toggle('locked', isLocked);
+    btn.setAttribute('aria-pressed', isLocked ? 'true' : 'false');
+    btn.title = isLocked ? 'Locked: Randomise will not change this field' : 'Unlocked: Randomise can change this field';
+    btn.setAttribute('aria-label', btn.title);
+    btn.innerHTML = ideaLockSvg(isLocked);
+  }
+}
+
+function toggleIdeaFieldLock(id) {
+  setIdeaFieldLocked(id, !isIdeaFieldLocked(id));
+}
+
+function ensureIdeaLockControls() {
+  ideaRandomLockableFieldIds().forEach(id => {
+    const el = $('#' + id);
+    if (!el) return;
+    const label = el.closest('label');
+    if (!label) return;
+    label.classList.add('idea-lockable-field');
+    let btn = label.querySelector(`.idea-random-lock-btn[data-idea-lock-for="${id}"]`);
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'idea-random-lock-btn';
+      btn.dataset.ideaLockFor = id;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleIdeaFieldLock(id);
+      });
+      label.appendChild(btn);
+    }
+    setIdeaFieldLocked(id, isIdeaFieldLocked(id));
+  });
+}
 
 
 function cleanIdeaOptionValue(value) {
@@ -5023,27 +5957,72 @@ const IDEA_FIELD_TO_LIST = {
 };
 
 function ideaInputValues(input) {
+  if (!input) return [];
+  const listName = IDEA_FIELD_TO_LIST[input.id];
+  if (listName && ideaIsMultiField(listName)) {
+    try {
+      const parsed = JSON.parse(input.dataset.ideaSelectedValues || '[]');
+      return dedupeIdeaOptions(Array.isArray(parsed) ? parsed : []);
+    } catch (_) {
+      return [];
+    }
+  }
   return dedupeIdeaOptions(String(input?.value || '').split(','));
 }
 
 function setIdeaInputValues(input, values) {
   if (!input) return;
-  input.value = dedupeIdeaOptions(values).join(', ');
+  const listName = IDEA_FIELD_TO_LIST[input.id];
+  const cleaned = dedupeIdeaOptions(values);
+  if (listName && ideaIsMultiField(listName)) {
+    input.dataset.ideaSelectedValues = JSON.stringify(cleaned);
+    input.value = '';
+    renderIdeaSelectedChips(input);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+  input.value = cleaned.join(', ');
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function ideaActiveSearchQuery(input) {
-  const listName = IDEA_FIELD_TO_LIST[input?.id];
-  const raw = String(input?.value || '');
-  if (listName && ideaIsMultiField(listName)) {
-    const parts = raw.split(',');
-    return String(parts[parts.length - 1] || '').trim().toLowerCase();
+function normaliseIdeaMultiInputState(input) {
+  if (!input) return;
+  const listName = IDEA_FIELD_TO_LIST[input.id];
+  if (!listName) return;
+  if (ideaIsMultiField(listName)) {
+    if (input.dataset.ideaSelectedValues === undefined) {
+      const migrated = String(input.value || '').includes(',') ? dedupeIdeaOptions(String(input.value || '').split(',')) : [];
+      input.dataset.ideaSelectedValues = JSON.stringify(migrated);
+      if (migrated.length) input.value = '';
+    }
+    input.placeholder = input.dataset.multiPlaceholder || input.placeholder || 'Search/select; picked chips stay below...';
+  } else {
+    delete input.dataset.ideaSelectedValues;
+    if (input.dataset.singlePlaceholder) input.placeholder = input.dataset.singlePlaceholder;
   }
+}
+
+function ideaPayloadValue(id) {
+  const input = $('#' + id);
+  if (!input) return '';
+  const listName = IDEA_FIELD_TO_LIST[id];
+  if (listName && ideaIsMultiField(listName)) {
+    const values = ideaInputValues(input);
+    const pending = cleanIdeaOptionValue(input.value || '');
+    if (pending && !values.some(v => v.toLowerCase() === pending.toLowerCase())) values.push(pending);
+    return dedupeIdeaOptions(values).join(', ');
+  }
+  return input.value || '';
+}
+
+function ideaActiveSearchQuery(input) {
+  const raw = String(input?.value || '');
   return raw.trim().toLowerCase();
 }
 
 function renderIdeaSelectedChips(input) {
   if (!input) return;
+  normaliseIdeaMultiInputState(input);
   const listName = IDEA_FIELD_TO_LIST[input.id];
   const parent = input.parentElement;
   if (!parent) return;
@@ -5060,7 +6039,7 @@ function renderIdeaSelectedChips(input) {
     input.insertAdjacentElement('afterend', holder);
   }
   if (!values.length) {
-    holder.innerHTML = '<span class="idea-chip-placeholder">Multiple choices allowed</span>';
+    holder.innerHTML = '<span class="idea-chip-placeholder">Search/select options above. Picked chips stay here; use × to remove them.</span>';
     return;
   }
   holder.innerHTML = values.map(v => `<span class="idea-chip"><span>${escapeHtml(v)}</span><button type="button" class="idea-chip-remove" data-input="${escapeHtml(input.id)}" data-value="${escapeHtml(v)}" title="Remove ${escapeHtml(v)}">×</button></span>`).join('');
@@ -5114,7 +6093,10 @@ function setupIdeaAutocompleteFields() {
   Object.keys(IDEA_FIELD_TO_LIST).forEach(id => {
     const input = $('#' + id);
     if (!input) return;
+    if (!input.dataset.singlePlaceholder) input.dataset.singlePlaceholder = input.getAttribute('placeholder') || '';
+    if (!input.dataset.multiPlaceholder) input.dataset.multiPlaceholder = 'Search/select; picked chips stay below...';
     input.removeAttribute('list');
+    normaliseIdeaMultiInputState(input);
     ensureIdeaSuggestionBox(input);
     renderIdeaSelectedChips(input);
     if (input.dataset.ideaAutocompleteReady === '1') return;
@@ -5130,14 +6112,15 @@ function setupIdeaAutocompleteFields() {
         const listName = IDEA_FIELD_TO_LIST[input.id];
         if (listName && ideaIsMultiField(listName)) {
           e.preventDefault();
-          const parts = String(input.value || '').split(',');
-          const last = cleanIdeaOptionValue(parts.pop() || '');
-          const existing = dedupeIdeaOptions(parts);
-          if (last) setIdeaInputValues(input, [...existing, last]);
+          const last = cleanIdeaOptionValue(input.value || '');
+          const existing = ideaInputValues(input);
+          if (last && !existing.some(v => v.toLowerCase() === last.toLowerCase())) setIdeaInputValues(input, [...existing, last]);
+          else input.value = '';
         }
       }
     });
   });
+  ensureIdeaLockControls();
   if (!document.body.dataset.ideaAutocompleteGlobalReady) {
     document.body.dataset.ideaAutocompleteGlobalReady = '1';
     document.addEventListener('click', (e) => {
@@ -5279,6 +6262,7 @@ function initIdeaSettingsEditor() {
 
 function openIdeaGeneratorModal() {
   populateIdeaGeneratorOptions();
+  ensureIdeaLockControls();
   closeIdeaSuggestionBoxes();
   const modal = $('#ideaGeneratorModal');
   if (!modal) { setStatus('Idea Generator popup could not be found.', 'error'); return; }
@@ -5301,25 +6285,92 @@ function clearIdeaGenerator() {
     const el = $('#' + id);
     if (el) {
       el.value = '';
-      if (IDEA_FIELD_TO_LIST[id]) renderIdeaSelectedChips(el);
+      if (IDEA_FIELD_TO_LIST[id]) {
+        delete el.dataset.ideaSelectedValues;
+        normaliseIdeaMultiInputState(el);
+        renderIdeaSelectedChips(el);
+      }
     }
   });
+}
+
+function ideaGeneratorRandomMaxChoices() {
+  const raw = $('#ideaGeneratorRandomMaxChoices')?.value ?? settings?.ideaGeneratorRandomMaxChoices ?? DEFAULT_IDEA_RANDOM_MAX_CHOICES;
+  return Math.max(1, Math.min(20, Number(raw || DEFAULT_IDEA_RANDOM_MAX_CHOICES)));
+}
+
+function randomChoice(values = []) {
+  const list = dedupeIdeaOptions(values);
+  if (!list.length) return '';
+  return list[Math.floor(Math.random() * list.length)] || '';
+}
+
+function randomSample(values = [], count = 1) {
+  const pool = dedupeIdeaOptions(values);
+  const wanted = Math.max(0, Math.min(pool.length, Number(count || 0)));
+  const out = [];
+  while (out.length < wanted && pool.length) {
+    const idx = Math.floor(Math.random() * pool.length);
+    out.push(pool.splice(idx, 1)[0]);
+  }
+  return out;
+}
+
+function randomiseIdeaGenerator() {
+  closeIdeaSuggestionBoxes();
+  ensureIdeaLockControls();
+  let lockedCount = 0;
+  let changedCount = 0;
+  const genderSelect = $('#ideaGender');
+  if (genderSelect) {
+    if (isIdeaFieldLocked('ideaGender')) {
+      lockedCount += 1;
+    } else {
+      const genderOptions = Array.from(genderSelect.options || []).map(o => o.value).filter(v => v !== '');
+      genderSelect.value = randomChoice(genderOptions);
+      changedCount += 1;
+    }
+  }
+  const maxChoices = ideaGeneratorRandomMaxChoices();
+  Object.entries(IDEA_FIELD_TO_LIST).forEach(([id, listName]) => {
+    const input = $('#' + id);
+    if (!input) return;
+    if (isIdeaFieldLocked(id)) {
+      lockedCount += 1;
+      return;
+    }
+    const options = dedupeIdeaOptions(ideaOptionsForGender(listName));
+    if (!options.length) return;
+    if (ideaIsMultiField(listName)) {
+      const maxForField = Math.min(maxChoices, options.length);
+      const count = 1 + Math.floor(Math.random() * maxForField);
+      setIdeaInputValues(input, randomSample(options, count));
+    } else {
+      input.value = randomChoice(options);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    changedCount += 1;
+    renderIdeaSelectedChips(input);
+  });
+  const lockNote = lockedCount ? ` ${lockedCount} locked field${lockedCount === 1 ? '' : 's'} kept unchanged.` : '';
+  const changeNote = changedCount ? `Randomised ${changedCount} field${changedCount === 1 ? '' : 's'} from your lists.` : 'No unlocked fields were available to randomise.';
+  setStatus(`${changeNote}${lockNote} This did not call AI.`, changedCount ? 'ok' : 'error');
 }
 
 function collectIdeaGeneratorPayload() {
   return {
     gender: $('#ideaGender')?.value || '',
-    archetype: $('#ideaArchetype')?.value || '',
-    coreConflict: $('#ideaConflict')?.value || '',
-    setting: $('#ideaSetting')?.value || '',
-    tone: $('#ideaTone')?.value || '',
-    occupation: $('#ideaOccupation')?.value || '',
-    relationship: $('#ideaRelationship')?.value || '',
-    status: $('#ideaStatus')?.value || '',
-    personality: $('#ideaPersonality')?.value || '',
-    subjectOf: $('#ideaSubjectOf')?.value || '',
-    engagesIn: $('#ideaEngagesIn')?.value || '',
-    sexualEngagesIn: $('#ideaSexualEngagesIn')?.value || '',
+    archetype: ideaPayloadValue('ideaArchetype'),
+    coreConflict: ideaPayloadValue('ideaConflict'),
+    setting: ideaPayloadValue('ideaSetting'),
+    tone: ideaPayloadValue('ideaTone'),
+    occupation: ideaPayloadValue('ideaOccupation'),
+    relationship: ideaPayloadValue('ideaRelationship'),
+    status: ideaPayloadValue('ideaStatus'),
+    personality: ideaPayloadValue('ideaPersonality'),
+    subjectOf: ideaPayloadValue('ideaSubjectOf'),
+    engagesIn: ideaPayloadValue('ideaEngagesIn'),
+    sexualEngagesIn: ideaPayloadValue('ideaSexualEngagesIn'),
     customInstructions: $('#ideaCustomInstructions')?.value || ''
   };
 }
@@ -5400,6 +6451,9 @@ async function generateIdeaIntoMainConcept() {
   const payload = collectIdeaGeneratorPayload();
   const hasAny = Object.values(payload).some(v => String(v || '').trim());
   if (!hasAny) { setStatus('Choose at least one idea option or enter custom instructions first.', 'error'); return; }
+  // Close the modal before the AI call starts so the user can keep using the
+  // rest of the app while the floating busy banner tracks generation progress.
+  closeIdeaGeneratorModal();
   setBusy('IDEA GENERATOR — creating main concept seed…');
   setStatus('Generating a compact idea seed for Main Concept…', '');
   try {
@@ -5534,6 +6588,10 @@ async function generateCard(options = {}) {
       if (!res.ok) throw new Error(res.error || 'Split-card generation failed.');
       setCharacterOutputTabs(res.cards || []);
       currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
       updateAvailability();
       const count = characterOutputTabs.length;
       const foundNames = Array.isArray(res.characters) && res.characters.length ? ` Identified: ${res.characters.join(', ')}.` : '';
@@ -5571,6 +6629,10 @@ async function generateCard(options = {}) {
     if (!res.ok) throw new Error(res.error || 'Generation failed.');
     $('#outputText').value = res.output;
     currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
     lastQnaAnswers = res.qaAnswers || qaAnswers || '';
     const qaBox = $('#qaAnswersText');
     if (qaBox) qaBox.value = lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.';
@@ -5619,6 +6681,10 @@ async function reviseCard() {
     if (!res.ok) throw new Error(res.error || 'Revision failed.');
     $('#outputText').value = res.output;
     currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
     updateAvailability();
     $('#followupText').value = '';
     const backupMsg = describeBackupInfo(res.backupInfo, 'followup_revision');
