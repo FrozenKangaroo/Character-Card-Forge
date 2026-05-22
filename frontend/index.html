@@ -12,6 +12,7 @@
       <div class="brand"><div class="logo">CC</div><div><h1>Character Card Forge</h1><p>AI-driven card builder</p></div></div>
       <nav>
         <button class="nav active" data-tab="concept">Concept</button>
+        <button class="nav" data-tab="manual">Guided Manual</button>
         <button class="nav" data-tab="template">Prompt Template</button>
         <button class="nav" data-tab="settings">Settings</button>
         <button class="nav" data-tab="browser">Character Browser</button>
@@ -43,7 +44,7 @@
             <aside class="concept-side-panel">
               <div class="card wide concept-attachments-card priority-card">
                 <div class="card-title"><div><h3>Concept Attachments</h3><p>Attach scripts, subtitles, transcripts, notes, or PDFs. Their extracted text is appended to the concept sent to the text model.</p></div><div class="actions"><button id="attachConceptFilesBtn" type="button">Attach Files</button><button id="attachConceptUrlBtn" type="button">Attach URL</button><button id="clearConceptAttachmentsBtn" type="button" class="danger-ghost">Clear</button></div></div>
-                <div id="conceptAttachmentDropZone" class="drop-zone">Drop concept files here or click to browse</div>
+                <label id="conceptAttachmentDropZone" class="drop-zone" for="conceptAttachmentInput">Drop concept files here or click to browse</label>
                 <div id="conceptAttachmentsList" class="attachment-list empty">No concept attachments yet.</div>
               </div>
               <details class="card wide compact-details" open>
@@ -56,10 +57,10 @@
         </div>
         <div id="concept-description" class="subtab-panel" data-subtab-panel="concept">
           <div class="card wide vision-card">
-            <div class="card-title"><div><h3>Vision</h3><p>Select a reference image. Analyze Image describes only the character; Analyze Full Card reads the whole card/scene and writes a Main Concept.</p></div><div class="actions vision-actions"><button id="selectVisionImageBtn" type="button">Select Vision Image</button><button id="visionImageUrlBtn" type="button">Image URL</button><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze Image</button><button id="analyzeFullCardBtn" type="button" disabled title="Select a vision image first.">Analyze Full Card → Concept</button><button id="analyzeVisionToBuildersBtn" type="button">Analyze → Builders</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
-            <div id="visionDropZone" class="drop-zone">Drop a vision reference image here or click to browse</div>
-            <label>Vision Image Path<input id="visionImagePath" placeholder="Optional reference image for vision analysis." /></label>
-            <textarea id="visionDescription" class="vision-description" placeholder="Character-only analysis appears here. Full-card analysis also writes a generated concept into Main Concept."></textarea>
+            <div class="card-title"><div><h3>Vision</h3><p>Drop or click a reference image, or paste a local image path / URL below. Analyze opens options for character-only or full-card analysis and can send the result to Main Concept or Builders.</p></div><div class="actions vision-actions"><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
+            <label id="visionDropZone" class="drop-zone" for="visionFileInput">Drop a vision reference image here or click to browse</label>
+            <label>Vision Image Path<input id="visionImagePath" placeholder="Paste a local image path or image URL, or click/drop an image above." /></label>
+            <textarea id="visionDescription" class="vision-description" placeholder="Vision analysis output appears here. Use Analyze to choose where to send the result."></textarea>
           </div>
         </div>
 
@@ -243,6 +244,31 @@
           </div>
         </div>
       </section>
+
+      <section id="manual" class="tab">
+        <div class="page-head"><div><h2>Guided Manual Mode</h2><p>Fill the active prompt template by hand. No AI is used and Q&amp;A is skipped; the finished draft is built into Output / Editor.</p></div><div class="actions"><button id="manualResetBtn" type="button" class="danger-ghost">Clear Manual Draft</button><button id="manualBuildOutputTopBtn" type="button" class="primary">Build Output</button></div></div>
+        <div class="card wide manual-guide-card">
+          <div class="manual-guide-top">
+            <div>
+              <h3 id="manualGuidePageTitle">Page 1: Description</h3>
+              <p id="manualGuidePageHint">Fields from your current prompt template appear here.</p>
+            </div>
+            <div id="manualGuideProgress" class="manual-guide-progress">Page 1 / 7</div>
+          </div>
+          <div id="manualGuideChips" class="manual-guide-chips"></div>
+          <div id="manualGuideContent" class="manual-guide-content"></div>
+          <div class="manual-guide-actions">
+            <button id="manualBackBtn" type="button">Back</button>
+            <button id="manualNextBtn" type="button">Next</button>
+            <button id="manualBuildOutputBtn" type="button" class="primary">Build Output</button>
+          </div>
+        </div>
+        <details class="card wide compact-details manual-preview-card">
+          <summary>Manual Output Preview</summary>
+          <textarea id="manualPreviewText" class="debug-log" readonly placeholder="The preview updates as you type."></textarea>
+        </details>
+      </section>
+
 
       <section id="template" class="tab">
         <div class="page-head"><div><h2>Prompt Template</h2><p>Only Description and Personality allow adding/removing/renaming sections and fields. Other template blocks can be enabled or disabled.</p></div><div class="actions"><button id="resetTemplateBtn" class="danger-ghost">Reset Template</button></div></div>
@@ -543,6 +569,33 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
     </div>
   </div>
 
+  <div id="visionAnalyzeOptionsModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card vision-analyze-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Analyze Vision Image</h3>
+          <p>Choose what the vision model should create and where the result should go.</p>
+        </div>
+        <button id="closeVisionAnalyzeOptionsModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="vision-analyze-options-grid">
+        <fieldset>
+          <legend>Analysis Type</legend>
+          <label class="toggle-inline"><input type="radio" name="visionAnalysisType" value="character" checked /> Character description only</label>
+          <label class="toggle-inline"><input type="radio" name="visionAnalysisType" value="full_card" /> Full card / scene concept</label>
+        </fieldset>
+        <fieldset>
+          <legend>Send Result To</legend>
+          <label class="toggle-inline"><input type="radio" name="visionAnalysisTarget" value="concept" checked /> Main Concept</label>
+          <label class="toggle-inline"><input type="radio" name="visionAnalysisTarget" value="builders" /> Builders</label>
+        </fieldset>
+      </div>
+      <label>Custom Instructions<textarea id="visionAnalyzeCustomInstructions" class="vision-description small-textarea" placeholder="Optional. Example: This girl is {{user}}'s coworker. Be creative with the full concept. Keep her outfit and attitude important."></textarea></label>
+      <p class="small muted">Character description focuses on visible character design. Full-card analysis reads the whole image/scene and turns it into a playable concept. Custom instructions are sent only for this analysis.</p>
+      <div class="actions modal-actions"><button id="cancelVisionAnalyzeOptionsBtn" type="button" class="danger-ghost">Cancel</button><button id="startVisionAnalyzeOptionsBtn" type="button" class="primary">Run Analysis</button></div>
+    </div>
+  </div>
+
   <div id="frontPorchExportTargetModal" class="modal-backdrop hidden" aria-hidden="true">
     <div class="modal-card front-porch-export-modal-card">
       <div class="modal-head">
@@ -699,12 +752,12 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   </div>
 
   <input id="conceptImportFileInput" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" hidden />
-  <input id="visionFileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden />
+  <input id="visionFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" aria-hidden="true" tabindex="-1" />
   <input id="cardImageFileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden />
   <input id="savedFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
-  <input id="conceptAttachmentInput" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple hidden />
-  <script src="app.js?v=1.0.4"></script>
+  <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
+  <script src="app.js?v=1.0.5"></script>
 </body>
 </html>

@@ -1,3 +1,21 @@
+## Version 1.0.5
+
+- Added **Guided Manual Mode**, a no-AI card creation flow that uses the active prompt template as a step-by-step manual form.
+- Guided Manual Mode skips Q&A and does not call any AI model.
+- Added seven guided pages: Description, Personality, Scenario, First Message(s), Example Dialogues, Tags and System Prompt, and State Tracking / Stable Diffusion Prompt.
+- Guided Manual pages render fields dynamically from the active prompt template, including custom sections and optional/disabled sections.
+- Added Back/Next navigation, page chips, include toggles, manual output preview, and **Build Output** to send the finished manual draft into Output / Editor for normal saving/exporting.
+- Description, Personality, Tags/System Prompt, and State/Stable Diffusion pages now use compact single-line fields by default with Expand/Collapse controls for longer entries.
+- Scenario, First Message(s), Example Dialogues, Custom System Prompt, and other long-form prompt sections use wider multiline editors.
+- First Message(s) now supports adding and removing Alternative First Messages in Guided Manual Mode.
+- State Tracking fields now use friendlier controls: Short-Term Bond, Long-Term Bond, and Trust Level are sliders; Time of Day and Day of Week are dropdowns.
+- Cleaned up Concept → Vision by removing the separate Select Vision Image and Image URL buttons; the drop zone now serves as the browse target and the Image Path field accepts pasted local paths or URLs.
+- Replaced the separate Analyze Image / Analyze Full Card / Analyze → Builders buttons with one **Analyze** button.
+- Added a Vision Analyze Options modal with choices for character-only description or full-card/scene concept, output target choices for Main Concept or Builders, and per-analysis Custom Instructions.
+- Vision analysis can now send character-only descriptions to Main Concept, full-card analysis to Main Concept, or transfer either analysis type into Builders.
+- Improved Concept Vision and Concept Attachment file handling for PyWebView/AppImage environments.
+- Promoted the release from beta to stable `1.0.5` and updated VERSION files, README, and frontend cache-busting.
+
 ## Version 1.0.4
 
 - Added editable **NSFW Marker Tags** in Settings → Data / Browser. The default marker is `NSFW`, and cards with any configured marker tag are treated as NSFW for browser privacy modes.

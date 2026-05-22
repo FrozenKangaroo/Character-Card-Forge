@@ -50,6 +50,8 @@ let ratingImprovementProjectPath = '';
 let ratingImproveFieldDiffs = [];
 let ratingImproveLostDetails = [];
 let ratingImproveLostSummary = '';
+let manualGuidePageIndex = 0;
+let manualGuideState = {};
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -388,7 +390,7 @@ function isAiActionElement(el) {
   if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
   if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
   const aiIds = new Set([
-    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','analyzeFullCardBtn','analyzeVisionToBuildersBtn',
+    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
     'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
@@ -458,12 +460,104 @@ function preventDragDefaults(event) {
   event.stopPropagation();
 }
 
-function bindDropZone(id, options) {
+function decodeDroppedFileUri(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // KDE/GNOME sometimes prepend clipboard action lines before file:// URIs.
+  if (/^(copy|cut|move|link)$/i.test(raw)) return '';
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      return decodeURIComponent(url.pathname || '').replace(/^\/([A-Za-z]:\/)/, '$1');
+    } catch (_) {
+      return decodeURIComponent(raw.replace(/^file:\/\/+/, '/'));
+    }
+  }
+  return raw;
+}
+
+function getDroppedFilePaths(dataTransfer) {
+  const dt = dataTransfer;
+  if (!dt || typeof dt.getData !== 'function') return [];
+  const seen = new Set();
+  const paths = [];
+  const add = (value) => {
+    const path = decodeDroppedFileUri(value);
+    if (!path || /^https?:\/\//i.test(path)) return;
+    if (/^(copy|cut|move|link)$/i.test(path)) return;
+    if (!seen.has(path)) {
+      seen.add(path);
+      paths.push(path);
+    }
+  };
+  // Different Linux desktops/WebKit builds expose file drops through different text payloads.
+  // Import Card/Image worked because browser File objects were present there; these extra
+  // payloads cover AppImage/KDE/GNOME cases where dataTransfer.files is empty.
+  [
+    'text/uri-list',
+    'text/plain',
+    'text/x-moz-url',
+    'text/x-moz-url-data',
+    'application/x-kde-cutselection',
+    'x-special/gnome-copied-files',
+  ].forEach(type => {
+    let text = '';
+    try { text = dt.getData(type) || ''; } catch (_) { text = ''; }
+    String(text || '').split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#')).forEach(add);
+  });
+  return paths;
+}
+
+function getDroppedFiles(dataTransfer) {
+  const dt = dataTransfer;
+  const files = [...(dt?.files || [])].filter(Boolean);
+  if (files.length) return files;
+  const itemFiles = [];
+  try {
+    for (const item of [...(dt?.items || [])]) {
+      if (item?.kind === 'file' && typeof item.getAsFile === 'function') {
+        const file = item.getAsFile();
+        if (file) itemFiles.push(file);
+      }
+    }
+  } catch (_) {}
+  return itemFiles;
+}
+
+function bindDropZone(id, options = {}) {
   const zone = $('#' + id);
   if (!zone) return;
+  if (zone.__ccfDropZoneBound) return;
+  zone.__ccfDropZoneBound = true;
+  zone.dataset.ccfDropZoneId = id;
   const input = options.inputId ? $('#' + options.inputId) : null;
   const isBlocked = () => isInterfaceLocked() || (isAiGenerationBusy() && isAiDropZoneId(id));
   const setActive = (active) => zone.classList.toggle('drag-over', !!active && !isBlocked());
+  const describeDropPayload = (dt) => {
+    try {
+      const types = [...(dt?.types || [])].join(', ');
+      return types ? ` Detected payload types: ${types}.` : '';
+    } catch (_) { return ''; }
+  };
+  const handleDrop = async (e) => {
+    preventDragDefaults(e);
+    setActive(false);
+    if (isBlocked()) {
+      setStatus(isAiGenerationBusy() ? 'An AI task is running. AI-assisted drop zones are paused, but other controls are still usable.' : 'Please wait until the current task finishes before dropping files.', 'error');
+      return;
+    }
+    const files = getDroppedFiles(e.dataTransfer);
+    if (files.length && options.onFiles) {
+      await options.onFiles(files);
+      return;
+    }
+    const paths = getDroppedFilePaths(e.dataTransfer);
+    if (paths.length && options.onPaths) {
+      await options.onPaths(paths);
+      return;
+    }
+    setStatus('No dropped file was detected. Try the Select/Attach button instead.' + describeDropPayload(e.dataTransfer), 'error');
+  };
   ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, (e) => {
     preventDragDefaults(e);
     if (isBlocked()) return;
@@ -473,27 +567,36 @@ function bindDropZone(id, options) {
     preventDragDefaults(e);
     setActive(false);
   }));
-  zone.addEventListener('drop', async (e) => {
-    preventDragDefaults(e);
-    setActive(false);
-    if (isBlocked()) {
-      setStatus(isAiGenerationBusy() ? 'An AI task is running. AI-assisted drop zones are paused, but other controls are still usable.' : 'Please wait until the current task finishes before dropping files.', 'error');
-      return;
-    }
-    const files = [...(e.dataTransfer?.files || [])];
-    if (!files.length) return;
-    await options.onFiles(files);
-  });
-  zone.addEventListener('click', async () => {
+  zone.addEventListener('drop', handleDrop);
+  zone.addEventListener('click', async (e) => {
     if (isBlocked()) return;
     try {
-      // Prefer backend/native picker callbacks when supplied. In AppImage builds
-      // browser-backed file inputs can fail to show, while the backend can fall
-      // back through host dialogs and PyWebView safely.
+      // For Vision and Concept Attachments the most reliable Linux/WebView path is the
+      // same browser file input used by Import Card/Image. Keep this synchronous inside
+      // the user click; delayed input.click() after an awaited native dialog can be blocked.
+      if (options.preferInputOnClick && input) {
+        input.value = '';
+        input.click();
+        return;
+      }
       if (options.onClick) await options.onClick();
-      else if (input) input.click();
+      else if (input) {
+        input.value = '';
+        input.click();
+      }
     } catch (err) {
+      if (input) {
+        try { input.value = ''; input.click(); return; } catch (_) {}
+      }
       setStatus(err?.message || String(err), 'error');
+    }
+  });
+  zone.tabIndex = zone.tabIndex >= 0 ? zone.tabIndex : 0;
+  zone.setAttribute('role', zone.getAttribute('role') || 'button');
+  zone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      preventDragDefaults(e);
+      zone.click();
     }
   });
 }
@@ -561,7 +664,7 @@ function updateAvailability() {
     if (analyze) {
       analyze.dataset.visionPath = path;
       analyze.disabled = !path || aiBusy;
-      analyze.title = path ? (aiBusy ? 'An AI task is already running.' : '') : 'Select a vision image first.';
+      analyze.title = path ? (aiBusy ? 'An AI task is already running.' : 'Open vision analysis options.') : 'Select a vision image first.';
     }
     const fullCardAnalyze = $('#analyzeFullCardBtn');
     if (fullCardAnalyze) {
@@ -604,6 +707,9 @@ function bindTabs() {
       showBrowserLoadingModal();
       await waitForNextFrame();
       await refreshCharacterBrowser(false, { modal: true, keepModalVisible: true });
+    }
+    if (btn.dataset.tab === 'manual') {
+      renderManualGuide();
     }
     refreshSubtabScrollControls();
     updateAvailability();
@@ -673,6 +779,7 @@ function bindSubTabs() {
 
 async function init() {
   installConceptImportModalDelegatedHandlers();
+  installConceptVisionAttachmentDelegatedHandlers();
   bindTabs();
   enhanceScrollableSubtabs();
   bindSubTabs();
@@ -693,6 +800,7 @@ async function init() {
   renderTemplateSelector();
   renderTemplate();
   renderQaQuestions();
+  renderManualGuide();
   renderConceptAttachments();
   showRandomTip();
   bindActions();
@@ -1477,6 +1585,568 @@ function renderTemplate() {
     const holder = $('#' + sectionTemplatePanel(section));
     if (holder) holder.appendChild(renderSection(section, index));
   });
+  renderManualGuide();
+}
+
+
+function manualGuidePages() {
+  return [
+    { id: 'description', title: 'Description', hint: 'Name plus visual/description sections from the active prompt template.', panels: ['sectionsDescription'], sectionIds: ['name', 'description'] },
+    { id: 'personality', title: 'Personality', hint: 'Personality, behavior, relationship, backstory, and any custom Personality template sections.', panels: ['sectionsPersonality'], sectionIds: ['personality'] },
+    { id: 'scenario', title: 'Scenario', hint: 'The starting situation and immediate roleplay context.', panels: ['sectionsScenario'], sectionIds: ['scenario'] },
+    { id: 'first', title: 'First Message(s)', hint: 'Main first message plus optional alternative openings.', panels: ['sectionsFirst'], sectionIds: ['first_message', 'alternate_first_messages'] },
+    { id: 'examples', title: 'Example Dialogues', hint: 'Example dialogue and lorebook-style supporting entries if your template has them.', panels: ['sectionsExamples'], sectionIds: ['example_dialogues', 'lorebook'] },
+    { id: 'tagsSystem', title: 'Tags and System Prompt', hint: 'Tags plus optional custom system prompt / behavior rules.', panels: ['sectionsTagsSystem'], sectionIds: ['tags', 'system_prompt'] },
+    { id: 'stateSd', title: 'State Tracking and Stable Diffusion Prompt', hint: 'Optional Front Porch state values and image-generation prompt fields.', panels: ['sectionsStateSd'], sectionIds: ['state_tracking', 'stable_diffusion'] },
+  ];
+}
+
+function manualGuideSectionKey(section) {
+  return String(section?.id || section?.title || uid()).trim() || uid();
+}
+
+function ensureManualGuideSectionState(section) {
+  const key = manualGuideSectionKey(section);
+  if (!manualGuideState[key]) manualGuideState[key] = { include: section?.enabled !== false, body: '', fields: {} };
+  if (typeof manualGuideState[key].include !== 'boolean') manualGuideState[key].include = section?.enabled !== false;
+  if (!manualGuideState[key].fields || typeof manualGuideState[key].fields !== 'object') manualGuideState[key].fields = {};
+  (section?.fields || []).forEach(field => {
+    const fid = String(field?.id || field?.label || uid());
+    if (manualGuideState[key].fields[fid] === undefined) manualGuideState[key].fields[fid] = '';
+  });
+  if (isManualAlternateFirstMessagesSection(section)) ensureManualAlternateMessagesState(section, manualGuideState[key]);
+  return manualGuideState[key];
+}
+
+function manualGuideSectionsForPage(page) {
+  if (!template || !Array.isArray(template.sections)) return [];
+  const used = new Set();
+  const wantedPanels = new Set(page.panels || []);
+  const wantedIds = new Set(page.sectionIds || []);
+  const sections = [];
+  (template.sections || []).forEach(section => {
+    const sid = String(section.id || '');
+    const panel = sectionTemplatePanel(section);
+    if (wantedIds.has(sid) || wantedPanels.has(panel)) {
+      const key = manualGuideSectionKey(section);
+      if (!used.has(key)) {
+        used.add(key);
+        sections.push(section);
+      }
+    }
+  });
+  return sections;
+}
+
+function manualGuideUsesLargeText(page) {
+  return ['scenario', 'first', 'examples'].includes(String(page?.id || ''));
+}
+
+function isManualSystemPromptSection(section) {
+  const sid = String(section?.id || '').toLowerCase();
+  const title = String(section?.title || '').toLowerCase();
+  return sid === 'system_prompt' || title.includes('system prompt');
+}
+
+function isManualStateTrackingSection(section) {
+  const sid = String(section?.id || '').toLowerCase();
+  const title = String(section?.title || '').toLowerCase();
+  return sid === 'state_tracking' || title.includes('state tracking');
+}
+
+function manualGuideFieldIdentity(field) {
+  const id = String(field?.id || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const label = String(field?.label || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return { id, label, combined: `${id} ${label}`.trim() };
+}
+
+function manualGuideSpecialControlForField(section, field) {
+  if (!isManualStateTrackingSection(section)) return null;
+  const ident = manualGuideFieldIdentity(field);
+  const name = ident.combined;
+  if (ident.id === 'short_term_bond' || name.includes('short_term_bond')) {
+    return { type: 'range', min: -300, max: 300, step: 1, defaultValue: 0 };
+  }
+  if (ident.id === 'long_term_bond' || name.includes('long_term_bond')) {
+    return { type: 'range', min: -300, max: 300, step: 1, defaultValue: 0 };
+  }
+  if (ident.id === 'trust_level' || name.includes('trust_level')) {
+    return { type: 'range', min: -100, max: 100, step: 1, defaultValue: 0 };
+  }
+  if (ident.id === 'time_of_day' || name.includes('time_of_day')) {
+    return { type: 'select', options: [
+      { value: '', label: 'Unset' },
+      { value: 'morning', label: 'Morning' },
+      { value: 'noon', label: 'Noon' },
+      { value: 'afternoon', label: 'Afternoon' },
+      { value: 'late afternoon', label: 'Late Afternoon' },
+      { value: 'evening', label: 'Evening' },
+      { value: 'night', label: 'Night' },
+    ]};
+  }
+  if (ident.id === 'day_of_week' || name.includes('day_of_week')) {
+    return { type: 'select', options: [
+      { value: '', label: 'Unset / legacy' },
+      { value: '1', label: 'Monday (1)' },
+      { value: '2', label: 'Tuesday (2)' },
+      { value: '3', label: 'Wednesday (3)' },
+      { value: '4', label: 'Thursday (4)' },
+      { value: '5', label: 'Friday (5)' },
+      { value: '6', label: 'Saturday (6)' },
+      { value: '7', label: 'Sunday (7)' },
+    ]};
+  }
+  return null;
+}
+
+function manualGuideDisplayValueForField(section, field, value) {
+  const control = manualGuideSpecialControlForField(section, field);
+  const raw = String(value || '').trim();
+  if (!raw || !control) return raw;
+  if (control.type === 'select') {
+    const match = (control.options || []).find(opt => String(opt.value) === raw);
+    return match && match.value ? match.label : raw;
+  }
+  return raw;
+}
+
+function manualGuideSectionUsesLargeText(section, page) {
+  return manualGuideUsesLargeText(page) || isManualSystemPromptSection(section);
+}
+
+function manualGuideSectionUsesFullWidth(section, page) {
+  return manualGuideSectionUsesLargeText(section, page);
+}
+
+function isManualAlternateFirstMessagesSection(section) {
+  const sid = String(section?.id || '').toLowerCase();
+  const title = String(section?.title || '').toLowerCase();
+  return sid === 'alternate_first_messages' || sid === 'alternative_first_messages' || title.includes('alternative first message') || title.includes('alternate first message');
+}
+
+function ensureManualAlternateMessagesState(section, state = null) {
+  const key = manualGuideSectionKey(section);
+  const target = state || (manualGuideState[key] || (manualGuideState[key] = { include: section?.enabled !== false, body: '', fields: {} }));
+  if (!Array.isArray(target.alternates)) {
+    target.alternates = [];
+    const oldBody = String(target.body || '').trim();
+    if (oldBody) target.alternates.push(oldBody);
+  }
+  target.alternates = target.alternates.map(value => String(value || ''));
+  return target.alternates;
+}
+
+function manualGuideAlternateMessagesMarkup(section, state) {
+  const key = manualGuideSectionKey(section);
+  const alternates = ensureManualAlternateMessagesState(section, state);
+  const rows = alternates.map((value, index) => `
+    <div class="manual-alt-message-card" data-manual-alt-card="${escapeAttr(index)}">
+      <div class="manual-alt-message-head">
+        <strong>Alternative First Message ${index + 1}</strong>
+        <button type="button" class="danger-ghost small manual-alt-remove" data-manual-section="${escapeAttr(key)}" data-manual-alt-index="${escapeAttr(index)}">Remove</button>
+      </div>
+      <textarea class="manual-guide-input manual-guide-large manual-alt-message-input" data-manual-section="${escapeAttr(key)}" data-manual-alt-index="${escapeAttr(index)}" rows="8" placeholder="Write alternative first message ${index + 1}...">${escapeText(value || '')}</textarea>
+    </div>
+  `).join('');
+  const empty = alternates.length ? '' : '<div class="empty manual-alt-empty">No alternative first messages added yet. Use the button below to add one.</div>';
+  return `
+    <div class="manual-alt-message-list">
+      ${rows || empty}
+    </div>
+    <div class="manual-alt-actions">
+      <button type="button" class="ghost manual-alt-add" data-manual-section="${escapeAttr(key)}">+ Add Alternative First Message</button>
+    </div>
+  `;
+}
+
+function manualGuideSpecialInputMarkup({ key, fieldId = '', field = null, section = null, value = '', label = '', hint = '', placeholder = '', control = null, extraClass = '' }) {
+  if (!control) return '';
+  const safeValue = String(value ?? '');
+  if (control.type === 'range') {
+    const currentValue = safeValue.trim() === '' ? String(control.defaultValue ?? 0) : safeValue;
+    const displayValue = safeValue.trim() === '' ? currentValue : safeValue;
+    return `
+      <div class="manual-field-label manual-slider-field ${extraClass}">
+        <div class="manual-field-title-row">
+          <span>${escapeText(label)}</span>
+          <span class="manual-slider-value" data-manual-slider-value-for="${escapeAttr(key)}:${escapeAttr(fieldId)}">${escapeText(displayValue)}</span>
+        </div>
+        ${hint ? `<span class="manual-field-hint">${escapeText(hint)}</span>` : ''}
+        <input type="range" class="manual-guide-input manual-guide-slider" data-manual-section="${escapeAttr(key)}" data-manual-field="${escapeAttr(fieldId)}" data-manual-slider="1" min="${escapeAttr(control.min)}" max="${escapeAttr(control.max)}" step="${escapeAttr(control.step || 1)}" value="${escapeAttr(currentValue)}" />
+        <div class="manual-slider-scale"><span>${escapeText(control.min)}</span><span>${escapeText(control.max)}</span></div>
+      </div>
+    `;
+  }
+  if (control.type === 'select') {
+    const options = (control.options || []).map(opt => `<option value="${escapeAttr(opt.value)}" ${String(opt.value) === safeValue ? 'selected' : ''}>${escapeText(opt.label)}</option>`).join('');
+    return `
+      <label class="manual-field-label manual-select-field ${extraClass}">
+        <div class="manual-field-title-row"><span>${escapeText(label)}</span></div>
+        ${hint ? `<span class="manual-field-hint">${escapeText(hint)}</span>` : ''}
+        <select class="manual-guide-input manual-guide-select" data-manual-section="${escapeAttr(key)}" data-manual-field="${escapeAttr(fieldId)}" aria-label="${escapeAttr(label)}">
+          ${options}
+        </select>
+      </label>
+    `;
+  }
+  return '';
+}
+
+function manualGuideInputMarkup({ key, fieldId = '', body = false, value = '', label = '', hint = '', placeholder = '', large = false, expanded = false, extraClass = '' }) {
+  const isExpanded = large || expanded;
+  const rows = large ? 8 : (expanded ? 5 : 1);
+  const compactClass = large ? 'manual-guide-large' : 'manual-guide-compact';
+  const expandButton = large ? '' : `<button type="button" class="ghost small manual-expand-toggle" data-manual-section="${escapeAttr(key)}" ${body ? 'data-manual-body-expand="1"' : `data-manual-field-expand="${escapeAttr(fieldId)}"`}>${isExpanded ? 'Collapse' : 'Expand'}</button>`;
+  return `
+    <div class="manual-field-label ${extraClass}">
+      <div class="manual-field-title-row">
+        <span>${escapeText(label)}</span>
+        ${expandButton}
+      </div>
+      ${hint ? `<span class="manual-field-hint">${escapeText(hint)}</span>` : ''}
+      <textarea class="manual-guide-input ${compactClass} ${isExpanded ? 'expanded' : ''}" data-manual-section="${escapeAttr(key)}" ${body ? 'data-manual-body="1"' : `data-manual-field="${escapeAttr(fieldId)}"`} rows="${rows}" placeholder="${escapeAttr(placeholder)}">${escapeText(value || '')}</textarea>
+    </div>
+  `;
+}
+
+function manualGuideInputRowsForSection(section, state, page) {
+  const key = manualGuideSectionKey(section);
+  const fields = (section.fields || []).filter(field => field && field.enabled !== false);
+  const rows = [];
+  const large = manualGuideSectionUsesLargeText(section, page);
+  const fullWidth = manualGuideSectionUsesFullWidth(section, page);
+  state.expandedFields = state.expandedFields && typeof state.expandedFields === 'object' ? state.expandedFields : {};
+  if (isManualAlternateFirstMessagesSection(section)) {
+    return manualGuideAlternateMessagesMarkup(section, state);
+  }
+  if (fields.length) {
+    fields.forEach(field => {
+      const fid = String(field.id || field.label || uid());
+      const control = manualGuideSpecialControlForField(section, field);
+      if (control) {
+        rows.push(manualGuideSpecialInputMarkup({
+          key,
+          fieldId: fid,
+          field,
+          section,
+          value: state.fields[fid] || '',
+          label: field.label || fid.replace(/_/g, ' '),
+          hint: field.hint || '',
+          control,
+          extraClass: fullWidth ? 'manual-full-width' : '',
+        }));
+        return;
+      }
+      rows.push(manualGuideInputMarkup({
+        key,
+        fieldId: fid,
+        value: state.fields[fid] || '',
+        label: field.label || fid.replace(/_/g, ' '),
+        hint: field.hint || '',
+        placeholder: `Fill ${field.label || fid}...`,
+        large,
+        expanded: !!state.expandedFields[fid],
+        extraClass: fullWidth ? 'manual-full-width' : '',
+      }));
+    });
+    rows.push(manualGuideInputMarkup({
+      key,
+      body: true,
+      value: state.body || '',
+      label: 'Extra Section Notes',
+      hint: 'Optional free text appended to this section after the structured fields.',
+      placeholder: `Optional extra notes for ${section.title || 'this section'}...`,
+      large,
+      expanded: !!state.bodyExpanded,
+      extraClass: `manual-extra-notes ${fullWidth ? 'manual-full-width' : ''}`.trim(),
+    }));
+  } else {
+    rows.push(manualGuideInputMarkup({
+      key,
+      body: true,
+      value: state.body || '',
+      label: section.title || 'Section Text',
+      placeholder: `Write ${section.title || 'this section'} manually...`,
+      large,
+      expanded: !!state.bodyExpanded,
+      extraClass: fullWidth ? 'manual-full-width' : '',
+    }));
+  }
+  return rows.join('');
+}
+
+function manualGuideSectionHasContent(section, state) {
+  if (!state) return false;
+  if (isManualAlternateFirstMessagesSection(section)) {
+    return Array.isArray(state.alternates) && state.alternates.some(v => String(v || '').trim());
+  }
+  if (String(state.body || '').trim()) return true;
+  return Object.values(state.fields || {}).some(v => String(v || '').trim());
+}
+
+function renderManualGuide() {
+  const holder = $('#manualGuideContent');
+  if (!holder) return;
+  const pages = manualGuidePages();
+  manualGuidePageIndex = Math.max(0, Math.min(manualGuidePageIndex, pages.length - 1));
+  const page = pages[manualGuidePageIndex];
+  const title = $('#manualGuidePageTitle');
+  const hint = $('#manualGuidePageHint');
+  const progress = $('#manualGuideProgress');
+  if (title) title.textContent = `Page ${manualGuidePageIndex + 1}: ${page.title}`;
+  if (hint) hint.textContent = page.hint || '';
+  if (progress) progress.textContent = `Page ${manualGuidePageIndex + 1} / ${pages.length}`;
+
+  const chips = $('#manualGuideChips');
+  if (chips) {
+    chips.innerHTML = pages.map((p, idx) => `<button type="button" class="manual-guide-chip ${idx === manualGuidePageIndex ? 'active' : ''}" data-manual-page="${idx}">${idx + 1}. ${escapeText(p.title)}</button>`).join('');
+    $$('.manual-guide-chip', chips).forEach(btn => btn.addEventListener('click', () => {
+      captureManualGuideInputs();
+      manualGuidePageIndex = Number(btn.dataset.manualPage || 0);
+      renderManualGuide();
+    }));
+  }
+
+  const sections = manualGuideSectionsForPage(page);
+  if (!sections.length) {
+    holder.innerHTML = '<div class="empty">No template sections are assigned to this page yet. Add or enable sections in Prompt Template.</div>';
+  } else {
+    holder.innerHTML = sections.map(section => {
+      const key = manualGuideSectionKey(section);
+      const state = ensureManualGuideSectionState(section);
+      const disabledNote = section.enabled === false ? '<span class="manual-section-badge disabled">disabled in template</span>' : '<span class="manual-section-badge">enabled</span>';
+      return `
+        <div class="manual-section-card" data-manual-section-card="${escapeAttr(key)}">
+          <div class="manual-section-head">
+            <div>
+              <h3>${escapeText(section.title || key)}</h3>
+              ${section.description ? `<p>${escapeText(section.description)}</p>` : ''}
+            </div>
+            <label class="toggle-inline manual-include-toggle"><input type="checkbox" class="manual-guide-include" data-manual-section="${escapeAttr(key)}" ${state.include ? 'checked' : ''} /> Include</label>
+          </div>
+          <div class="manual-section-meta">${disabledNote}<span class="manual-section-badge">${escapeText(sectionTemplatePanel(section).replace('sections', '') || 'section')}</span></div>
+          <div class="manual-field-grid">
+            ${manualGuideInputRowsForSection(section, state, page)}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  bindManualGuideInputs();
+  updateManualGuideButtons();
+  updateManualPreview();
+}
+
+function bindManualGuideInputs() {
+  const commitManualGuideInput = (input) => {
+    const key = input.dataset.manualSection;
+    if (!key) return;
+    const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {} });
+    if (input.dataset.manualAltIndex !== undefined) {
+      state.alternates = Array.isArray(state.alternates) ? state.alternates : [];
+      state.alternates[Number(input.dataset.manualAltIndex || 0)] = input.value;
+    } else if (input.dataset.manualBody) state.body = input.value;
+    else if (input.dataset.manualField) {
+      state.fields[input.dataset.manualField] = input.value;
+      if (input.dataset.manualSlider) {
+        const valueEl = document.querySelector(`[data-manual-slider-value-for="${CSS.escape(`${key}:${input.dataset.manualField}`)}"]`);
+        if (valueEl) valueEl.textContent = input.value;
+      }
+    }
+    updateManualPreview();
+  };
+  $$('.manual-guide-input').forEach(input => {
+    input.addEventListener('input', () => commitManualGuideInput(input));
+    input.addEventListener('change', () => commitManualGuideInput(input));
+  });
+  $$('.manual-guide-include').forEach(input => {
+    input.addEventListener('change', () => {
+      const key = input.dataset.manualSection;
+      if (!key) return;
+      const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {} });
+      state.include = !!input.checked;
+      updateManualPreview();
+    });
+  });
+  $$('.manual-expand-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      captureManualGuideInputs();
+      const key = btn.dataset.manualSection;
+      if (!key) return;
+      const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {}, expandedFields: {} });
+      state.expandedFields = state.expandedFields && typeof state.expandedFields === 'object' ? state.expandedFields : {};
+      if (btn.dataset.manualBodyExpand) {
+        state.bodyExpanded = !state.bodyExpanded;
+      } else if (btn.dataset.manualFieldExpand) {
+        const fid = btn.dataset.manualFieldExpand;
+        state.expandedFields[fid] = !state.expandedFields[fid];
+      }
+      renderManualGuide();
+    });
+  });
+  $$('.manual-alt-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      captureManualGuideInputs();
+      const key = btn.dataset.manualSection;
+      if (!key) return;
+      const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {}, alternates: [] });
+      state.alternates = Array.isArray(state.alternates) ? state.alternates : [];
+      state.alternates.push('');
+      state.include = true;
+      renderManualGuide();
+      const inputs = $$('.manual-alt-message-input');
+      const last = inputs[inputs.length - 1];
+      if (last) last.focus();
+    });
+  });
+  $$('.manual-alt-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      captureManualGuideInputs();
+      const key = btn.dataset.manualSection;
+      const index = Number(btn.dataset.manualAltIndex || 0);
+      if (!key) return;
+      const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {}, alternates: [] });
+      state.alternates = Array.isArray(state.alternates) ? state.alternates : [];
+      state.alternates.splice(index, 1);
+      renderManualGuide();
+    });
+  });
+}
+
+function captureManualGuideInputs() {
+  $$('.manual-guide-input').forEach(input => {
+    const key = input.dataset.manualSection;
+    if (!key) return;
+    const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {} });
+    if (input.dataset.manualAltIndex !== undefined) {
+      state.alternates = Array.isArray(state.alternates) ? state.alternates : [];
+      state.alternates[Number(input.dataset.manualAltIndex || 0)] = input.value;
+    } else if (input.dataset.manualBody) state.body = input.value;
+    else if (input.dataset.manualField) state.fields[input.dataset.manualField] = input.value;
+  });
+  $$('.manual-guide-include').forEach(input => {
+    const key = input.dataset.manualSection;
+    if (!key) return;
+    const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {} });
+    state.include = !!input.checked;
+  });
+}
+
+function updateManualGuideButtons() {
+  const pages = manualGuidePages();
+  const back = $('#manualBackBtn');
+  const next = $('#manualNextBtn');
+  if (back) back.disabled = manualGuidePageIndex <= 0;
+  if (next) {
+    next.disabled = manualGuidePageIndex >= pages.length - 1;
+    next.textContent = manualGuidePageIndex >= pages.length - 1 ? 'Last Page' : 'Next';
+  }
+}
+
+function manualGuideFormatSection(section, state) {
+  if (isManualAlternateFirstMessagesSection(section)) {
+    const alternates = Array.isArray(state.alternates) ? state.alternates : [];
+    return alternates
+      .map((value, index) => ({ value: String(value || '').trim(), index }))
+      .filter(item => item.value)
+      .map(item => `Alternative First Message ${item.index + 1}:\n${item.value}`)
+      .join('\n\n')
+      .trim();
+  }
+  const fields = (section.fields || []).filter(field => field && field.enabled !== false);
+  const lines = [];
+  if (fields.length) {
+    fields.forEach(field => {
+      const fid = String(field.id || field.label || 'field');
+      const value = String(state.fields?.[fid] || '').trim();
+      const displayValue = manualGuideDisplayValueForField(section, field, value);
+      if (displayValue) lines.push(`- ${field.label || fid}: ${displayValue}`);
+    });
+    const body = String(state.body || '').trim();
+    if (body) lines.push(body);
+  } else {
+    const body = String(state.body || '').trim();
+    if (body) lines.push(body);
+  }
+  return lines.join('\n').trim();
+}
+
+function buildManualGuideOutput() {
+  captureManualGuideInputs();
+  if (!template || !Array.isArray(template.sections)) return '';
+  const out = [];
+  (template.sections || []).forEach(section => {
+    const key = manualGuideSectionKey(section);
+    const state = ensureManualGuideSectionState(section);
+    const body = manualGuideFormatSection(section, state);
+    const hasContent = !!body.trim();
+    if (!hasContent) return;
+    if (state.include === false) return;
+    const title = String(section.title || key).trim() || key;
+    out.push('------------------------------------------------');
+    out.push(title);
+    out.push('');
+    out.push(body);
+    out.push('');
+  });
+  return out.join('\n').trim();
+}
+
+function updateManualPreview() {
+  const preview = $('#manualPreviewText');
+  if (!preview) return;
+  const output = buildManualGuideOutput();
+  preview.value = output || '';
+}
+
+function manualGuideNextPage() {
+  captureManualGuideInputs();
+  const pages = manualGuidePages();
+  manualGuidePageIndex = Math.min(pages.length - 1, manualGuidePageIndex + 1);
+  renderManualGuide();
+}
+
+function manualGuidePreviousPage() {
+  captureManualGuideInputs();
+  manualGuidePageIndex = Math.max(0, manualGuidePageIndex - 1);
+  renderManualGuide();
+}
+
+function clearManualGuideDraft() {
+  if (!confirm('Clear every field in the Guided Manual draft?')) return;
+  manualGuideState = {};
+  manualGuidePageIndex = 0;
+  renderManualGuide();
+  setStatus('Guided Manual draft cleared.', 'ok');
+}
+
+async function buildManualGuideIntoOutput() {
+  if (isInterfaceLocked()) return;
+  const output = buildManualGuideOutput();
+  if (!output.trim()) {
+    setStatus('Fill at least one Guided Manual field before building the output.', 'error');
+    return;
+  }
+  clearGenerationArtifacts();
+  $('#outputText').value = output;
+  lastQnaAnswers = 'Guided Manual Mode was used. Q&A was skipped and no AI generation was run.';
+  const qaBox = $('#qaAnswersText');
+  if (qaBox) qaBox.value = lastQnaAnswers;
+  currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
+  setCharacterOutputTabs([{ name: extractOutputNameForTab(output) || 'Manual Character', output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '' }]);
+  $$('.nav').forEach(b => b.classList.remove('active'));
+  $$('.tab').forEach(t => t.classList.remove('active'));
+  $('[data-tab="output"]')?.classList.add('active');
+  $('#output')?.classList.add('active');
+  switchSubTab('output', 'output-fulltext');
+  updateAvailability();
+  await saveCurrentWorkspace('silent');
+  setStatus('Guided Manual output built, Q&A skipped, and workspace autosaved.', 'ok');
 }
 
 function renderRules() {
@@ -1821,6 +2491,11 @@ function bindActions() {
   $('#openUpdateReleaseBtn')?.addEventListener('click', openUpdateReleasePage);
   $('#updateAvailableModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'updateAvailableModal') closeUpdateAvailableModal(); });
   $('#newCardOutputBtn').addEventListener('click', newCard);
+  $('#manualBackBtn')?.addEventListener('click', manualGuidePreviousPage);
+  $('#manualNextBtn')?.addEventListener('click', manualGuideNextPage);
+  $('#manualBuildOutputBtn')?.addEventListener('click', buildManualGuideIntoOutput);
+  $('#manualBuildOutputTopBtn')?.addEventListener('click', buildManualGuideIntoOutput);
+  $('#manualResetBtn')?.addEventListener('click', clearManualGuideDraft);
   $('#loadTemplateBtn').addEventListener('click', loadSelectedTemplate);
   $('#saveTemplateAsBtn').addEventListener('click', saveTemplateAs);
   $('#deleteTemplateBtn').addEventListener('click', deleteSelectedTemplate);
@@ -1899,11 +2574,15 @@ function bindActions() {
   $$('.builder-card select, .builder-card input, .builder-card textarea').forEach(el => el.addEventListener('input', () => { updateBuilderConditionalOptions(); updateCustomConditionalOptions(); captureCurrentMultiBuilderState(); }));
   $$('.multi-builder-character-select').forEach(el => el.addEventListener('change', () => switchMultiBuilderCharacter(el.value)));
   $$('.multi-builder-character-label').forEach(el => el.addEventListener('input', () => { if (!isMultiBuilderMode()) return; $$('.multi-builder-character-label').forEach(other => { if (other !== el) other.value = el.value; }); multiBuilderStates[multiBuilderSelectedIndex] = { ...(multiBuilderStates[multiBuilderSelectedIndex] || {}), ...readBuilderDomState(), multiCharacterName: el.value || '' }; updateMultiBuilderSelectors(false); }));
-  $('#selectVisionImageBtn').addEventListener('click', selectVisionImage);
+  $('#selectVisionImageBtn')?.addEventListener('click', openVisionImagePicker);
   $('#visionImageUrlBtn')?.addEventListener('click', () => selectVisionImageUrl({ analyze: false }));
   $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
-  $('#analyzeVisionBtn').addEventListener('click', analyzeVisionImage);
+  $('#analyzeVisionBtn').addEventListener('click', openVisionAnalyzeOptionsModal);
   $('#analyzeFullCardBtn')?.addEventListener('click', analyzeFullCardToMainConcept);
+  $('#closeVisionAnalyzeOptionsModalBtn')?.addEventListener('click', closeVisionAnalyzeOptionsModal);
+  $('#cancelVisionAnalyzeOptionsBtn')?.addEventListener('click', closeVisionAnalyzeOptionsModal);
+  $('#startVisionAnalyzeOptionsBtn')?.addEventListener('click', startVisionAnalyzeFromModal);
+  $('#visionAnalyzeOptionsModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'visionAnalyzeOptionsModal') closeVisionAnalyzeOptionsModal(); });
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
   $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
@@ -2018,8 +2697,8 @@ function bindActions() {
   $('#conceptImportAsMainBtn')?.addEventListener('click', () => runConceptImport('main'));
   $('#conceptImportAsBuildersBtn')?.addEventListener('click', () => runConceptImport('builders'));
 
-  bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles, onClick: attachConceptFiles });
-  bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles, onClick: selectVisionImage });
+  bindDropZone('conceptAttachmentDropZone', { inputId: 'conceptAttachmentInput', onFiles: importConceptAttachmentFiles, onPaths: importConceptAttachmentPaths, onClick: attachConceptFiles, preferInputOnClick: true });
+  bindDropZone('visionDropZone', { inputId: 'visionFileInput', onFiles: importVisionFiles, onPaths: importVisionPaths, onClick: openVisionImagePicker, preferInputOnClick: true });
   bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles, onClick: loadSavedCardOrProject });
   bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles, onClick: loadCardToBuildersNative });
   bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles, onClick: loadCardToMainConceptNative });
@@ -2406,37 +3085,12 @@ function applyBuilderTransferResult(res) {
 }
 
 async function transferConceptToBuilders() {
-  settings = collectSettings();
-  const settingsError = validateTextApiSettings(settings);
-  if (settingsError) {
-    await window.pywebview.api.save_settings(settings);
-    setStatus(settingsError, 'error');
-    switchToSettingsTab();
-    updateAvailability();
-    return;
-  }
   const mainConcept = ($('#conceptText')?.value || '').trim();
   const characterDescription = ($('#visionDescription')?.value || '').trim();
-  if (!mainConcept && !characterDescription) {
-    setStatus('Write a Main Concept or provide a Vision Description first.', 'error');
-    return;
-  }
-  setBusy('TRANSFER TO BUILDERS — reading concept and filling builder fields…');
-  setStatus('Transferring concept into Character, Personality, and Scene Builders…', '');
-  try {
-    const catalog = collectCompactBuilderFieldCatalog();
-    const res = await window.pywebview.api.ai_transfer_to_builders(mainConcept, characterDescription, catalog, settings);
-    if (!res.ok) throw new Error(res.error || 'Transfer to Builders failed.');
-    const applied = applyBuilderTransferResult(res);
-    const multiMsg = applied.characterCount >= 2 ? ` Detected ${applied.characterCount} main characters and switched to Multi-Character Single Card. Side characters remain in concept/lore context, not builder slots.` : '';
-    setStatus(`Transferred concept to builders: filled ${applied.count} field(s). Builder guidance now takes priority over Main Concept / Vision during generation.${multiMsg}${res.notes ? ' ' + res.notes : ''}`, 'ok');
-    switchSubTab('concept', 'concept-builder');
-  } catch (err) {
-    setStatus(err.message || String(err), 'error');
-  } finally {
-    setBusy('');
-    updateAvailability();
-  }
+  return transferTextToBuilders(mainConcept, characterDescription, {
+    busyMessage: 'TRANSFER TO BUILDERS — reading concept and filling builder fields…',
+    statusMessage: 'Transferring concept into Character, Personality, and Scene Builders…'
+  });
 }
 
 async function aiRandomizeBuilderPreset({ build = false } = {}) {
@@ -2658,6 +3312,9 @@ async function newCard() {
   emotionImageState = [];
   $('#emotionImages').innerHTML = '';
   conceptAttachments = [];
+  manualGuideState = {};
+  manualGuidePageIndex = 0;
+  renderManualGuide();
   renderConceptAttachments();
   $('#debugLogText').value = '';
   lastQnaAnswers = '';
@@ -2761,18 +3418,64 @@ async function stopCurrentTask() {
   }
 }
 
-async function selectVisionImage() {
+async function selectVisionImage(options = {}) {
   if (isInterfaceLocked()) return;
+  const fallbackToBrowserInput = !!options.fallbackToBrowserInput;
+  if (!window.pywebview?.api?.pick_image_file) {
+    openBrowserFileInput('visionFileInput', 'vision image');
+    return;
+  }
   setBusy('SELECTING VISION IMAGE…');
+  let shouldOpenBrowserFallback = false;
   try {
     const res = await window.pywebview.api.pick_image_file('vision');
     if (!res.ok) {
-      if (!res.cancelled) throw new Error(res.error || 'Vision image selection failed.');
-      return;
+      if (res.cancelled) {
+        shouldOpenBrowserFallback = fallbackToBrowserInput;
+        return;
+      }
+      throw new Error(res.error || 'Vision image selection failed.');
     }
     setVisionImagePath(res.path);
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
+    setStatus('Selected vision image: ' + res.path, 'ok');
+  } catch (err) {
+    if (fallbackToBrowserInput) {
+      shouldOpenBrowserFallback = true;
+      setStatus('Native vision image picker failed; opening browser picker fallback.', 'error');
+    } else {
+      setStatus(err.message || String(err), 'error');
+    }
+  } finally {
+    setBusy('');
+    setVisionImagePath(getVisionImagePath());
+    updateAvailability();
+    if (shouldOpenBrowserFallback) openBrowserFileInput('visionFileInput', 'vision image');
+  }
+}
+
+async function openVisionImagePicker() {
+  if (isInterfaceLocked()) return;
+  if (openBrowserFileInput('visionFileInput', 'vision image')) return;
+  await selectVisionImage({ fallbackToBrowserInput: false });
+}
+
+async function importVisionPaths(paths) {
+  const path = [...(paths || [])].find(Boolean);
+  if (!path) return;
+  if (!window.pywebview?.api?.import_image_path) {
+    setStatus('This build cannot import dropped file paths. Click the drop area to browse instead.', 'error');
+    return;
+  }
+  setBusy('IMPORTING VISION IMAGE…');
+  try {
+    const res = await window.pywebview.api.import_image_path(path, 'vision');
+    if (!res.ok) throw new Error(res.error || 'Vision image import failed.');
+    setVisionImagePath(res.path);
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    updateAvailability();
     setStatus('Selected vision image: ' + res.path, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -2817,7 +3520,151 @@ async function selectVisionImageUrl({ analyze = false } = {}) {
   if (analyze) {
     await analyzeVisionImage();
   } else {
-    setStatus('Vision image URL set. Click Analyze Image when ready.', 'ok');
+    setStatus('Vision image URL set. Click Analyze when ready.', 'ok');
+  }
+}
+
+function getCheckedRadioValue(name, fallback = '') {
+  const checked = document.querySelector(`input[name="${name}"]:checked`);
+  return String(checked?.value || fallback || '').trim();
+}
+
+function openVisionAnalyzeOptionsModal() {
+  if (isInterfaceLocked()) return;
+  const visionPath = getVisionImagePath();
+  if (!visionPath) {
+    setStatus('Select a vision image, drop one onto the Vision area, or paste an image path/URL first.', 'error');
+    updateAvailability();
+    return;
+  }
+  const modal = $('#visionAnalyzeOptionsModal');
+  if (!modal) {
+    analyzeVisionImage();
+    return;
+  }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  $('#visionAnalyzeCustomInstructions')?.focus();
+}
+
+function closeVisionAnalyzeOptionsModal() {
+  const modal = $('#visionAnalyzeOptionsModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function startVisionAnalyzeFromModal() {
+  const analysisType = getCheckedRadioValue('visionAnalysisType', 'character');
+  const target = getCheckedRadioValue('visionAnalysisTarget', 'concept');
+  const customInstructions = String($('#visionAnalyzeCustomInstructions')?.value || '').trim();
+  closeVisionAnalyzeOptionsModal();
+  await runVisionAnalysisWithOptions({ analysisType, target, customInstructions });
+}
+
+function writeVisionAnalysisToConcept(text, { analysisType = 'character' } = {}) {
+  const conceptBox = $('#conceptText');
+  if (!conceptBox) throw new Error('Main Concept box was not found.');
+  const cleanText = String(text || '').trim();
+  if (!cleanText) throw new Error('Vision model returned an empty result.');
+  const block = analysisType === 'full_card'
+    ? cleanText
+    : `Character Visual Description:\n${cleanText}`;
+  const existing = String(conceptBox.value || '').trim();
+  let finalText = block;
+  if (existing) {
+    const replace = window.confirm('Replace the current Main Concept with this vision analysis?\n\nOK = Replace\nCancel = Append below the existing concept');
+    finalText = replace ? block : `${existing}\n\n---\n\n${block}`;
+  }
+  conceptBox.value = finalText;
+  conceptBox.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function transferTextToBuilders(mainConcept, characterDescription, options = {}) {
+  settings = collectSettings();
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return false;
+  }
+  const mainText = String(mainConcept || '').trim();
+  const characterText = String(characterDescription || '').trim();
+  if (!mainText && !characterText) {
+    setStatus('Provide a Main Concept or vision description before transferring to Builders.', 'error');
+    return false;
+  }
+  setBusy(options.busyMessage || 'TRANSFER TO BUILDERS — reading analysis and filling builder fields…');
+  setStatus(options.statusMessage || 'Transferring analysis into Character, Personality, and Scene Builders…', '');
+  try {
+    const catalog = collectCompactBuilderFieldCatalog();
+    const res = await window.pywebview.api.ai_transfer_to_builders(mainText, characterText, catalog, settings);
+    if (!res.ok) throw new Error(res.error || 'Transfer to Builders failed.');
+    const applied = applyBuilderTransferResult(res);
+    const multiMsg = applied.characterCount >= 2 ? ` Detected ${applied.characterCount} main characters and switched to Multi-Character Single Card. Side characters remain in concept/lore context, not builder slots.` : '';
+    setStatus(`Transferred analysis to builders: filled ${applied.count} field(s). Builder guidance now takes priority during generation.${multiMsg}${res.notes ? ' ' + res.notes : ''}`, 'ok');
+    if (options.switchToBuilders !== false) switchSubTab('concept', 'concept-builder');
+    return true;
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+    return false;
+  } finally {
+    setBusy('');
+    updateAvailability();
+  }
+}
+
+async function runVisionAnalysisWithOptions({ analysisType = 'character', target = 'concept', customInstructions = '' } = {}) {
+  const visionPath = getVisionImagePath();
+  if (!visionPath) {
+    setStatus('Select a vision image before analyzing.', 'error');
+    updateAvailability();
+    return;
+  }
+  const fullCard = analysisType === 'full_card';
+  const sendToBuilders = target === 'builders';
+  setVisionImagePath(visionPath);
+  settings = collectSettings();
+  settings.visionImagePath = visionPath;
+  const settingsError = validateVisionApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  await window.pywebview.api.save_settings(settings);
+  setBusy(fullCard ? 'ANALYZING FULL CARD WITH VISION MODEL…' : 'ANALYZING IMAGE WITH VISION MODEL…');
+  try {
+    const mode = fullCard ? 'full_card' : 'character';
+    const res = await window.pywebview.api.analyze_vision_image(visionPath, settings, mode, customInstructions || '');
+    if (!res.ok) throw new Error(res.error || 'Vision analysis failed.');
+    const resultText = String(res.concept || res.description || '').trim();
+    if (!resultText) throw new Error('Vision model returned an empty result. Try a different vision model or add custom instructions.');
+    if (res.imagePath) setVisionImagePath(res.imagePath);
+    if ($('#visionDescription')) $('#visionDescription').value = resultText;
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+
+    if (sendToBuilders) {
+      setBusy('');
+      await transferTextToBuilders(fullCard ? resultText : '', fullCard ? '' : resultText, {
+        busyMessage: fullCard ? 'TRANSFER TO BUILDERS — reading full-card analysis…' : 'TRANSFER TO BUILDERS — reading character description…',
+        statusMessage: fullCard ? 'Transferring full-card analysis into Builders…' : 'Transferring character description into Builders…'
+      });
+    } else {
+      writeVisionAnalysisToConcept(resultText, { analysisType: fullCard ? 'full_card' : 'character' });
+      updateAvailability();
+      setStatus(res.retryUsed ? 'Vision analysis succeeded after a SFW retry. Main Concept updated.' : 'Vision analysis complete. Main Concept updated.', 'ok');
+    }
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+    updateAvailability();
   }
 }
 
@@ -3000,6 +3847,9 @@ function renderConceptAttachments() {
 
 async function attachConceptFiles() {
   if (isInterfaceLocked()) return;
+  // Use the browser file input first. This matches the Import Card/Image modal path,
+  // which works reliably in Linux AppImage/WebView builds.
+  if (openBrowserFileInput('conceptAttachmentInput', 'concept attachment files')) return;
   setBusy('ATTACHING CONCEPT FILE(S)…');
   try {
     const res = await window.pywebview.api.pick_concept_attachments();
@@ -3032,6 +3882,28 @@ async function importConceptAttachmentFiles(files) {
     renderConceptAttachments();
     updateAvailability();
     setStatus(`Attached ${files.length} concept file(s). Their extracted text will be sent with the concept.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function importConceptAttachmentPaths(paths) {
+  paths = [...(paths || [])].filter(Boolean);
+  if (!paths.length) return;
+  if (!window.pywebview?.api?.import_concept_attachment_paths) {
+    setStatus('This build cannot import dropped concept file paths. Click Attach Files instead.', 'error');
+    return;
+  }
+  setBusy('IMPORTING CONCEPT ATTACHMENT(S)…');
+  try {
+    const res = await window.pywebview.api.import_concept_attachment_paths(paths);
+    if (!res.ok) throw new Error(res.error || 'Could not import dropped concept attachment(s).');
+    conceptAttachments.push(...(res.attachments || []));
+    renderConceptAttachments();
+    updateAvailability();
+    setStatus(`Attached ${res.attachments?.length || 0} concept file(s). Their extracted text will be sent with the concept.`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -7636,5 +8508,132 @@ function installConceptImportModalDelegatedHandlers() {
   }, true);
 }
 
+function installConceptVisionAttachmentDelegatedHandlers() {
+  if (window.__ccfConceptVisionAttachmentDelegated) return;
+  window.__ccfConceptVisionAttachmentDelegated = true;
+
+  const triggerInput = (inputId, label) => {
+    const input = $('#' + inputId);
+    if (!input) {
+      setStatus(`File input missing for ${label}.`, 'error');
+      return false;
+    }
+    try {
+      input.disabled = false;
+      input.value = '';
+      input.click();
+      return true;
+    } catch (err) {
+      setStatus(`Could not open ${label} picker: ${err?.message || err}`, 'error');
+      return false;
+    }
+  };
+
+  const visionTarget = (event) => event.target?.closest?.('#visionDropZone, #selectVisionImageBtn');
+  const attachmentTarget = (event) => event.target?.closest?.('#conceptAttachmentDropZone, #attachConceptFilesBtn');
+
+  document.addEventListener('click', (event) => {
+    if (isInterfaceLocked && isInterfaceLocked()) return;
+    if (visionTarget(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      triggerInput('visionFileInput', 'vision image');
+      return;
+    }
+    if (attachmentTarget(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      triggerInput('conceptAttachmentInput', 'concept attachment files');
+      return;
+    }
+  }, true);
+
+  document.addEventListener('keydown', (event) => {
+    if (!(event.key === 'Enter' || event.key === ' ')) return;
+    if (visionTarget(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      triggerInput('visionFileInput', 'vision image');
+      return;
+    }
+    if (attachmentTarget(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      triggerInput('conceptAttachmentInput', 'concept attachment files');
+      return;
+    }
+  }, true);
+
+  document.addEventListener('change', (event) => {
+    if (event.target?.id === 'visionFileInput') {
+      event.stopPropagation();
+      const files = [...(event.target.files || [])];
+      event.target.value = '';
+      if (files.length) importVisionFiles(files);
+      return;
+    }
+    if (event.target?.id === 'conceptAttachmentInput') {
+      event.stopPropagation();
+      const files = [...(event.target.files || [])];
+      event.target.value = '';
+      if (files.length) importConceptAttachmentFiles(files);
+      return;
+    }
+  }, true);
+
+  const setDropActive = (zone, active) => {
+    if (!zone) return;
+    zone.classList.toggle('drag-over', !!active);
+    zone.classList.toggle('dragover', !!active);
+  };
+
+  const resolveDropZone = (event) => {
+    const vision = event.target?.closest?.('#visionDropZone');
+    if (vision) return { kind: 'vision', zone: vision };
+    const attachment = event.target?.closest?.('#conceptAttachmentDropZone');
+    if (attachment) return { kind: 'attachment', zone: attachment };
+    return null;
+  };
+
+  ['dragenter', 'dragover'].forEach(name => document.addEventListener(name, (event) => {
+    const hit = resolveDropZone(event);
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try { event.dataTransfer.dropEffect = 'copy'; } catch (_) {}
+    setDropActive(hit.zone, true);
+  }, true));
+
+  ['dragleave', 'dragend'].forEach(name => document.addEventListener(name, (event) => {
+    const hit = resolveDropZone(event);
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDropActive(hit.zone, false);
+  }, true));
+
+  document.addEventListener('drop', (event) => {
+    const hit = resolveDropZone(event);
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setDropActive(hit.zone, false);
+    const files = getDroppedFiles(event.dataTransfer);
+    const paths = getDroppedFilePaths(event.dataTransfer);
+    if (hit.kind === 'vision') {
+      if (files.length) importVisionFiles(files.slice(0, 1));
+      else if (paths.length) importVisionPaths(paths.slice(0, 1));
+      else setStatus('No dropped vision image was detected. Try clicking the drop zone to browse instead.', 'error');
+      return;
+    }
+    if (hit.kind === 'attachment') {
+      if (files.length) importConceptAttachmentFiles(files);
+      else if (paths.length) importConceptAttachmentPaths(paths);
+      else setStatus('No dropped concept attachment was detected. Try Attach Files instead.', 'error');
+    }
+  }, true);
+}
+
 installConceptImportModalDelegatedHandlers();
+installConceptVisionAttachmentDelegatedHandlers();
 window.addEventListener('pywebviewready', init);

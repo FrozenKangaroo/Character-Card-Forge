@@ -4672,6 +4672,12 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def import_image_path(self, path, kind="card"):
+        try:
+            return self._copy_image_from_path(path, kind)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def pick_saved_file(self):
         try:
             paths = self._run_modern_file_dialog("Load Saved Character Card / Project", "saved", False)
@@ -4731,6 +4737,23 @@ class Api:
             paths = self._run_modern_file_dialog("Attach Concept Files", "attachment", True)
             if not paths:
                 return {"ok": False, "cancelled": True}
+            attachments = []
+            for path in paths:
+                res = self._concept_attachment_from_path(path)
+                if not res.get("ok"):
+                    return res
+                attachments.append(res)
+            return {"ok": True, "attachments": attachments}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def import_concept_attachment_paths(self, paths):
+        try:
+            if isinstance(paths, str):
+                paths = [paths]
+            paths = [str(p).strip() for p in (paths or []) if str(p).strip()]
+            if not paths:
+                return {"ok": False, "error": "No dropped concept attachment path was received."}
             attachments = []
             for path in paths:
                 res = self._concept_attachment_from_path(path)
@@ -8197,13 +8220,14 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def analyze_vision_image(self, image_path, settings=None, mode="character"):
+    def analyze_vision_image(self, image_path, settings=None, mode="character", custom_instructions=""):
         self._reset_cancel()
         self._raise_if_cancelled()
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
         self.save_settings(merged_settings)
         mode = str(mode or "character").strip().lower().replace("-", "_")
         full_card_mode = mode in {"card", "full_card", "concept", "main_concept", "scene"}
+        custom_instructions = str(custom_instructions or "").strip()
         image_path = (image_path or merged_settings.get("visionImagePath") or "").strip()
         if not image_path:
             return {"ok": False, "error": "Select an image first."}
@@ -8262,6 +8286,12 @@ class Api:
         )
 
         prompt = full_card_prompt if full_card_mode else character_prompt
+        if custom_instructions:
+            prompt += (
+                "\n\nUSER CUSTOM INSTRUCTIONS FOR THIS ANALYSIS:\n"
+                + custom_instructions
+                + "\nUse these instructions when they are compatible with the visible image and safety rules. If the user asks you to be creative, add useful roleplay-ready implications without claiming uncertain image details as fact."
+            )
 
         character_sfw_retry_prompt = (
             "The previous attempt may have refused because the reference image contained nudity or sexual context. "
@@ -8285,6 +8315,12 @@ class Api:
         )
 
         sfw_retry_prompt = full_card_sfw_retry_prompt if full_card_mode else character_sfw_retry_prompt
+        if custom_instructions:
+            sfw_retry_prompt += (
+                "\n\nUSER CUSTOM INSTRUCTIONS TO PRESERVE SAFELY:\n"
+                + custom_instructions
+                + "\nPreserve only the safe, non-explicit parts of these instructions and ignore anything that conflicts with the SFW retry requirements."
+            )
 
         def is_vision_refusal(text):
             lowered = (text or "").lower()
@@ -8394,6 +8430,8 @@ class Api:
                 "vision_base": base,
                 "vision_model": model,
                 "prompt": prompt_text,
+                "custom_instructions_present": bool(custom_instructions),
+                "custom_instructions_preview": custom_instructions[:500],
                 "image_payload": {
                     "label": image_payload.get("label", "original"),
                     "mime": image_payload.get("mime"),
