@@ -26,7 +26,8 @@
       <div id="status" class="status"></div>
 
       <section id="concept" class="tab active">
-        <div class="page-head"><div><h2>Character Concept</h2><p>Build the concept, visual reference, and generation style from separate tabs.</p></div><div class="actions"><button id="newCardBtn" type="button">New Card</button><button id="transferToBuildersBtn" type="button">Transfer to Builders</button><button id="generateBtn" class="primary">Generate Card</button></div></div>
+        <div class="page-head"><div><h2>Character Concept</h2><p>Build the concept, visual reference, and generation style from separate tabs.</p></div><div class="actions"><button id="newCardBtn" type="button">New Concept Tab</button><button id="transferToBuildersBtn" type="button">Transfer to Builders</button><button id="generateBtn" class="primary">Generate Card</button></div></div>
+        <div class="workspace-tab-shell" data-workspace-tab-shell="concept"><button class="workspace-scroll-btn" type="button" data-scroll-tabs="conceptWorkspaceTabs" data-scroll-dir="-1">‹</button><div id="conceptWorkspaceTabs" class="workspace-tabs concept-workspace-tabs"></div><button class="workspace-scroll-btn" type="button" data-scroll-tabs="conceptWorkspaceTabs" data-scroll-dir="1">›</button></div>
         <div class="subtabs" data-subtab-group="concept">
           <button class="subtab active" data-subtab="concept-main">Main Concept</button>
           <button class="subtab" data-subtab="concept-description">Vision</button>
@@ -246,7 +247,8 @@
       </section>
 
       <section id="manual" class="tab">
-        <div class="page-head"><div><h2>Guided Manual Mode</h2><p>Fill the active prompt template by hand. No AI is used and Q&amp;A is skipped; the finished draft is built into Output / Editor.</p></div><div class="actions"><button id="manualResetBtn" type="button" class="danger-ghost">Clear Manual Draft</button><button id="manualBuildOutputTopBtn" type="button" class="primary">Build Output</button></div></div>
+        <div class="page-head"><div><h2>Guided Manual Mode</h2><p>Fill the active prompt template by hand. No AI is used and Q&amp;A is skipped; the finished draft is built into Output / Editor.</p></div><div class="actions"><button id="manualNewTabBtn" type="button">New Manual Tab</button><button id="manualResetBtn" type="button" class="danger-ghost">Clear Manual Draft</button><button id="manualBuildOutputTopBtn" type="button" class="primary">Build Output</button></div></div>
+        <div class="workspace-tab-shell" data-workspace-tab-shell="manual"><button class="workspace-scroll-btn" type="button" data-scroll-tabs="manualWorkspaceTabs" data-scroll-dir="-1">‹</button><div id="manualWorkspaceTabs" class="workspace-tabs manual-workspace-tabs"></div><button class="workspace-scroll-btn" type="button" data-scroll-tabs="manualWorkspaceTabs" data-scroll-dir="1">›</button></div>
         <div class="card wide manual-guide-card">
           <div class="manual-guide-top">
             <div>
@@ -524,7 +526,7 @@
           <button class="subtab" data-subtab="output-qa">Q&A Answers</button>
           <button class="subtab" data-subtab="output-debug">Debug Log</button>
         </div>
-        <div id="characterOutputTabs" class="character-output-tabs"></div>
+        <div class="workspace-tab-shell" data-workspace-tab-shell="output"><button class="workspace-scroll-btn" type="button" data-scroll-tabs="characterOutputTabs" data-scroll-dir="-1">‹</button><div id="characterOutputTabs" class="workspace-tabs character-output-tabs"></div><button class="workspace-scroll-btn" type="button" data-scroll-tabs="characterOutputTabs" data-scroll-dir="1">›</button></div>
         <div id="output-export" class="subtab-panel active" data-subtab-panel="output">
           <div class="actions output-actions"><button id="loadSavedBtn">Load Saved</button><button id="loadSavedUrlBtn" type="button">Load URL</button><button id="importLoadedCardBtn" type="button">Import to Browser</button><button id="copyBtn">Copy</button><button id="exportBtn" class="primary">Quick Export</button><button id="saveWorkspaceBtn" type="button">Save Workspace</button></div>
           <div id="savedFileDropZone" class="drop-zone compact">Drop a saved card / project here to load it, or click to browse</div>
@@ -684,10 +686,12 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
         <span>Current: <strong id="updateCurrentVersion">unknown</strong></span>
         <span>Latest: <strong id="updateLatestVersion">unknown</strong></span>
       </div>
+      <p id="updateKindText" class="small muted update-kind-text"></p>
       <div id="updateReleaseNotesPreview" class="update-release-preview"></div>
-      <p class="small muted">The app checks GitHub on startup and then once every hour while it is open.</p>
+      <p class="small muted">The app checks GitHub on startup and then once every hour while it is open. Beta builds will notify when a matching stable release becomes available.</p>
       <div class="actions modal-actions">
         <button id="remindLaterUpdateBtn" type="button" class="danger-ghost">Remind Me Later</button>
+        <button id="openUpdateRepoBtn" type="button">Open GitHub Page</button>
         <button id="openUpdateReleaseBtn" type="button" class="primary">Open GitHub Release</button>
       </div>
     </div>
@@ -758,6 +762,6 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.5"></script>
+  <script src="app.js?v=1.0.6"></script>
 </body>
 </html>

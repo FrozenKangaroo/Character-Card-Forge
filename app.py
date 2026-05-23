@@ -1934,15 +1934,19 @@ class Api:
     def get_app_version(self):
         return _read_app_version()
 
+    def _normalise_version_string(self, value):
+        raw = str(value or "").strip()
+        raw = re.sub(r"^[vV]", "", raw)
+        raw = raw.split("+", 1)[0].strip()
+        return raw
+
     def _parse_version_for_compare(self, value):
         """Parse v1.2.3-beta4 style tags into a comparable tuple.
 
         Stable releases sort above pre-releases with the same numeric version.
         Unknown/malformed values sort very low instead of crashing update checks.
         """
-        raw = str(value or "").strip()
-        raw = re.sub(r"^[vV]", "", raw)
-        raw = raw.split("+", 1)[0].strip()
+        raw = self._normalise_version_string(value)
         if not raw:
             return ((0, 0, 0), -1, 0, "")
         main, sep, pre = raw.partition("-")
@@ -1967,50 +1971,160 @@ class Api:
         pre_num = int(m.group(1)) if m else 0
         return (nums, rank, pre_num, pre_l)
 
+    def _version_core_tuple(self, value):
+        try:
+            return self._parse_version_for_compare(value)[0]
+        except Exception:
+            return (0, 0, 0)
+
+    def _is_prerelease_version(self, value):
+        raw = self._normalise_version_string(value)
+        return "-" in raw
+
     def _is_newer_version(self, latest, current):
         return self._parse_version_for_compare(latest) > self._parse_version_for_compare(current)
 
+    def _github_api_get_json(self, url, headers, timeout=15):
+        req = urllib.request.Request(url, headers=headers)
+        with _safe_urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return json.loads(raw)
+
+    def _release_info_from_github_release(self, data, owner, repo):
+        data = data or {}
+        tag = str(data.get("tag_name") or "").strip()
+        version = self._normalise_version_string(tag)
+        if not version:
+            version = self._normalise_version_string(data.get("name") or "")
+        return {
+            "tag": tag or (f"v{version}" if version else ""),
+            "version": version,
+            "name": str(data.get("name") or tag or version or "Latest release"),
+            "url": str(data.get("html_url") or (f"https://github.com/{owner}/{repo}/releases/tag/{tag}" if tag else f"https://github.com/{owner}/{repo}/releases/latest")),
+            "body": str(data.get("body") or "").strip(),
+            "publishedAt": str(data.get("published_at") or data.get("created_at") or ""),
+            "prerelease": bool(data.get("prerelease")) or self._is_prerelease_version(version),
+            "draft": bool(data.get("draft")),
+        }
+
+    def _release_info_from_github_tag(self, data, owner, repo):
+        data = data or {}
+        tag = str(data.get("name") or data.get("ref") or "").strip()
+        if tag.startswith("refs/tags/"):
+            tag = tag.split("refs/tags/", 1)[1]
+        version = self._normalise_version_string(tag)
+        return {
+            "tag": tag,
+            "version": version,
+            "name": tag or version or "Latest tag",
+            "url": f"https://github.com/{owner}/{repo}/releases/tag/{tag}" if tag else f"https://github.com/{owner}/{repo}/releases",
+            "body": "",
+            "publishedAt": "",
+            "prerelease": self._is_prerelease_version(version),
+            "draft": False,
+        }
+
+    def _select_best_update_release(self, current, releases):
+        """Choose the best available update, preferring stable releases.
+
+        This deliberately treats a stable release as newer than a beta with the same
+        numeric version. Example: current 1.0.6-beta9 should notify for 1.0.6.
+        """
+        clean = [r for r in (releases or []) if r.get("version") and not r.get("draft")]
+        if not clean:
+            return None, "none"
+
+        stable = [r for r in clean if not r.get("prerelease") and "-" not in str(r.get("version") or "")]
+        stable.sort(key=lambda r: self._parse_version_for_compare(r.get("version")), reverse=True)
+        clean.sort(key=lambda r: self._parse_version_for_compare(r.get("version")), reverse=True)
+
+        current_is_beta = self._is_prerelease_version(current)
+        current_core = self._version_core_tuple(current)
+
+        if current_is_beta:
+            for rel in stable:
+                if self._version_core_tuple(rel.get("version")) >= current_core and self._is_newer_version(rel.get("version"), current):
+                    return rel, "stable_for_beta"
+
+        for rel in stable:
+            if self._is_newer_version(rel.get("version"), current):
+                return rel, "stable_newer"
+
+        # Only offer pre-release updates when the current app is already a pre-release.
+        # Stable users should not get nagged about beta/nightly builds unless they opt in
+        # later via a dedicated setting.
+        if current_is_beta:
+            for rel in clean:
+                if self._is_newer_version(rel.get("version"), current):
+                    return rel, "prerelease_newer"
+
+        return (stable[0] if stable else clean[0]), "latest_not_newer"
+
     def check_for_updates(self):
-        """Check GitHub Releases for a newer public Character Card Forge build."""
+        """Check GitHub for a newer public Character Card Forge build."""
         current = self.get_app_version()
         owner = "FrozenKangaroo"
         repo = "Character-Card-Forge"
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        repo_url = f"https://github.com/{owner}/{repo}"
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": f"CharacterCardForge/{current or 'unknown'}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
         try:
-            req = urllib.request.Request(api_url, headers=headers)
-            with _safe_urlopen(req, timeout=15) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            data = json.loads(raw)
-            latest_tag = str(data.get("tag_name") or "").strip()
-            latest_version = re.sub(r"^[vV]", "", latest_tag).strip()
-            if not latest_version:
-                latest_version = str(data.get("name") or "").strip()
-            release_url = str(data.get("html_url") or f"https://github.com/{owner}/{repo}/releases/latest")
-            body = str(data.get("body") or "").strip()
-            published_at = str(data.get("published_at") or "")
-            name = str(data.get("name") or latest_tag or latest_version or "Latest release")
+            releases = []
+            source = "releases"
+            try:
+                rel_url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=30"
+                data = self._github_api_get_json(rel_url, headers, timeout=15)
+                if isinstance(data, list):
+                    releases = [self._release_info_from_github_release(x, owner, repo) for x in data]
+            except Exception as releases_error:
+                self._log_event("update_check_releases_api_failed", {"currentVersion": current, "error": str(releases_error)})
+
+            if not releases:
+                source = "tags"
+                tag_url = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=30"
+                data = self._github_api_get_json(tag_url, headers, timeout=15)
+                if isinstance(data, list):
+                    releases = [self._release_info_from_github_tag(x, owner, repo) for x in data]
+
+            chosen, update_kind = self._select_best_update_release(current, releases)
+            chosen = chosen or {}
+            latest_version = str(chosen.get("version") or "").strip()
+            latest_tag = str(chosen.get("tag") or (f"v{latest_version}" if latest_version else "")).strip()
+            release_url = str(chosen.get("url") or f"{repo_url}/releases/latest")
+            body = str(chosen.get("body") or "").strip()
+            published_at = str(chosen.get("publishedAt") or "")
+            name = str(chosen.get("name") or latest_tag or latest_version or "Latest release")
             newer = bool(latest_version and current and current != "unknown" and self._is_newer_version(latest_version, current))
+
+            stable_releases = [r for r in releases if r.get("version") and not r.get("prerelease") and "-" not in str(r.get("version") or "")]
+            stable_releases.sort(key=lambda r: self._parse_version_for_compare(r.get("version")), reverse=True)
+            latest_stable = stable_releases[0] if stable_releases else {}
+
             result = {
                 "ok": True,
                 "currentVersion": current,
+                "currentIsPrerelease": self._is_prerelease_version(current),
                 "latestVersion": latest_version,
                 "latestTag": latest_tag,
                 "latestName": name,
+                "latestStableVersion": latest_stable.get("version") or "",
+                "latestStableTag": latest_stable.get("tag") or "",
                 "releaseUrl": release_url,
+                "repositoryUrl": repo_url,
                 "publishedAt": published_at,
                 "isNewer": newer,
+                "updateKind": update_kind,
+                "source": source,
                 "bodyPreview": body[:1200],
             }
-            self._log_event("update_check_complete", {k: result.get(k) for k in ("currentVersion", "latestVersion", "latestTag", "isNewer", "releaseUrl")})
+            self._log_event("update_check_complete", {k: result.get(k) for k in ("currentVersion", "currentIsPrerelease", "latestVersion", "latestStableVersion", "latestTag", "isNewer", "updateKind", "source", "releaseUrl")})
             return result
         except Exception as e:
             self._log_event("update_check_failed", {"currentVersion": current, "error": str(e)})
-            return {"ok": False, "currentVersion": current, "error": str(e)}
+            return {"ok": False, "currentVersion": current, "repositoryUrl": repo_url, "error": str(e)}
 
     def open_external_url(self, url):
         try:
@@ -4058,6 +4172,363 @@ class Api:
         answered = self._qa_answered_indexes(answers, len(questions))
         return [i for i in range(1, len(questions) + 1) if i not in answered]
 
+    def _qa_normalise_for_compare(self, text):
+        return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+    def _qa_deduplicate_question_list(self, questions):
+        """Return questions once, preserving order, with exact-normalized duplicates removed.
+
+        One-off custom questions can enter through both frontend temporary templates
+        and backend compatibility arguments. Keeping duplicated question text causes
+        later repair passes to renumber and pair answers against the wrong slot,
+        especially for card-specific custom Q&A at the end of a long interview.
+        """
+        cleaned = []
+        seen = set()
+        duplicates = []
+        for idx, q in enumerate(questions or [], start=1):
+            value = str(q or "").strip()
+            if not value:
+                continue
+            key = self._qa_normalise_for_compare(value)
+            if key and key in seen:
+                duplicates.append({"sourceIndex": idx, "question": value[:240]})
+                continue
+            if key:
+                seen.add(key)
+            cleaned.append(value)
+        return cleaned, {"deduplicated": bool(duplicates), "removed": len(duplicates), "duplicates": duplicates[:20]}
+
+    def _qa_clean_extra_questions_for_template(self, template, extra_questions):
+        """Normalize per-generation custom Q&A and remove questions already in template.
+
+        This keeps custom questions from being appended twice when a newer frontend
+        sends a temporary template while an older/newer backend compatibility path
+        also receives extra_questions positionally.
+        """
+        if isinstance(extra_questions, str):
+            raw = [q.strip() for q in re.split(r"\r?\n", extra_questions) if q.strip()]
+        elif isinstance(extra_questions, (list, tuple)):
+            raw = [str(q or "").strip() for q in extra_questions if str(q or "").strip()]
+        else:
+            raw = []
+        if not raw:
+            return []
+        existing, _ = self._qa_deduplicate_question_list(self._qa_enabled_questions(template))
+        seen = {self._qa_normalise_for_compare(q) for q in existing if self._qa_normalise_for_compare(q)}
+        cleaned = []
+        for q in raw:
+            key = self._qa_normalise_for_compare(q)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            cleaned.append(q)
+        return cleaned
+
+    def _qa_find_matching_question_index(self, text, questions):
+        """Find the 1-based template question index matching a model-emitted Q body."""
+        body = str(text or "").strip()
+        if not body or not questions:
+            return None
+        first = body.splitlines()[0].strip()
+        first = re.sub(r"^\s*Q\s*\d{1,4}\s*[:：\-]\s*", "", first).strip()
+        body_cmp = self._qa_normalise_for_compare(first)
+        if not body_cmp:
+            return None
+        best_idx = None
+        best_ratio = 0.0
+        try:
+            from difflib import SequenceMatcher
+        except Exception:
+            SequenceMatcher = None
+        for idx, q in enumerate(questions or [], start=1):
+            expected = str(q or "").strip()
+            expected_cmp = self._qa_normalise_for_compare(expected)
+            if not expected_cmp:
+                continue
+            if body_cmp == expected_cmp:
+                return idx
+            min_prefix = max(18, min(80, int(len(expected_cmp) * 0.55)))
+            if len(body_cmp) >= min_prefix and (body_cmp.startswith(expected_cmp[:min_prefix]) or expected_cmp.startswith(body_cmp[:min_prefix])):
+                return idx
+            if SequenceMatcher and len(body_cmp) >= 12:
+                ratio = SequenceMatcher(None, body_cmp, expected_cmp).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_idx = idx
+        return best_idx if best_ratio >= 0.86 else None
+
+    def _qa_reinsert_questions_if_model_used_q_as_answer(self, answers, questions):
+        """Repair a common model failure where it outputs Q101: <answer> instead
+        of Q101: <question> / A101: <answer>.
+
+        Some models follow the numbering but stop echoing the original question
+        after a long Q&A run. The app expects Q/A pairs, so this converts those
+        malformed Q-only answer lines back into canonical pairs using the saved
+        template questions as the source of truth.
+        """
+        raw = str(answers or "").strip()
+        if not raw or not questions:
+            return raw, {"repaired": False, "qOnlyAnswers": 0, "answerCount": 0}
+
+        matches = list(re.finditer(r"(?im)^\s*([QA])\s*(\d{1,3})\s*[:：\-]\s*(.*)$", raw))
+        if not matches:
+            return raw, {"repaired": False, "qOnlyAnswers": 0, "answerCount": 0}
+
+        parsed = {}
+        q_only_answers = 0
+        max_q = len(questions)
+        for pos, match in enumerate(matches):
+            label = (match.group(1) or "").upper()
+            try:
+                idx = int(match.group(2))
+            except Exception:
+                continue
+            if idx < 1 or idx > max_q:
+                continue
+            body_start = match.start(3)
+            body_end = matches[pos + 1].start() if pos + 1 < len(matches) else len(raw)
+            body = raw[body_start:body_end].strip()
+            if not body:
+                continue
+            item = parsed.setdefault(idx, {"questionSeen": "", "answer": "", "malformedQAnswer": False})
+            if label == "A":
+                if item["answer"]:
+                    item["answer"] = (item["answer"].rstrip() + "\n" + body).strip()
+                else:
+                    item["answer"] = body
+            else:
+                expected_question = questions[idx - 1] if 0 <= idx - 1 < len(questions) else ""
+                looks_like_question = self._qa_text_looks_like_question(body, expected_question)
+                if looks_like_question:
+                    item["questionSeen"] = body
+                else:
+                    # The model put the answer after a Q label. Keep it as the answer,
+                    # then rebuild the real Q label from the template question list.
+                    if not item["answer"]:
+                        item["answer"] = body
+                        item["malformedQAnswer"] = True
+                        q_only_answers += 1
+                    else:
+                        item["questionSeen"] = body
+
+        if not q_only_answers:
+            return raw, {"repaired": False, "qOnlyAnswers": 0, "answerCount": len([v for v in parsed.values() if v.get("answer")])}
+
+        blocks = []
+        for idx in range(1, max_q + 1):
+            item = parsed.get(idx, {})
+            answer = str(item.get("answer") or "").strip()
+            if not answer:
+                continue
+            answer = self._qa_strip_leading_duplicate_question(answer, questions[idx - 1])
+            blocks.append(f"Q{idx}: {questions[idx - 1]}\nA{idx}: {answer}")
+
+        repaired = "\n\n".join(blocks).strip()
+        return repaired or raw, {"repaired": True, "qOnlyAnswers": q_only_answers, "answerCount": len(blocks)}
+
+    def _qa_text_looks_like_question(self, text, expected_question):
+        """Return true when a model-emitted Q body is really the template question.
+
+        Models sometimes rewrite typos while echoing the question, so this uses a
+        forgiving normalized comparison rather than exact text only.
+        """
+        body = str(text or "").strip()
+        expected = str(expected_question or "").strip()
+        if not body or not expected:
+            return False
+        body_first = body.splitlines()[0].strip()
+        body_cmp = self._qa_normalise_for_compare(body_first)
+        expected_cmp = self._qa_normalise_for_compare(expected)
+        if not body_cmp or not expected_cmp:
+            return False
+        if body_cmp == expected_cmp:
+            return True
+        # Prefix matching must not treat very short answers like "No" or "b" as
+        # a duplicated question just because they share the first character.
+        min_prefix = max(18, min(80, int(len(expected_cmp) * 0.55)))
+        if len(body_cmp) >= min_prefix and body_cmp.startswith(expected_cmp[:min_prefix]):
+            return True
+        if len(body_cmp) >= min_prefix and expected_cmp.startswith(body_cmp[:min_prefix]):
+            return True
+        try:
+            from difflib import SequenceMatcher
+            return len(body_cmp) >= 12 and SequenceMatcher(None, body_cmp, expected_cmp).ratio() >= 0.82
+        except Exception:
+            return False
+
+    def _qa_strip_leading_duplicate_question(self, answer, expected_question):
+        """Remove duplicated question text that some models paste at the top of A lines."""
+        text = str(answer or "").strip()
+        if not text:
+            return text
+        lines = text.splitlines()
+        changed = False
+        while lines:
+            first = lines[0].strip()
+            first = re.sub(r"^\s*Q\s*\d{1,3}\s*[:：\-]\s*", "", first).strip()
+            # Do not require a literal question mark here. Some templates use
+            # prompts/instructions rather than grammatical questions, and models
+            # often echo typo-corrected custom questions at the top of A lines.
+            if self._qa_text_looks_like_question(first, expected_question):
+                lines = lines[1:]
+                changed = True
+                while lines and not lines[0].strip():
+                    lines = lines[1:]
+                continue
+            break
+        return "\n".join(lines).strip() if changed else text
+
+    def _qa_canonicalise_order_and_questions(self, answers, questions):
+        """Canonicalise Q&A output into template question order.
+
+        This pass is deliberately stricter than the raw model output. It fixes:
+        - retry answers appended out of order,
+        - Q<number>: <answer> malformed rows,
+        - duplicated custom questions emitted with extra numbering,
+        - answers whose A-number follows a duplicated/reworded Q body and would
+          otherwise slide under the wrong question.
+        """
+        raw = str(answers or "").strip()
+        if not raw or not questions:
+            return raw, {"repaired": False, "reason": "empty", "answerCount": 0}
+
+        questions, dedupe_info = self._qa_deduplicate_question_list(questions)
+        if not questions:
+            return raw, {"repaired": False, "reason": "no_questions", "answerCount": 0}
+
+        matches = list(re.finditer(r"(?im)^\s*([QA])\s*(\d{1,4})\s*[:：\-]\s*(.*)$", raw))
+        if not matches:
+            return raw, {"repaired": False, "reason": "no_labels", "answerCount": 0}
+
+        max_q = len(questions)
+        parsed = {}
+        original_answer_order = []
+        duplicate_question_answers = 0
+        remapped_by_question_text = 0
+        malformed_q_answers = 0
+        duplicate_answers_removed = 0
+        last_q_label = None
+        last_q_mapped_idx = None
+
+        def add_answer(mapped_idx, body):
+            nonlocal duplicate_question_answers, duplicate_answers_removed
+            if not mapped_idx or mapped_idx < 1 or mapped_idx > max_q:
+                return
+            cleaned = self._qa_strip_leading_duplicate_question(body, questions[mapped_idx - 1]).strip()
+            if cleaned != str(body or "").strip():
+                duplicate_question_answers += 1
+            if not cleaned:
+                return
+            item = parsed.setdefault(mapped_idx, {"answers": [], "normAnswers": set(), "questionSeen": ""})
+            norm = self._qa_normalise_for_compare(cleaned)
+            no_answer_re = r"(?is)^(?:n/?a|none|skip(?:ped)?|unknown|no answer)[.\s]*$"
+            existing_answers = [str(a or "").strip() for a in item.get("answers", []) if str(a or "").strip()]
+            if existing_answers:
+                # If a question appears twice because a custom one-off question was
+                # duplicated, keep the first real answer instead of doubling text or
+                # sliding a later answer under the same Q. Replace only placeholder
+                # no-answer values with a real retry answer.
+                if all(re.fullmatch(no_answer_re, a) for a in existing_answers) and not re.fullmatch(no_answer_re, cleaned):
+                    item["answers"] = []
+                    item["normAnswers"] = set()
+                else:
+                    duplicate_answers_removed += 1
+                    return
+            if norm and norm in item["normAnswers"]:
+                duplicate_answers_removed += 1
+                return
+            if norm:
+                item["normAnswers"].add(norm)
+            item["answers"].append(cleaned)
+            original_answer_order.append(mapped_idx)
+
+        for pos, match in enumerate(matches):
+            label = (match.group(1) or "").upper()
+            try:
+                raw_idx = int(match.group(2))
+            except Exception:
+                continue
+            body_start = match.start(3)
+            body_end = matches[pos + 1].start() if pos + 1 < len(matches) else len(raw)
+            body = raw[body_start:body_end].strip()
+            if not body:
+                continue
+
+            if label == "Q":
+                # Trust a valid numeric Q label first when its body matches that
+                # exact template slot. Many Q&A sets have very similar questions
+                # ("What kind of person..."), so fuzzy search before label trust
+                # can remap Q19 to Q18 and slide answers out of alignment.
+                if 1 <= raw_idx <= max_q and self._qa_text_looks_like_question(body, questions[raw_idx - 1]):
+                    matched_idx = raw_idx
+                else:
+                    matched_idx = self._qa_find_matching_question_index(body, questions)
+                mapped_idx = matched_idx or (raw_idx if 1 <= raw_idx <= max_q else None)
+                if matched_idx and matched_idx != raw_idx:
+                    remapped_by_question_text += 1
+                last_q_label = raw_idx
+                last_q_mapped_idx = mapped_idx
+
+                if mapped_idx and self._qa_text_looks_like_question(body, questions[mapped_idx - 1]):
+                    parsed.setdefault(mapped_idx, {"answers": [], "normAnswers": set(), "questionSeen": ""})["questionSeen"] = body
+                elif mapped_idx and 1 <= mapped_idx <= max_q:
+                    # The model used Q<number> as the answer label.
+                    malformed_q_answers += 1
+                    add_answer(mapped_idx, body)
+                continue
+
+            # A label. Prefer the immediately preceding Q body mapping when the
+            # A label corresponds to that Q label. This is what fixes duplicated
+            # custom questions where the model emits extra/reworded Q numbers.
+            mapped_idx = None
+            if last_q_label == raw_idx and last_q_mapped_idx:
+                mapped_idx = last_q_mapped_idx
+            elif 1 <= raw_idx <= max_q:
+                mapped_idx = raw_idx
+            elif last_q_mapped_idx:
+                mapped_idx = last_q_mapped_idx
+            add_answer(mapped_idx, body)
+
+        blocks = []
+        seen_answer_indexes = []
+        for idx in range(1, max_q + 1):
+            item = parsed.get(idx) or {}
+            answers_for_idx = [str(a or "").strip() for a in item.get("answers", []) if str(a or "").strip()]
+            if not answers_for_idx:
+                continue
+            answer = "\n".join(answers_for_idx).strip()
+            blocks.append(f"Q{idx}: {questions[idx - 1]}\nA{idx}: {answer}")
+            seen_answer_indexes.append(idx)
+
+        if not blocks:
+            return raw, {"repaired": False, "reason": "no_answers", "answerCount": 0}
+
+        canonical = "\n\n".join(blocks).strip()
+        order_was_wrong = bool(original_answer_order and original_answer_order != sorted(original_answer_order))
+        repaired = (
+            canonical != raw
+            or order_was_wrong
+            or duplicate_question_answers > 0
+            or malformed_q_answers > 0
+            or remapped_by_question_text > 0
+            or duplicate_answers_removed > 0
+            or bool(dedupe_info.get("deduplicated"))
+        )
+        return canonical if repaired else raw, {
+            "repaired": repaired,
+            "answerCount": len(blocks),
+            "firstAnswer": seen_answer_indexes[0] if seen_answer_indexes else None,
+            "lastAnswer": seen_answer_indexes[-1] if seen_answer_indexes else None,
+            "orderRepaired": order_was_wrong,
+            "duplicateQuestionAnswersRemoved": duplicate_question_answers,
+            "malformedQAnswersRepaired": malformed_q_answers,
+            "remappedByQuestionText": remapped_by_question_text,
+            "duplicateAnswersRemoved": duplicate_answers_removed,
+            "questionDuplicatesRemoved": dedupe_info.get("removed", 0),
+        }
+
     def _retry_missing_qa_answers(self, concept, questions, previous_answers, missing_indexes, settings):
         missing_lines = []
         for idx in missing_indexes:
@@ -4089,13 +4560,26 @@ class Api:
     def _generate_template_qa(self, concept, template, settings):
         template = self._normalise_template(template or self.template)
         questions = self._qa_enabled_questions(template)
+        questions, question_dedupe_info = self._qa_deduplicate_question_list(questions)
+        if question_dedupe_info.get("deduplicated"):
+            self._log_event("qa_generation_questions_deduplicated", question_dedupe_info)
         if not questions:
             return ""
+        split_focus = bool(re.search(r"(?is)^\s*SPLIT-CARD GENERATION PASS\b.*?Focused main character for this card\s*:", concept or ""))
         lines = [
             "Before writing the final character card, interview the fictional character(s) to uncover deeper internal logic.",
             "Answer as the character(s), not as an assistant.",
             "These answers are private planning notes for generation only. They must not be copied into the final character card unless naturally reflected in characterization.",
-            "If this is a multi-character card, answer each question for the relevant primary characters or as a grouped dynamic when appropriate.",
+        ]
+        if split_focus:
+            lines.extend([
+                "This is a split-card focused Q&A pass. Answer ONLY for the focused main character named in the concept header.",
+                "Do not answer as every character. Do not include side-by-side answers for the other split characters.",
+                "Other characters may be mentioned only as relationship/lore context when that helps explain the focused character.",
+            ])
+        else:
+            lines.append("If this is a multi-character card, answer each question for the relevant primary characters or as a grouped dynamic when appropriate.")
+        lines.extend([
             "Keep answers concise but specific, emotionally useful, and character-consistent.",
             "Do not add sections from the final character-card template. Return only Q&A pairs.",
             "Every question is mandatory. Do not skip any question.",
@@ -4105,17 +4589,27 @@ class Api:
             concept.strip(),
             "",
             "QUESTIONS",
-        ]
+        ])
         for idx, q in enumerate(questions, start=1):
             lines.append(f"{idx}. {q}")
-        lines.extend([
-            "",
-            "OUTPUT FORMAT",
-            "Q1: <question>",
-            "A1: <answer in character voice or clearly attributed character answers>",
-            "Q2: <question>",
-            "A2: <answer>",
-        ])
+        if split_focus:
+            lines.extend([
+                "",
+                "OUTPUT FORMAT",
+                "Q1: <question>",
+                "A1: <answer for the focused character only>",
+                "Q2: <question>",
+                "A2: <answer for the focused character only>",
+            ])
+        else:
+            lines.extend([
+                "",
+                "OUTPUT FORMAT",
+                "Q1: <question>",
+                "A1: <answer in character voice or clearly attributed character answers>",
+                "Q2: <question>",
+                "A2: <answer>",
+            ])
         prompt = "\n".join(lines).strip()
         check = self._context_check(prompt, settings, mode_label="Q&A pre-generation pass")
         if not check.get("ok"):
@@ -4124,13 +4618,31 @@ class Api:
         qa_settings = {**settings, "_streamTarget": "qa"}
         answers = self._chat(prompt, qa_settings).strip()
         self._log_event("qa_generation_response", {"answers": answers})
+        answers, qa_format_info = self._qa_reinsert_questions_if_model_used_q_as_answer(answers, questions)
+        if qa_format_info.get("repaired"):
+            self._log_event("qa_generation_format_repaired", qa_format_info)
+        answers, qa_order_info = self._qa_canonicalise_order_and_questions(answers, questions)
+        if qa_order_info.get("repaired"):
+            self._log_event("qa_generation_order_repaired", qa_order_info)
         missing = self._qa_missing_indexes(answers, questions)
         retries = 0
         while missing and retries < 2:
             retries += 1
             extra = self._retry_missing_qa_answers(concept, questions, answers, missing, settings)
             if extra:
+                extra, extra_format_info = self._qa_reinsert_questions_if_model_used_q_as_answer(extra, questions)
+                if extra_format_info.get("repaired"):
+                    self._log_event("qa_generation_retry_format_repaired", {**extra_format_info, "retry": retries})
+                extra, extra_order_info = self._qa_canonicalise_order_and_questions(extra, questions)
+                if extra_order_info.get("repaired"):
+                    self._log_event("qa_generation_retry_order_repaired", {**extra_order_info, "retry": retries})
                 answers = (answers.rstrip() + "\n\n" + extra.strip()).strip()
+                answers, combined_format_info = self._qa_reinsert_questions_if_model_used_q_as_answer(answers, questions)
+                if combined_format_info.get("repaired"):
+                    self._log_event("qa_generation_combined_format_repaired", {**combined_format_info, "retry": retries})
+                answers, combined_order_info = self._qa_canonicalise_order_and_questions(answers, questions)
+                if combined_order_info.get("repaired"):
+                    self._log_event("qa_generation_combined_order_repaired", {**combined_order_info, "retry": retries})
             missing = self._qa_missing_indexes(answers, questions)
         if missing:
             missing_labels = ", ".join([f"Q{i}" for i in missing])
@@ -4158,11 +4670,7 @@ class Api:
         # pollute the saved Prompt Template Q&A list.
         self.save_template(template)
         qa_template = json.loads(json.dumps(template))
-        cleaned_extra = []
-        if isinstance(extra_questions, str):
-            cleaned_extra = [q.strip() for q in re.split(r"\r?\n", extra_questions) if q.strip()]
-        elif isinstance(extra_questions, (list, tuple)):
-            cleaned_extra = [str(q or "").strip() for q in extra_questions if str(q or "").strip()]
+        cleaned_extra = self._qa_clean_extra_questions_for_template(qa_template, extra_questions)
         if cleaned_extra:
             qa = qa_template.setdefault("qa", {})
             qa["enabled"] = True
@@ -4237,6 +4745,7 @@ class Api:
                 out = fallback
             if not out:
                 out = fallback
+            max_chars = max(2, min(12, int(merged.get("multiCharacterCount") or 2)))
             return {"ok": True, "characters": out[:max_chars], "fallback": False, "notes": str(parsed.get("notes") or "") if isinstance(parsed, dict) else ""}
         except Exception as e:
             return {"ok": True, "characters": fallback, "fallback": True, "notes": str(e)}
@@ -4254,8 +4763,8 @@ class Api:
         if other_names:
             instructions.append("Other characters to preserve as lorebook/supporting references: " + ", ".join(other_names))
         if qa_answers:
-            instructions.append("Shared Q&A context may contain information about all characters. Apply only the parts relevant to the focused character, and convert other character details into lore/background references.")
-        return "\n".join(instructions) + "\n\nORIGINAL MULTI-CHARACTER CONCEPT:\n" + (original_concept or "").strip() + (("\n\nPRE-GENERATION Q&A NOTES:\n" + qa_answers.strip()) if qa_answers else "")
+            instructions.append("Shared Q&A context may contain information about all characters. FILTER it for the focused character only. Do not copy or preserve full multi-character Q&A answers as this card's Q&A.")
+        return "\n".join(instructions) + "\n\nORIGINAL MULTI-CHARACTER CONCEPT:\n" + (original_concept or "").strip() + (("\n\nSHARED Q&A NOTES TO FILTER FOR THIS FOCUSED CARD ONLY:\n" + qa_answers.strip()) if qa_answers else "")
 
     def _extract_output_name(self, output, fallback="Character"):
         try:
@@ -4266,7 +4775,13 @@ class Api:
             pass
         return fallback or "Character"
 
-    def generate_split_cards(self, concept, template, settings, qa_answers="", disable_template_qa=False):
+    def generate_split_cards(self, concept, template, settings, qa_answers="", disable_template_qa=False, *extra_args, extra_questions=None):
+        # v1.0.6-beta1: split-card generation must never reuse one shared
+        # multi-character Q&A blob as every character tab's Q&A. Each focused
+        # card gets a focused Q&A pass instead; older frontends that still pass
+        # shared qa_answers are treated as reference notes only.
+        if extra_args and extra_questions is None:
+            extra_questions = extra_args[0]
         self._reset_cancel()
         if not concept or not concept.strip():
             return {"ok": False, "error": "Enter a character concept first."}
@@ -4276,6 +4791,20 @@ class Api:
         self.save_settings(merged_settings)
         template = self._normalise_template(template)
         self.save_template(template)
+        qa_template = json.loads(json.dumps(template))
+        cleaned_extra = self._qa_clean_extra_questions_for_template(qa_template, extra_questions)
+        if cleaned_extra:
+            qa = qa_template.setdefault("qa", {})
+            qa["enabled"] = True
+            sections = qa.setdefault("sections", [])
+            sections.append({
+                "id": "temporary_card_qa",
+                "title": "Card-specific Q&A",
+                "enabled": True,
+                "collapsed": False,
+                "questions": [{"enabled": True, "text": q} for q in cleaned_extra],
+            })
+            qa_template = self._normalise_template(qa_template)
         settings_check = self._validate_text_api_settings(merged_settings)
         if not settings_check.get("ok"):
             return settings_check
@@ -4283,13 +4812,22 @@ class Api:
         names = ident.get("characters") or self._fallback_split_character_names(concept, merged_settings)
         cards = []
         try:
+            shared_qa = (qa_answers or "").strip()
+            qa_enabled = bool((qa_template.get("qa", {}) or {}).get("enabled"))
             for idx, focus in enumerate(names):
                 self._raise_if_cancelled()
                 per_settings = {**merged_settings, "cardMode": "split_cards", "_streamTarget": ""}
-                per_qa = (qa_answers or "").strip()
-                if template.get("qa", {}).get("enabled") and not per_qa and not disable_template_qa:
-                    q_concept = self._split_card_focus_concept(concept, focus, names)
-                    per_qa = self._generate_template_qa(q_concept, template, per_settings)
+                per_qa = ""
+                if qa_enabled and not disable_template_qa:
+                    # Generate a focused Q&A for this split card. Do not reuse a
+                    # previously generated shared multi-character Q&A blob, because
+                    # that causes every output tab to show the same Q&A answers.
+                    q_concept = self._split_card_focus_concept(concept, focus, names, shared_qa)
+                    self._log_event("split_card_focused_qa_request", {"focus": focus, "hasSharedReferenceQa": bool(shared_qa), "extraQuestionCount": len(cleaned_extra)})
+                    per_qa = self._generate_template_qa(q_concept, qa_template, per_settings)
+                    self._log_event("split_card_focused_qa_response", {"focus": focus, "length": len(per_qa or "")})
+                elif shared_qa:
+                    self._log_event("split_card_shared_qa_ignored", {"focus": focus, "reason": "split cards require per-character Q&A; shared Q&A was not copied into this tab"})
                 focus_concept = self._split_card_focus_concept(concept, focus, names, per_qa)
                 self._reset_backup_info()
                 output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(focus_concept, template, per_settings)), template, per_settings)

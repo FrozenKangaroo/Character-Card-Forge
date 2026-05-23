@@ -2227,3 +2227,83 @@ main {
 }
 .vision-analyze-modal-card .small-textarea { min-height: 110px; }
 @media (max-width: 760px) { .vision-analyze-options-grid { grid-template-columns: 1fr; } }
+
+/* v1.0.6: multi-workspace tab rails for Concept, Guided Manual, and Output */
+.workspace-tab-shell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.workspace-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  min-width: 0;
+  padding: 2px 0;
+}
+.workspace-tabs::-webkit-scrollbar { display: none; }
+.workspace-scroll-btn {
+  display: none;
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 8px 22px rgba(0,0,0,.28);
+}
+.workspace-tab-shell.has-overflow .workspace-scroll-btn { display: inline-flex; }
+.workspace-scroll-btn:disabled { opacity: .28; cursor: default; }
+.workspace-tab,
+.character-output-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  max-width: 260px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text, #e5e7eb);
+  border-radius: 999px;
+  padding: 7px 8px 7px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.workspace-tab.active,
+.character-output-tab.active {
+  border-color: rgba(96, 165, 250, 0.9);
+  background: rgba(37, 99, 235, 0.25);
+}
+.workspace-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.workspace-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  padding: 0;
+  border-radius: 999px;
+  line-height: 1;
+  opacity: .78;
+}
+.workspace-tab-close:hover { opacity: 1; }
+.character-output-tabs {
+  flex-wrap: nowrap;
+  padding: 2px 0;
+}

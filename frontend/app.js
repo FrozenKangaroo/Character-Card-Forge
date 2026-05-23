@@ -46,12 +46,19 @@ let updateCheckTimer = null;
 let updateCheckInProgress = false;
 let lastShownUpdateVersion = '';
 let updateReleaseUrl = '';
+let updateRepositoryUrl = 'https://github.com/FrozenKangaroo/Character-Card-Forge/';
 let ratingImprovementProjectPath = '';
 let ratingImproveFieldDiffs = [];
 let ratingImproveLostDetails = [];
 let ratingImproveLostSummary = '';
 let manualGuidePageIndex = 0;
 let manualGuideState = {};
+let conceptWorkspaceTabs = [];
+let activeConceptTabIndex = 0;
+let manualGuideTabs = [];
+let activeManualGuideTabIndex = 0;
+let workspaceTabCloseInProgress = false;
+let workspaceTabRenderSuspendAutoScroll = false;
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -100,18 +107,34 @@ function isUpdateAvailableModalOpen() {
   return !!(modal && !modal.classList.contains('hidden'));
 }
 
+function describeUpdateKind(info, current, latest) {
+  const kind = String(info?.updateKind || '').trim();
+  const currentIsPrerelease = !!info?.currentIsPrerelease || /-/.test(current);
+  if (kind === 'stable_for_beta' || (currentIsPrerelease && latest && !/-/.test(latest))) {
+    return `A stable Character Card Forge ${latest} release is available on GitHub. You are currently running the beta build ${current}.`;
+  }
+  if (kind === 'prerelease_newer') return `A newer beta Character Card Forge ${latest} build is available on GitHub.`;
+  return `Character Card Forge ${latest} is available on GitHub.`;
+}
+
 function showUpdateAvailableModal(info) {
   const modal = $('#updateAvailableModal');
   if (!modal || !info) return;
   const current = String(info.currentVersion || appVersion || 'unknown').trim() || 'unknown';
   const latest = String(info.latestVersion || info.latestTag || 'unknown').trim() || 'unknown';
   updateReleaseUrl = String(info.releaseUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/releases/latest');
+  updateRepositoryUrl = String(info.repositoryUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/');
   const summary = $('#updateAvailableSummary');
-  if (summary) summary.textContent = `Character Card Forge ${latest} is available on GitHub.`;
+  if (summary) summary.textContent = describeUpdateKind(info, current, latest);
   const currentEl = $('#updateCurrentVersion');
   if (currentEl) currentEl.textContent = current;
   const latestEl = $('#updateLatestVersion');
   if (latestEl) latestEl.textContent = latest;
+  const typeEl = $('#updateKindText');
+  if (typeEl) {
+    const kind = String(info.updateKind || '').replace(/_/g, ' ');
+    typeEl.textContent = kind ? `Update type: ${kind}` : '';
+  }
   const preview = $('#updateReleaseNotesPreview');
   if (preview) {
     const body = String(info.bodyPreview || '').trim();
@@ -122,15 +145,24 @@ function showUpdateAvailableModal(info) {
   lastShownUpdateVersion = latest;
 }
 
-async function openUpdateReleasePage() {
-  const url = updateReleaseUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/releases/latest';
+async function openAllowedExternalPage(url, fallbackMessage = 'Open this page') {
   try {
     const res = await window.pywebview.api.open_external_url(url);
-    if (res && !res.ok) throw new Error(res.error || 'Could not open release page.');
+    if (res && !res.ok) throw new Error(res.error || 'Could not open page.');
   } catch (err) {
     try { window.open(url, '_blank'); }
-    catch (_) { setStatus(`Update available: ${url}`, 'ok'); }
+    catch (_) { setStatus(`${fallbackMessage}: ${url}`, 'ok'); }
   }
+}
+
+async function openUpdateReleasePage() {
+  const url = updateReleaseUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/releases/latest';
+  await openAllowedExternalPage(url, 'Update available');
+}
+
+async function openUpdateRepositoryPage() {
+  const url = updateRepositoryUrl || 'https://github.com/FrozenKangaroo/Character-Card-Forge/';
+  await openAllowedExternalPage(url, 'GitHub page');
 }
 
 async function checkForAppUpdates(manual = false) {
@@ -169,12 +201,27 @@ function currentOutputTabName() {
   return tab?.name || tab?.focusName || 'Character';
 }
 
+function isPlaceholderQaText(value) {
+  const text = String(value || '').trim();
+  if (!text) return true;
+  return /^(Q&A was disabled or returned no answers for this generation\.?|No Q&A answers yet\.?|Q&A was skipped\.?|No answers generated\.?)$/i.test(text);
+}
+
+function cleanQaAnswersForStorage(value, outputText = '') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (!String(outputText || '').trim() && isPlaceholderQaText(text)) return '';
+  return text;
+}
+
 function captureActiveOutputTab() {
   if (!characterOutputTabs.length) return;
   const tab = characterOutputTabs[activeOutputTabIndex];
   if (!tab) return;
-  tab.output = $('#outputText')?.value || '';
-  tab.qaAnswers = $('#qaAnswersText')?.value || lastQnaAnswers || '';
+  const outputText = $('#outputText')?.value || '';
+  const qaText = $('#qaAnswersText')?.value || lastQnaAnswers || '';
+  tab.output = outputText;
+  tab.qaAnswers = cleanQaAnswersForStorage(qaText, outputText);
   tab.emotionImages = emotionImageState.map(img => ({...img}));
   tab.cardImagePath = $('#cardImagePath')?.value || '';
 }
@@ -194,32 +241,405 @@ function applyActiveOutputTab() {
   updateAvailability();
 }
 
+
+function workspaceTabNameForIndex(index) {
+  const outputName = characterOutputTabs[index]?.name || characterOutputTabs[index]?.focusName;
+  const conceptName = conceptWorkspaceTabs[index]?.name;
+  const manualName = manualGuideTabs[index]?.name;
+  return cleanOutputTabName(outputName || conceptName || manualName || `Character ${Number(index || 0) + 1}`) || `Character ${Number(index || 0) + 1}`;
+}
+
+function canonicalWorkspaceProjectPath(value) {
+  let text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    if (/^file:\/\//i.test(text)) text = decodeURIComponent(text.replace(/^file:\/\//i, ''));
+  } catch (_) {
+    text = text.replace(/^file:\/\//i, '');
+  }
+  return text.replace(/\\/g, '/').replace(/\/+$/g, '');
+}
+
+function workspaceTabProjectPath(index) {
+  const outputTab = characterOutputTabs[index] || {};
+  const conceptTab = conceptWorkspaceTabs[index] || {};
+  const manualTab = manualGuideTabs[index] || {};
+  return canonicalWorkspaceProjectPath(
+    outputTab.projectPath || outputTab.workspaceProjectPath || outputTab.sourcePath
+    || conceptTab.projectPath || conceptTab.workspaceProjectPath
+    || manualTab.projectPath || manualTab.workspaceProjectPath
+  );
+}
+
+function findOpenWorkspaceTabByProjectPath(projectPath) {
+  const target = canonicalWorkspaceProjectPath(projectPath);
+  if (!target) return -1;
+  ensureLinkedWorkspaceTabs();
+  return characterOutputTabs.findIndex((_, idx) => workspaceTabProjectPath(idx) === target);
+}
+
+function workspaceProjectPathDuplicateCount(projectPath) {
+  const target = canonicalWorkspaceProjectPath(projectPath);
+  if (!target) return 0;
+  ensureLinkedWorkspaceTabs();
+  return characterOutputTabs.reduce((count, _, idx) => count + (workspaceTabProjectPath(idx) === target ? 1 : 0), 0);
+}
+
+function tabHasSavedWorkspaceIdentity(index) {
+  return !!workspaceTabProjectPath(index);
+}
+
+function normaliseConceptTab(tab = {}, fallbackName = '') {
+  const base = makeBlankConceptTab(fallbackName || tab.name || 'Concept');
+  const merged = { ...base, ...(tab || {}) };
+  merged.name = cleanOutputTabName(merged.name || fallbackName || 'Concept') || fallbackName || 'Concept';
+  merged.concept = String(merged.concept ?? '');
+  merged.visionDescription = String(merged.visionDescription ?? '');
+  merged.visionImagePath = String(merged.visionImagePath ?? merged.imagePath ?? '');
+  merged.conceptAttachments = Array.isArray(merged.conceptAttachments) ? merged.conceptAttachments.map(a => ({...a})) : [];
+  merged.builderState = merged.builderState || { mode: 'single', selectedIndex: 0, states: [{}] };
+  return merged;
+}
+
+function normaliseManualTab(tab = {}, fallbackName = '') {
+  const base = makeBlankManualTab(fallbackName || tab.name || 'Manual');
+  const merged = { ...base, ...(tab || {}) };
+  merged.name = cleanOutputTabName(merged.name || fallbackName || 'Manual') || fallbackName || 'Manual';
+  merged.state = JSON.parse(JSON.stringify(merged.state || {}));
+  merged.pageIndex = Number(merged.pageIndex || 0);
+  return merged;
+}
+
+function makeConceptTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '') {
+  const sourceTabs = Array.isArray(state?.conceptTabs) ? state.conceptTabs : [];
+  const selected = sourceTabs[tabIndex] || sourceTabs[Number(state?.activeConceptTabIndex || 0)] || sourceTabs[0] || {};
+  const merged = normaliseConceptTab(selected, fallbackName || selected.name || state.name || `Concept ${tabIndex + 1}`);
+  if (!String(merged.concept || '').trim() && typeof state?.concept === 'string') merged.concept = state.concept;
+  if (!String(merged.visionDescription || '').trim() && typeof state?.visionDescription === 'string') merged.visionDescription = state.visionDescription;
+  if (!String(merged.visionImagePath || '').trim()) merged.visionImagePath = String(state?.visionImagePath || state?.settings?.visionImagePath || '');
+  if (!merged.conceptAttachments.length && Array.isArray(state?.conceptAttachments)) merged.conceptAttachments = state.conceptAttachments.map(a => ({...a}));
+  if ((!merged.builderState || !Object.keys(merged.builderState || {}).length) && state?.builderState) merged.builderState = state.builderState;
+  return merged;
+}
+
+function makeManualTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '') {
+  const sourceTabs = Array.isArray(state?.manualTabs) ? state.manualTabs : [];
+  const selected = sourceTabs[tabIndex] || sourceTabs[Number(state?.activeManualGuideTabIndex || 0)] || sourceTabs[0] || {};
+  return normaliseManualTab(selected, fallbackName || selected.name || state.name || `Manual ${tabIndex + 1}`);
+}
+
+function ensureLinkedWorkspaceTabs() {
+  const maxLen = Math.max(1, characterOutputTabs.length || 0, conceptWorkspaceTabs.length || 0, manualGuideTabs.length || 0);
+  while (characterOutputTabs.length < maxLen) characterOutputTabs.push(makeBlankOutputTab(`Character ${characterOutputTabs.length + 1}`));
+  while (conceptWorkspaceTabs.length < maxLen) conceptWorkspaceTabs.push(makeBlankConceptTab(workspaceTabNameForIndex(conceptWorkspaceTabs.length) || `Concept ${conceptWorkspaceTabs.length + 1}`));
+  while (manualGuideTabs.length < maxLen) manualGuideTabs.push(makeBlankManualTab(workspaceTabNameForIndex(manualGuideTabs.length) || `Manual ${manualGuideTabs.length + 1}`));
+  characterOutputTabs = characterOutputTabs.slice(0, maxLen);
+  conceptWorkspaceTabs = conceptWorkspaceTabs.slice(0, maxLen);
+  manualGuideTabs = manualGuideTabs.slice(0, maxLen);
+  activeOutputTabIndex = Math.max(0, Math.min(maxLen - 1, Number(activeOutputTabIndex || 0)));
+  activeConceptTabIndex = Math.max(0, Math.min(maxLen - 1, Number(activeConceptTabIndex || activeOutputTabIndex || 0)));
+  activeManualGuideTabIndex = Math.max(0, Math.min(maxLen - 1, Number(activeManualGuideTabIndex || activeOutputTabIndex || 0)));
+}
+
+function renderAllWorkspaceTabRails() {
+  renderCharacterOutputTabs();
+  renderConceptWorkspaceTabs();
+  renderManualWorkspaceTabs();
+}
+
+function switchLinkedWorkspaceTab(index, source = '') {
+  ensureLinkedWorkspaceTabs();
+  const target = Math.max(0, Math.min(characterOutputTabs.length - 1, Number(index || 0)));
+  if (target === activeOutputTabIndex && target === activeConceptTabIndex && target === activeManualGuideTabIndex) return;
+  captureActiveOutputTab();
+  captureActiveConceptTab();
+  captureActiveManualTab();
+  activeOutputTabIndex = target;
+  activeConceptTabIndex = target;
+  activeManualGuideTabIndex = target;
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  applyActiveConceptTab();
+  applyActiveManualTab();
+  const name = workspaceTabNameForIndex(target);
+  setStatus(`Switched to ${name}.`, '');
+}
+
+function addLinkedWorkspaceTab({ outputTab = null, conceptTab = null, manualTab = null, activate = true } = {}) {
+  captureActiveOutputTab();
+  captureActiveConceptTab();
+  captureActiveManualTab();
+  const idx = characterOutputTabs.length;
+  const output = outputTab ? { ...makeBlankOutputTab(outputTab.name || outputTab.focusName || `Character ${idx + 1}`), ...(outputTab || {}) } : makeBlankOutputTab(`Character ${idx + 1}`);
+  const name = cleanOutputTabName(output.name || output.focusName || extractOutputNameForTab(output.output || '') || `Character ${idx + 1}`) || `Character ${idx + 1}`;
+  output.name = name;
+  output.focusName = output.focusName || name;
+  output.projectPath = canonicalWorkspaceProjectPath(output.projectPath || output.workspaceProjectPath || output.sourcePath || '');
+  output.workspaceProjectPath = output.projectPath || output.workspaceProjectPath || '';
+  output.qaAnswers = output.qaAnswers || output.qnaAnswers || '';
+  output.emotionImages = Array.isArray(output.emotionImages) ? output.emotionImages : [];
+  output.generatedImages = Array.isArray(output.generatedImages) ? output.generatedImages : [];
+  output.cardImagePath = output.cardImagePath || output.imagePath || '';
+  const normalisedConcept = normaliseConceptTab(conceptTab || {}, name);
+  const normalisedManual = normaliseManualTab(manualTab || {}, name);
+  if (output.projectPath) {
+    normalisedConcept.projectPath = output.projectPath;
+    normalisedConcept.workspaceProjectPath = output.projectPath;
+    normalisedManual.projectPath = output.projectPath;
+    normalisedManual.workspaceProjectPath = output.projectPath;
+  }
+  characterOutputTabs.push(output);
+  conceptWorkspaceTabs.push(normalisedConcept);
+  manualGuideTabs.push(normalisedManual);
+  ensureLinkedWorkspaceTabs();
+  if (activate) {
+    activeOutputTabIndex = idx;
+    activeConceptTabIndex = idx;
+    activeManualGuideTabIndex = idx;
+  }
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  applyActiveConceptTab();
+  applyActiveManualTab();
+  return idx;
+}
+
+function manualGuideStateHasUserContent(value, path = '') {
+  // Blank Guided Manual tabs create lots of default state while rendering:
+  // { include: true, fields: { Name: "" }, expandedFields: {...}, pageIndex: 0 }
+  // The old close test treated the existence of a fields object as real content,
+  // which kept sending never-generated tabs through the heavy close/render path.
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return !!value.trim();
+  if (typeof value === 'number') {
+    // Default slider values are normally 0. Non-zero means the user likely changed it.
+    return Number.isFinite(value) && value !== 0;
+  }
+  if (typeof value === 'boolean') {
+    // include/expanded/default flags are UI state, not card content.
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item, idx) => manualGuideStateHasUserContent(item, `${path}[${idx}]`));
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value).some(([key, child]) => {
+      const lower = String(key || '').toLowerCase();
+      if (['include', 'expanded', 'expandedfields', 'collapsed', 'pageindex', 'currentpage'].includes(lower)) return false;
+      if (lower === 'fields' || lower === 'alternates' || lower === 'state' || lower === 'sections') {
+        return manualGuideStateHasUserContent(child, `${path}.${key}`);
+      }
+      return manualGuideStateHasUserContent(child, `${path}.${key}`);
+    });
+  }
+  return false;
+}
+
+function linkedWorkspaceTabHasContent(index) {
+  const outputTab = characterOutputTabs[index] || {};
+  const conceptTab = conceptWorkspaceTabs[index] || {};
+  const manualTab = manualGuideTabs[index] || {};
+  const outputText = String(outputTab.output || '').trim();
+  const rawQaText = String(outputTab.qaAnswers || outputTab.qnaAnswers || '').trim();
+  const qaText = isPlaceholderQaText(rawQaText) ? '' : rawQaText;
+  const conceptText = String(conceptTab.concept || '').trim();
+  const visionText = String(conceptTab.visionDescription || conceptTab.visionImagePath || '').trim();
+  const hasConceptAttachments = Array.isArray(conceptTab.conceptAttachments) && conceptTab.conceptAttachments.length > 0;
+  const hasOutputImages = (Array.isArray(outputTab.emotionImages) && outputTab.emotionImages.length > 0)
+    || (Array.isArray(outputTab.generatedImages) && outputTab.generatedImages.length > 0)
+    || !!String(outputTab.cardImagePath || outputTab.imagePath || '').trim();
+  const manualState = manualTab.state && typeof manualTab.state === 'object' ? manualTab.state : {};
+  const hasManualContent = manualGuideStateHasUserContent(manualState);
+  return !!(outputText || qaText || conceptText || visionText || hasConceptAttachments || hasOutputImages || hasManualContent);
+}
+
+function safeCaptureLinkedWorkspaceStateForClose(closingIndex) {
+  // Closing a never-generated blank tab used to run the full capture/preview/autosave path.
+  // In WebKit/PyWebView that could lock the UI because Manual preview rendering can re-enter
+  // while the tab arrays are being spliced. Only capture when there is actual state worth saving.
+  const activeIndex = activeOutputTabIndex;
+  const closingActive = Number(closingIndex) === Number(activeIndex);
+  const activeHasContent = linkedWorkspaceTabHasContent(activeIndex);
+  if (closingActive && !activeHasContent) return;
+  try { captureActiveOutputTab(); } catch (err) { console.warn('captureActiveOutputTab during close failed', err); }
+  try { captureActiveConceptTab(); } catch (err) { console.warn('captureActiveConceptTab during close failed', err); }
+  try { captureActiveManualTab({ lightweight: true }); } catch (err) { console.warn('captureActiveManualTab during close failed', err); }
+}
+
+function resetLinkedWorkspaceTabsToBlank() {
+  characterOutputTabs = [makeBlankOutputTab('Character')];
+  conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+  manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  activeOutputTabIndex = 0;
+  activeConceptTabIndex = 0;
+  activeManualGuideTabIndex = 0;
+}
+
+function closeLinkedWorkspaceTab(index) {
+  if (workspaceTabCloseInProgress) return;
+  ensureLinkedWorkspaceTabs();
+  workspaceTabCloseInProgress = true;
+  workspaceTabRenderSuspendAutoScroll = true;
+  // Do not splice/render tab DOM during the close button click event. Some WebKit/PyWebView
+  // builds can lock up if the clicked tab is removed while the event is still bubbling through
+  // the old DOM tree. Queue the real close to the next tick instead.
+  const tabCount = Math.max(1, characterOutputTabs.length || 0);
+  if (tabCount <= 1) {
+    setTimeout(() => performLastLinkedWorkspaceTabReset(index), 0);
+    return;
+  }
+  setTimeout(() => performLinkedWorkspaceTabClose(index), 0);
+}
+
+function performLastLinkedWorkspaceTabReset(index) {
+  try {
+    ensureLinkedWorkspaceTabs();
+    const hadContent = linkedWorkspaceTabHasContent(0);
+
+    // The final linked tab must never be physically removed. Deleting the last tab leaves
+    // several panels with no active index to bind to, which can lock up PyWebView/WebKit.
+    // Treat close-on-last-tab as "replace this workspace with a fresh blank card".
+    resetLinkedWorkspaceTabsToBlank();
+    workspaceTabRenderSuspendAutoScroll = false;
+    renderAllWorkspaceTabRails();
+
+    // If the tab was already blank, avoid the heavier apply/manual-render path entirely.
+    // The visible fields are already blank and this sidesteps the freeze path users hit
+    // when clicking close on an empty final tab.
+    if (hadContent) {
+      setTimeout(() => {
+        try {
+          applyActiveOutputTab();
+          applyActiveConceptTab();
+          applyActiveManualTab({ skipPreview: true });
+          refreshWorkspaceTabScrollButtons();
+          setStatus('Closed last tab and opened a new blank tab.', 'ok');
+        } catch (err) {
+          console.error('last linked tab reset apply failed', err);
+          setStatus(`Opened a new blank tab, but refresh hit an error: ${err.message || err}`, 'warn');
+        } finally {
+          workspaceTabCloseInProgress = false;
+        }
+      }, 0);
+    } else {
+      refreshWorkspaceTabScrollButtons();
+      setStatus('Kept one blank tab open.', 'ok');
+      workspaceTabCloseInProgress = false;
+    }
+  } catch (err) {
+    workspaceTabRenderSuspendAutoScroll = false;
+    workspaceTabCloseInProgress = false;
+    console.error('performLastLinkedWorkspaceTabReset failed', err);
+    setStatus(`Could not reset final tab: ${err.message || err}`, 'error');
+  }
+}
+
+function performLinkedWorkspaceTabClose(index) {
+  let closedHadContent = false;
+  let closingActive = false;
+  try {
+    ensureLinkedWorkspaceTabs();
+    const idx = Math.max(0, Math.min(characterOutputTabs.length - 1, Number(index || 0)));
+    closedHadContent = linkedWorkspaceTabHasContent(idx);
+    closingActive = idx === activeOutputTabIndex || idx === activeConceptTabIndex || idx === activeManualGuideTabIndex;
+
+    // Only capture the active tab if it has real content. Empty tabs often contain generated UI
+    // placeholder state; treating that as content sends blank tabs through expensive save/render code.
+    if (closedHadContent) safeCaptureLinkedWorkspaceStateForClose(idx);
+
+    if (characterOutputTabs.length <= 1) {
+      // Defensive fallback. Normal last-tab closes are routed to performLastLinkedWorkspaceTabReset(),
+      // but keep this safe if arrays changed between click and close execution.
+      workspaceTabCloseInProgress = false;
+      performLastLinkedWorkspaceTabReset(idx);
+      return;
+    }
+
+    characterOutputTabs.splice(idx, 1);
+    conceptWorkspaceTabs.splice(idx, 1);
+    manualGuideTabs.splice(idx, 1);
+    const next = Math.max(0, Math.min(idx, characterOutputTabs.length - 1));
+    activeOutputTabIndex = next;
+    activeConceptTabIndex = next;
+    activeManualGuideTabIndex = next;
+
+    ensureLinkedWorkspaceTabs();
+    renderAllWorkspaceTabRails();
+
+    setTimeout(() => {
+      try {
+        workspaceTabRenderSuspendAutoScroll = false;
+        applyActiveOutputTab();
+        applyActiveConceptTab();
+        applyActiveManualTab({ skipPreview: true });
+        // Only rebuild manual preview for genuinely populated tabs, not blank/default section state.
+        if (linkedWorkspaceTabHasContent(activeOutputTabIndex)) updateManualPreview();
+        refreshWorkspaceTabScrollButtons();
+        const closedProjectPath = workspaceTabProjectPath(idx);
+        const closedWasDuplicateProject = closedProjectPath && workspaceProjectPathDuplicateCount(closedProjectPath) > 0;
+        // If the closed tab was one of multiple tabs opened from the same saved workspace,
+        // do not autosave during the close. Duplicate project tabs can race the browser refresh
+        // and lock PyWebView/WebKit. The remaining tab still contains the workspace state.
+        if (closedHadContent && hasOutput() && !closedWasDuplicateProject) scheduleOutputEditorAutosave();
+        if (!closedHadContent && closingActive) setStatus('Closed empty tab.', 'ok');
+        else if (closedWasDuplicateProject) setStatus('Closed duplicate workspace tab.', 'ok');
+      } catch (err) {
+        console.error('deferred linked tab apply failed', err);
+        setStatus(`Closed tab, but refresh hit an error: ${err.message || err}`, 'warn');
+      } finally {
+        workspaceTabCloseInProgress = false;
+      }
+    }, 0);
+  } catch (err) {
+    workspaceTabRenderSuspendAutoScroll = false;
+    workspaceTabCloseInProgress = false;
+    console.error('closeLinkedWorkspaceTab failed', err);
+    setStatus(`Could not close tab: ${err.message || err}`, 'error');
+  }
+}
+
 function renderCharacterOutputTabs() {
   const holder = $('#characterOutputTabs');
   if (!holder) return;
   if (!characterOutputTabs.length) {
-    characterOutputTabs = [{ name: 'Character', output: $('#outputText')?.value || '', qaAnswers: lastQnaAnswers || '', emotionImages: emotionImageState || [], generatedImages: [], cardImagePath: $('#cardImagePath')?.value || '' }];
+    characterOutputTabs = [makeBlankOutputTab('Character')];
     activeOutputTabIndex = 0;
   }
+  ensureLinkedWorkspaceTabs();
   holder.innerHTML = '';
   characterOutputTabs.forEach((tab, idx) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'character-output-tab' + (idx === activeOutputTabIndex ? ' active' : '');
-    btn.textContent = tab.name || tab.focusName || `Character ${idx + 1}`;
-    btn.addEventListener('click', () => {
-      if (idx === activeOutputTabIndex) return;
-      captureActiveOutputTab();
-      activeOutputTabIndex = idx;
-      renderCharacterOutputTabs();
-      applyActiveOutputTab();
-      setStatus(`Switched to ${currentOutputTabName()}.`, '');
+    const item = document.createElement('div');
+    item.className = 'workspace-tab character-output-tab' + (idx === activeOutputTabIndex ? ' active' : '');
+    item.dataset.index = String(idx);
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    const title = document.createElement('span');
+    title.className = 'workspace-tab-title';
+    title.textContent = tab.name || tab.focusName || `Character ${idx + 1}`;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'workspace-tab-close';
+    close.textContent = '×';
+    close.title = 'Close linked card tab';
+    close.addEventListener('click', (event) => { event.stopPropagation(); closeOutputTab(idx); });
+    item.appendChild(title);
+    item.appendChild(close);
+    item.addEventListener('click', () => switchLinkedWorkspaceTab(idx, 'output'));
+    item.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        item.click();
+      }
     });
-    holder.appendChild(btn);
+    holder.appendChild(item);
   });
+  if (!workspaceTabRenderSuspendAutoScroll) scrollWorkspaceTabIntoView('characterOutputTabs', activeOutputTabIndex);
+  else refreshWorkspaceTabScrollButtons('characterOutputTabs');
 }
 
 function setCharacterOutputTabs(cards) {
+  const previousConcept = conceptWorkspaceTabs[activeConceptTabIndex] ? JSON.parse(JSON.stringify(conceptWorkspaceTabs[activeConceptTabIndex])) : null;
+  const previousManual = manualGuideTabs[activeManualGuideTabIndex] ? JSON.parse(JSON.stringify(manualGuideTabs[activeManualGuideTabIndex])) : null;
   characterOutputTabs = (cards || []).map((card, idx) => {
     const extractedName = extractOutputNameForTab(card.output || '');
     const originalName = card.name || card.focusName || `Character ${idx + 1}`;
@@ -228,16 +648,398 @@ function setCharacterOutputTabs(cards) {
       name: finalName,
       focusName: card.focusName || finalName,
       output: card.output || '',
-      qaAnswers: card.qaAnswers || '',
+      qaAnswers: card.qaAnswers || card.qnaAnswers || '',
       emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
       generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
-      cardImagePath: card.cardImagePath || '',
+      cardImagePath: card.cardImagePath || card.imagePath || '',
+      splitMode: card.splitMode || card.splitCard || (String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase() === 'split_cards' ? 'split_cards' : ''),
     };
   });
-  if (!characterOutputTabs.length) characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
+  if (!characterOutputTabs.length) characterOutputTabs = [makeBlankOutputTab('Character')];
+  conceptWorkspaceTabs = characterOutputTabs.map((tab, idx) => normaliseConceptTab((cards || [])[idx]?.conceptTab || previousConcept || {}, tab.name || `Concept ${idx + 1}`));
+  manualGuideTabs = characterOutputTabs.map((tab, idx) => normaliseManualTab((cards || [])[idx]?.manualTab || previousManual || {}, tab.name || `Manual ${idx + 1}`));
   activeOutputTabIndex = 0;
-  renderCharacterOutputTabs();
+  activeConceptTabIndex = 0;
+  activeManualGuideTabIndex = 0;
+  renderAllWorkspaceTabRails();
   applyActiveOutputTab();
+  applyActiveConceptTab();
+  applyActiveManualTab();
+}
+
+
+function makeBlankOutputTab(name = 'Character') {
+  return { name, focusName: name, output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' };
+}
+
+function refreshWorkspaceTabScrollButtons(targetId = '') {
+  const targets = targetId ? [$('#' + targetId)] : $$('.workspace-tabs');
+  targets.forEach(group => {
+    if (!group) return;
+    const shell = group.closest('.workspace-tab-shell');
+    const overflow = group.scrollWidth > group.clientWidth + 4;
+    if (shell) shell.classList.toggle('has-overflow', overflow);
+    const left = shell?.querySelector('[data-scroll-dir="-1"]');
+    const right = shell?.querySelector('[data-scroll-dir="1"]');
+    if (left) left.disabled = !overflow || group.scrollLeft <= 2;
+    if (right) right.disabled = !overflow || group.scrollLeft + group.clientWidth >= group.scrollWidth - 2;
+  });
+}
+
+function bindWorkspaceTabScrollers() {
+  document.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-scroll-tabs]');
+    if (!btn) return;
+    const group = $('#' + btn.dataset.scrollTabs);
+    if (!group) return;
+    const dir = Number(btn.dataset.scrollDir || 1);
+    group.scrollBy({ left: dir * Math.max(180, Math.floor(group.clientWidth * 0.75)), behavior: 'smooth' });
+    setTimeout(() => refreshWorkspaceTabScrollButtons(group.id), 180);
+  });
+  $$('.workspace-tabs').forEach(group => group.addEventListener('scroll', () => refreshWorkspaceTabScrollButtons(group.id), { passive: true }));
+  window.addEventListener('resize', () => refreshWorkspaceTabScrollButtons());
+}
+
+function scrollWorkspaceTabIntoView(holderId, idx) {
+  const holder = $('#' + holderId);
+  const btn = holder?.querySelector(`[data-index="${idx}"]`);
+  if (btn) setTimeout(() => btn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }), 0);
+  setTimeout(() => refreshWorkspaceTabScrollButtons(holderId), 0);
+  setTimeout(() => refreshWorkspaceTabScrollButtons(holderId), 150);
+}
+
+function closeOutputTab(index) {
+  closeLinkedWorkspaceTab(index);
+}
+
+function addOutputTab(card = {}, activate = true) {
+  const idx = characterOutputTabs.length;
+  const conceptTab = card.conceptTab || makeBlankConceptTab(card.name || card.focusName || `Concept ${idx + 1}`);
+  const manualTab = card.manualTab || makeBlankManualTab(card.name || card.focusName || `Manual ${idx + 1}`);
+  addLinkedWorkspaceTab({ outputTab: card, conceptTab, manualTab, activate });
+  if (!workspaceTabRenderSuspendAutoScroll) scrollWorkspaceTabIntoView('characterOutputTabs', activeOutputTabIndex);
+  else refreshWorkspaceTabScrollButtons('characterOutputTabs');
+}
+
+function addBlankOutputTab() {
+  addOutputTab(makeBlankOutputTab(`Character ${characterOutputTabs.length + 1}`), true);
+  switchToOutputTab();
+  setStatus('New Output / Editor tab opened.', 'ok');
+}
+
+function switchToOutputTab(subtab = 'output-fulltext') {
+  $$('.nav').forEach(b => b.classList.remove('active'));
+  $$('.tab').forEach(t => t.classList.remove('active'));
+  $('[data-tab="output"]')?.classList.add('active');
+  $('#output')?.classList.add('active');
+  if (subtab) switchSubTab('output', subtab);
+}
+
+function makeBlankConceptTab(name = '') {
+  const idx = conceptWorkspaceTabs.length + 1;
+  const tabName = name || `Concept ${idx}`;
+  return {
+    name: tabName,
+    concept: '',
+    visionDescription: '',
+    visionImagePath: '',
+    conceptAttachments: [],
+    builderState: { mode: 'single', selectedIndex: 0, states: [{}] },
+  };
+}
+
+function captureActiveConceptTab() {
+  if (!conceptWorkspaceTabs.length) conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+  const tab = conceptWorkspaceTabs[activeConceptTabIndex];
+  if (!tab) return;
+  tab.concept = $('#conceptText')?.value || '';
+  tab.visionDescription = $('#visionDescription')?.value || '';
+  tab.visionImagePath = $('#visionImagePath')?.value || '';
+  tab.conceptAttachments = Array.isArray(conceptAttachments) ? conceptAttachments.map(a => ({...a})) : [];
+  try { tab.builderState = collectBuilderWorkspaceState(); } catch (_) {}
+  const nameFromConcept = extractOutputNameForTab(tab.concept || '') || '';
+  if (nameFromConcept && /^Concept\s+\d+$/i.test(tab.name || '')) tab.name = nameFromConcept;
+}
+
+function applyActiveConceptTab() {
+  if (!conceptWorkspaceTabs.length) conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+  const tab = conceptWorkspaceTabs[activeConceptTabIndex] || conceptWorkspaceTabs[0];
+  if (!tab) return;
+  if ($('#conceptText')) $('#conceptText').value = tab.concept || '';
+  if ($('#visionDescription')) $('#visionDescription').value = tab.visionDescription || '';
+  setVisionImagePath(tab.visionImagePath || '');
+  conceptAttachments = Array.isArray(tab.conceptAttachments) ? tab.conceptAttachments.map(a => ({...a})) : [];
+  renderConceptAttachments();
+  if (tab.builderState) restoreBuilderWorkspaceState(tab.builderState);
+  updateAvailability();
+}
+
+function renderConceptWorkspaceTabs() {
+  const holder = $('#conceptWorkspaceTabs');
+  if (!holder) return;
+  if (!conceptWorkspaceTabs.length) {
+    conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+    activeConceptTabIndex = 0;
+  }
+  ensureLinkedWorkspaceTabs();
+  holder.innerHTML = '';
+  conceptWorkspaceTabs.forEach((tab, idx) => {
+    const item = document.createElement('div');
+    item.className = 'workspace-tab concept-workspace-tab' + (idx === activeConceptTabIndex ? ' active' : '');
+    item.dataset.index = String(idx);
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    const title = document.createElement('span');
+    title.className = 'workspace-tab-title';
+    title.textContent = tab.name || workspaceTabNameForIndex(idx) || `Concept ${idx + 1}`;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'workspace-tab-close';
+    close.textContent = '×';
+    close.title = 'Close linked card tab';
+    close.addEventListener('click', (event) => { event.stopPropagation(); closeConceptWorkspaceTab(idx); });
+    item.appendChild(title);
+    item.appendChild(close);
+    item.addEventListener('click', () => switchConceptWorkspaceTab(idx));
+    item.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); switchConceptWorkspaceTab(idx); } });
+    holder.appendChild(item);
+  });
+  if (!workspaceTabRenderSuspendAutoScroll) scrollWorkspaceTabIntoView('conceptWorkspaceTabs', activeConceptTabIndex);
+  else refreshWorkspaceTabScrollButtons('conceptWorkspaceTabs');
+}
+
+function switchConceptWorkspaceTab(index) {
+  switchLinkedWorkspaceTab(index, 'concept');
+  switchSubTab('concept', 'concept-main');
+}
+
+function addConceptWorkspaceTab() {
+  const idx = characterOutputTabs.length;
+  addLinkedWorkspaceTab({
+    outputTab: makeBlankOutputTab(`Character ${idx + 1}`),
+    conceptTab: makeBlankConceptTab(`Concept ${idx + 1}`),
+    manualTab: makeBlankManualTab(`Manual ${idx + 1}`),
+    activate: true,
+  });
+  switchSubTab('concept', 'concept-main');
+  setStatus('New linked card tab opened.', 'ok');
+}
+
+function closeConceptWorkspaceTab(index) {
+  closeLinkedWorkspaceTab(index);
+}
+
+function makeBlankManualTab(name = '') {
+  const idx = manualGuideTabs.length + 1;
+  return { name: name || `Manual ${idx}`, state: {}, pageIndex: 0 };
+}
+
+function captureActiveManualTab(options = {}) {
+  if (!manualGuideTabs.length) manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  const tab = manualGuideTabs[activeManualGuideTabIndex];
+  if (!tab) return;
+  if (!options.lightweight) captureManualGuideInputs();
+  tab.state = JSON.parse(JSON.stringify(manualGuideState || {}));
+  tab.pageIndex = manualGuidePageIndex || 0;
+  if (options.lightweight) return;
+  const built = buildManualGuideOutput ? buildManualGuideOutput() : '';
+  const nameFromOutput = extractOutputNameForTab(built || '') || '';
+  if (nameFromOutput && /^Manual\s+\d+$/i.test(tab.name || '')) tab.name = nameFromOutput;
+}
+
+function applyActiveManualTab(options = {}) {
+  if (!manualGuideTabs.length) manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  const tab = manualGuideTabs[activeManualGuideTabIndex] || manualGuideTabs[0];
+  manualGuideState = JSON.parse(JSON.stringify(tab?.state || {}));
+  manualGuidePageIndex = Number(tab?.pageIndex || 0);
+  renderManualGuide({ skipPreview: !!options.skipPreview });
+}
+
+function renderManualWorkspaceTabs() {
+  const holder = $('#manualWorkspaceTabs');
+  if (!holder) return;
+  if (!manualGuideTabs.length) {
+    manualGuideTabs = [makeBlankManualTab('Manual 1')];
+    activeManualGuideTabIndex = 0;
+  }
+  ensureLinkedWorkspaceTabs();
+  holder.innerHTML = '';
+  manualGuideTabs.forEach((tab, idx) => {
+    const item = document.createElement('div');
+    item.className = 'workspace-tab manual-workspace-tab' + (idx === activeManualGuideTabIndex ? ' active' : '');
+    item.dataset.index = String(idx);
+    item.setAttribute('role', 'button');
+    item.tabIndex = 0;
+    const title = document.createElement('span');
+    title.className = 'workspace-tab-title';
+    title.textContent = tab.name || workspaceTabNameForIndex(idx) || `Manual ${idx + 1}`;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'workspace-tab-close';
+    close.textContent = '×';
+    close.title = 'Close linked card tab';
+    close.addEventListener('click', (event) => { event.stopPropagation(); closeManualWorkspaceTab(idx); });
+    item.appendChild(title);
+    item.appendChild(close);
+    item.addEventListener('click', () => switchManualWorkspaceTab(idx));
+    item.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); switchManualWorkspaceTab(idx); } });
+    holder.appendChild(item);
+  });
+  if (!workspaceTabRenderSuspendAutoScroll) scrollWorkspaceTabIntoView('manualWorkspaceTabs', activeManualGuideTabIndex);
+  else refreshWorkspaceTabScrollButtons('manualWorkspaceTabs');
+}
+
+function switchManualWorkspaceTab(index) {
+  switchLinkedWorkspaceTab(index, 'manual');
+}
+
+function addManualWorkspaceTab() {
+  const idx = characterOutputTabs.length;
+  addLinkedWorkspaceTab({
+    outputTab: makeBlankOutputTab(`Character ${idx + 1}`),
+    conceptTab: makeBlankConceptTab(`Concept ${idx + 1}`),
+    manualTab: makeBlankManualTab(`Manual ${idx + 1}`),
+    activate: true,
+  });
+  setStatus('New linked Guided Manual tab opened.', 'ok');
+}
+
+function closeManualWorkspaceTab(index) {
+  closeLinkedWorkspaceTab(index);
+}
+
+function clearCurrentManualGuideDraft() {
+  manualGuideState = {};
+  manualGuidePageIndex = 0;
+  if (!manualGuideTabs.length) manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  manualGuideTabs[activeManualGuideTabIndex] = makeBlankManualTab(`Manual ${activeManualGuideTabIndex + 1}`);
+  renderManualWorkspaceTabs();
+  renderManualGuide();
+  setStatus('Cleared current Guided Manual draft.', 'ok');
+}
+
+function buildLinkedWorkspaceTabsFromLoadedState(state = {}) {
+  const projectPath = canonicalWorkspaceProjectPath(state?.projectPath || state?.sourcePath || '');
+  const savedTabs = Array.isArray(state?.characterTabs)
+    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && String(tab.output || '').trim())
+    : [];
+  const rows = [];
+  if (savedTabs.length) {
+    savedTabs.forEach((tab, idx) => {
+      const name = tab.name || tab.focusName || extractOutputNameForTab(tab.output || '') || `Loaded ${idx + 1}`;
+      const outputTab = {
+        ...tab,
+        name,
+        focusName: tab.focusName || name,
+        projectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || projectPath),
+        workspaceProjectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || projectPath),
+        cardImagePath: tab.cardImagePath || tab.imagePath || state.imagePath || state.cardImagePath || '',
+        qaAnswers: tab.qaAnswers || tab.qnaAnswers || '',
+        emotionImages: Array.isArray(tab.emotionImages) ? tab.emotionImages : [],
+        generatedImages: Array.isArray(tab.generatedImages) ? tab.generatedImages : [],
+      };
+      const conceptTab = makeConceptTabFromWorkspaceState(state, idx, name);
+      const manualTab = makeManualTabFromWorkspaceState(state, idx, name);
+      if (outputTab.projectPath) {
+        conceptTab.projectPath = outputTab.projectPath;
+        conceptTab.workspaceProjectPath = outputTab.projectPath;
+        manualTab.projectPath = outputTab.projectPath;
+        manualTab.workspaceProjectPath = outputTab.projectPath;
+      }
+      rows.push({ outputTab, conceptTab, manualTab });
+    });
+  } else if (String(state?.output || '').trim()) {
+    const name = state.name || extractOutputNameForTab(state.output || '') || 'Loaded Character';
+    const outputTab = {
+      name,
+      focusName: name,
+      projectPath,
+      workspaceProjectPath: projectPath,
+      output: state.output || '',
+      qaAnswers: state.qnaAnswers || state.qaAnswers || '',
+      emotionImages: Array.isArray(state.emotionImages) ? state.emotionImages : [],
+      generatedImages: Array.isArray(state.generatedImages) ? state.generatedImages : [],
+      cardImagePath: state.imagePath || state.cardImagePath || '',
+    };
+    const conceptTab = makeConceptTabFromWorkspaceState(state, 0, name);
+    const manualTab = makeManualTabFromWorkspaceState(state, 0, name);
+    if (projectPath) {
+      conceptTab.projectPath = projectPath;
+      conceptTab.workspaceProjectPath = projectPath;
+      manualTab.projectPath = projectPath;
+      manualTab.workspaceProjectPath = projectPath;
+    }
+    rows.push({ outputTab, conceptTab, manualTab });
+  }
+  return rows;
+}
+
+function applyLoadedStateToExistingWorkspaceTab(index, row, state = {}) {
+  ensureLinkedWorkspaceTabs();
+  const idx = Math.max(0, Math.min(characterOutputTabs.length - 1, Number(index || 0)));
+  if (!row || !row.outputTab) return idx;
+  characterOutputTabs[idx] = {
+    ...makeBlankOutputTab(row.outputTab.name || row.outputTab.focusName || `Character ${idx + 1}`),
+    ...row.outputTab,
+  };
+  conceptWorkspaceTabs[idx] = normaliseConceptTab(row.conceptTab || {}, row.outputTab.name || `Concept ${idx + 1}`);
+  manualGuideTabs[idx] = normaliseManualTab(row.manualTab || {}, row.outputTab.name || `Manual ${idx + 1}`);
+  const projectPath = canonicalWorkspaceProjectPath(row.outputTab.projectPath || state?.projectPath || '');
+  if (projectPath) {
+    characterOutputTabs[idx].projectPath = projectPath;
+    characterOutputTabs[idx].workspaceProjectPath = projectPath;
+    conceptWorkspaceTabs[idx].projectPath = projectPath;
+    conceptWorkspaceTabs[idx].workspaceProjectPath = projectPath;
+    manualGuideTabs[idx].projectPath = projectPath;
+    manualGuideTabs[idx].workspaceProjectPath = projectPath;
+  }
+  activeOutputTabIndex = idx;
+  activeConceptTabIndex = idx;
+  activeManualGuideTabIndex = idx;
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  applyActiveConceptTab();
+  applyActiveManualTab({ skipPreview: true });
+  setTimeout(() => { try { updateManualPreview(); } catch (_) {} }, 0);
+  return idx;
+}
+
+function appendLoadedStateToOutputTabs(state) {
+  const loadedRows = buildLinkedWorkspaceTabsFromLoadedState(state);
+  const projectPath = canonicalWorkspaceProjectPath(state?.projectPath || '');
+
+  if (projectPath) {
+    const existingIndex = findOpenWorkspaceTabByProjectPath(projectPath);
+    if (existingIndex >= 0) {
+      // Opening the same saved workspace twice used to create duplicate linked tabs.
+      // Closing one of those duplicates could then race autosave/browser refresh and freeze.
+      // Treat the second open as "focus/refresh existing tab" instead.
+      if (loadedRows.length) applyLoadedStateToExistingWorkspaceTab(existingIndex, loadedRows[0], state);
+      else switchLinkedWorkspaceTab(existingIndex, 'browser-load-existing');
+      currentBrowserDescription = state?.browserDescription || state?.libraryDescription || '';
+      currentCardRating = state?.cardRating || '';
+      currentCardRatingReasoning = state?.cardRatingReasoning || '';
+      currentCardRatingDetails = Array.isArray(state?.cardRatingDetails) ? state.cardRatingDetails : [];
+      currentCardRatingSourceHash = state?.cardRatingSourceHash || '';
+      switchToOutputTab('output-fulltext');
+      setStatus('That workspace is already open, so the existing tab was focused instead of opening a duplicate.', 'ok');
+      return;
+    }
+  }
+
+  const before = characterOutputTabs.length;
+  loadedRows.forEach((row, idx) => {
+    const fallback = `Loaded ${before + idx + 1}`;
+    if (!row.outputTab.name) row.outputTab.name = fallback;
+    addLinkedWorkspaceTab({ ...row, activate: true });
+  });
+
+  currentBrowserDescription = state?.browserDescription || state?.libraryDescription || '';
+  currentCardRating = state?.cardRating || '';
+  currentCardRatingReasoning = state?.cardRatingReasoning || '';
+  currentCardRatingDetails = Array.isArray(state?.cardRatingDetails) ? state.cardRatingDetails : [];
+  currentCardRatingSourceHash = state?.cardRatingSourceHash || '';
+  switchToOutputTab('output-fulltext');
 }
 
 function clearGenerationArtifacts() {
@@ -248,11 +1050,21 @@ function clearGenerationArtifacts() {
   currentCardRatingDetails = [];
   currentCardRatingSourceHash = '';
   emotionImageState = [];
-  characterOutputTabs = [{ name: 'Character', output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' }];
+  characterOutputTabs = [makeBlankOutputTab('Character')];
+  conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+  manualGuideTabs = [makeBlankManualTab('Manual 1')];
   activeOutputTabIndex = 0;
+  activeConceptTabIndex = 0;
+  activeManualGuideTabIndex = 0;
   setTextareaValue('qaAnswersText', '');
   setTextareaValue('outputText', '');
   setTextareaValue('followupText', '');
+  setTextareaValue('conceptText', '');
+  setTextareaValue('visionDescription', '');
+  setVisionImagePath('');
+  conceptAttachments = [];
+  manualGuideState = {};
+  manualGuidePageIndex = 0;
   const emotions = $('#emotionImages');
   if (emotions) emotions.innerHTML = '';
   const generated = $('#generatedImages');
@@ -260,7 +1072,9 @@ function clearGenerationArtifacts() {
   const cardImage = $('#cardImagePath');
   if (cardImage) cardImage.value = '';
   if (settings) settings.cardImagePath = '';
-  renderCharacterOutputTabs();
+  renderAllWorkspaceTabRails();
+  renderConceptAttachments();
+  renderManualGuide();
 }
 
 window.ccfStreamUpdate = function(payload) {
@@ -782,6 +1596,7 @@ async function init() {
   installConceptVisionAttachmentDelegatedHandlers();
   bindTabs();
   enhanceScrollableSubtabs();
+  bindWorkspaceTabScrollers();
   bindSubTabs();
   const state = await window.pywebview.api.get_state();
   template = state.template;
@@ -800,6 +1615,11 @@ async function init() {
   renderTemplateSelector();
   renderTemplate();
   renderQaQuestions();
+  if (!conceptWorkspaceTabs.length) conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+  if (!manualGuideTabs.length) manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  renderConceptWorkspaceTabs();
+  applyActiveConceptTab();
+  renderManualWorkspaceTabs();
   renderManualGuide();
   renderConceptAttachments();
   showRandomTip();
@@ -921,50 +1741,63 @@ function extractOutputNameForTab(output) {
   return '';
 }
 
-function applyLoadedState(state) {
+function applyLoadedState(state, options = {}) {
   currentLoadedType = String(state?.loadedType || "");
-  // Settings are global app preferences, not per-card workspace state.
-  // Older saved projects may contain a snapshot of settings, but loading a
-  // character must not revert the user's current model/API/export/browser
-  // settings. Keep the current global settings object and only restore card
-  // content/workspace fields below.
+  if (options && options.appendOutputTab) {
+    appendLoadedStateToOutputTabs(state);
+    updateImportedCardToolsHint();
+    updateAvailability();
+    return;
+  }
   if (!settings) settings = collectSettings();
-  // Templates are also treated as the currently selected global prompt setup.
-  // A loaded card can still show/edit its generated text without replacing the
-  // user's active template or activeTemplateName.
-  if (typeof state.concept === 'string') {
-    $('#conceptText').value = state.concept;
+
+  const savedTabs = Array.isArray(state.characterTabs)
+    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && String(tab.output || '').trim())
+    : [];
+
+  if (savedTabs.length) {
+    characterOutputTabs = savedTabs.map((tab, idx) => ({
+      ...makeBlankOutputTab(tab.name || tab.focusName || `Character ${idx + 1}`),
+      ...tab,
+      name: tab.name || tab.focusName || extractOutputNameForTab(tab.output || '') || `Character ${idx + 1}`,
+      focusName: tab.focusName || tab.name || `Character ${idx + 1}`,
+      qaAnswers: tab.qaAnswers || tab.qnaAnswers || '',
+      cardImagePath: tab.cardImagePath || tab.imagePath || '',
+      projectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || state.projectPath || ''),
+      workspaceProjectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || state.projectPath || ''),
+    }));
+  } else {
+    characterOutputTabs = [{
+      ...makeBlankOutputTab(state.name || extractOutputNameForTab(state.output || '') || 'Character'),
+      output: state.output || '',
+      qaAnswers: state.qnaAnswers || state.qaAnswers || '',
+      emotionImages: Array.isArray(state.emotionImages) ? state.emotionImages : [],
+      generatedImages: Array.isArray(state.generatedImages) ? state.generatedImages : [],
+      cardImagePath: state.imagePath || state.cardImagePath || '',
+      projectPath: canonicalWorkspaceProjectPath(state.projectPath || ''),
+      workspaceProjectPath: canonicalWorkspaceProjectPath(state.projectPath || ''),
+    }];
   }
-  if (typeof state.output === 'string') {
-    $('#outputText').value = state.output;
-  }
+
+  conceptWorkspaceTabs = characterOutputTabs.map((tab, idx) => makeConceptTabFromWorkspaceState(state, idx, tab.name || `Concept ${idx + 1}`));
+  manualGuideTabs = characterOutputTabs.map((tab, idx) => makeManualTabFromWorkspaceState(state, idx, tab.name || `Manual ${idx + 1}`));
+
+  const loadedIdx = Math.max(0, characterOutputTabs.findIndex(tab => String(tab.output || '').trim() === String(state.output || '').trim()));
+  activeOutputTabIndex = loadedIdx >= 0 ? loadedIdx : 0;
+  activeConceptTabIndex = activeOutputTabIndex;
+  activeManualGuideTabIndex = activeOutputTabIndex;
+  ensureLinkedWorkspaceTabs();
+
   currentBrowserDescription = state.browserDescription || state.libraryDescription || '';
   currentCardRating = state.cardRating || '';
   currentCardRatingReasoning = state.cardRatingReasoning || '';
   currentCardRatingDetails = Array.isArray(state.cardRatingDetails) ? state.cardRatingDetails : [];
   currentCardRatingSourceHash = state.cardRatingSourceHash || '';
-  lastQnaAnswers = typeof state.qnaAnswers === 'string' ? state.qnaAnswers : '';
-  const qaBox = $('#qaAnswersText');
-  if (qaBox) qaBox.value = lastQnaAnswers;
-  if (typeof state.imagePath === 'string') {
-    $('#cardImagePath').value = state.imagePath;
-    if (settings) settings.cardImagePath = state.imagePath;
-  }
-  if (typeof state.visionDescription === 'string' && $('#visionDescription')) {
-    $('#visionDescription').value = state.visionDescription;
-  }
-  if (Array.isArray(state.conceptAttachments)) {
-    conceptAttachments = state.conceptAttachments;
-    renderConceptAttachments();
-  }
-  if (Array.isArray(state.emotionImages)) {
-    emotionImageState = state.emotionImages;
-    renderEmotionImageResults(emotionImageState);
-  }
-  if (state.builderState) {
-    restoreBuilderWorkspaceState(state.builderState);
-  }
-  setCharacterOutputTabs([{ name: state.name || extractOutputNameForTab(state.output || '') || 'Character', output: state.output || '', qaAnswers: lastQnaAnswers || '', emotionImages: emotionImageState || [], generatedImages: [], cardImagePath: $('#cardImagePath')?.value || '' }]);
+
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  applyActiveConceptTab();
+  applyActiveManualTab();
   updateImportedCardToolsHint();
 }
 
@@ -1884,7 +2717,7 @@ function manualGuideSectionHasContent(section, state) {
   return Object.values(state.fields || {}).some(v => String(v || '').trim());
 }
 
-function renderManualGuide() {
+function renderManualGuide(options = {}) {
   const holder = $('#manualGuideContent');
   if (!holder) return;
   const pages = manualGuidePages();
@@ -1935,7 +2768,11 @@ function renderManualGuide() {
 
   bindManualGuideInputs();
   updateManualGuideButtons();
-  updateManualPreview();
+  if (!options.skipPreview) updateManualPreview();
+  if (manualGuideTabs[activeManualGuideTabIndex]) {
+    manualGuideTabs[activeManualGuideTabIndex].pageIndex = manualGuidePageIndex || 0;
+  }
+  setTimeout(() => refreshWorkspaceTabScrollButtons('manualWorkspaceTabs'), 0);
 }
 
 function bindManualGuideInputs() {
@@ -2031,6 +2868,10 @@ function captureManualGuideInputs() {
     const state = manualGuideState[key] || (manualGuideState[key] = { include: true, body: '', fields: {} });
     state.include = !!input.checked;
   });
+  if (manualGuideTabs[activeManualGuideTabIndex]) {
+    manualGuideTabs[activeManualGuideTabIndex].state = JSON.parse(JSON.stringify(manualGuideState || {}));
+    manualGuideTabs[activeManualGuideTabIndex].pageIndex = manualGuidePageIndex || 0;
+  }
 }
 
 function updateManualGuideButtons() {
@@ -2114,12 +2955,10 @@ function manualGuidePreviousPage() {
 }
 
 function clearManualGuideDraft() {
-  if (!confirm('Clear every field in the Guided Manual draft?')) return;
-  manualGuideState = {};
-  manualGuidePageIndex = 0;
-  renderManualGuide();
-  setStatus('Guided Manual draft cleared.', 'ok');
+  if (!confirm('Clear every field in the current Guided Manual draft?')) return;
+  clearCurrentManualGuideDraft();
 }
+
 
 async function buildManualGuideIntoOutput() {
   if (isInterfaceLocked()) return;
@@ -2128,17 +2967,33 @@ async function buildManualGuideIntoOutput() {
     setStatus('Fill at least one Guided Manual field before building the output.', 'error');
     return;
   }
-  clearGenerationArtifacts();
-  $('#outputText').value = output;
   lastQnaAnswers = 'Guided Manual Mode was used. Q&A was skipped and no AI generation was run.';
-  const qaBox = $('#qaAnswersText');
-  if (qaBox) qaBox.value = lastQnaAnswers;
   currentBrowserDescription = '';
   currentCardRating = '';
   currentCardRatingReasoning = '';
   currentCardRatingDetails = [];
   currentCardRatingSourceHash = '';
-  setCharacterOutputTabs([{ name: extractOutputNameForTab(output) || 'Manual Character', output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '' }]);
+  const manualName = extractOutputNameForTab(output) || (manualGuideTabs[activeManualGuideTabIndex]?.name || `Manual ${activeManualGuideTabIndex + 1}`);
+  ensureLinkedWorkspaceTabs();
+  const targetIdx = activeManualGuideTabIndex;
+  if (!characterOutputTabs[targetIdx]) characterOutputTabs[targetIdx] = makeBlankOutputTab(manualName);
+  characterOutputTabs[targetIdx] = {
+    ...characterOutputTabs[targetIdx],
+    name: manualName,
+    focusName: manualName,
+    output,
+    qaAnswers: lastQnaAnswers,
+    emotionImages: [],
+    generatedImages: [],
+    cardImagePath: characterOutputTabs[targetIdx]?.cardImagePath || '',
+  };
+  activeOutputTabIndex = targetIdx;
+  activeConceptTabIndex = targetIdx;
+  activeManualGuideTabIndex = targetIdx;
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  const qaBox = $('#qaAnswersText');
+  if (qaBox) qaBox.value = lastQnaAnswers;
   $$('.nav').forEach(b => b.classList.remove('active'));
   $$('.tab').forEach(t => t.classList.remove('active'));
   $('[data-tab="output"]')?.classList.add('active');
@@ -2484,18 +3339,20 @@ function saveTemplateDebounced() {
 }
 
 function bindActions() {
-  $('#newCardBtn').addEventListener('click', newCard);
+  $('#newCardBtn').addEventListener('click', addConceptWorkspaceTab);
   $('#nextTipBtn')?.addEventListener('click', () => showRandomTip(true));
   $('#closeUpdateAvailableModalBtn')?.addEventListener('click', closeUpdateAvailableModal);
   $('#remindLaterUpdateBtn')?.addEventListener('click', closeUpdateAvailableModal);
   $('#openUpdateReleaseBtn')?.addEventListener('click', openUpdateReleasePage);
+  $('#openUpdateRepoBtn')?.addEventListener('click', openUpdateRepositoryPage);
   $('#updateAvailableModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'updateAvailableModal') closeUpdateAvailableModal(); });
-  $('#newCardOutputBtn').addEventListener('click', newCard);
+  $('#newCardOutputBtn').addEventListener('click', addBlankOutputTab);
   $('#manualBackBtn')?.addEventListener('click', manualGuidePreviousPage);
   $('#manualNextBtn')?.addEventListener('click', manualGuideNextPage);
   $('#manualBuildOutputBtn')?.addEventListener('click', buildManualGuideIntoOutput);
   $('#manualBuildOutputTopBtn')?.addEventListener('click', buildManualGuideIntoOutput);
-  $('#manualResetBtn')?.addEventListener('click', clearManualGuideDraft);
+  $('#manualNewTabBtn')?.addEventListener('click', addManualWorkspaceTab);
+  $('#manualResetBtn')?.addEventListener('click', clearCurrentManualGuideDraft);
   $('#loadTemplateBtn').addEventListener('click', loadSelectedTemplate);
   $('#saveTemplateAsBtn').addEventListener('click', saveTemplateAs);
   $('#deleteTemplateBtn').addEventListener('click', deleteSelectedTemplate);
@@ -3297,34 +4154,10 @@ async function suggestBuilderField(fieldId) {
 
 async function newCard() {
   if (isInterfaceLocked()) return;
-  const hasWork = $('#conceptText').value.trim() || $('#outputText').value.trim() || $('#followupText').value.trim() || $('#visionDescription').value.trim() || $('#visionImagePath').value.trim() || $('#cardImagePath').value.trim();
-  if (hasWork && !confirm('Clear the current character draft and start a new card?')) return;
-  $('#conceptText').value = '';
-  $('#outputText').value = '';
-  $('#followupText').value = '';
-  $('#visionDescription').value = '';
-  if ($('#builderDescription')) clearCharacterBuilder();
-  if ($('#personalityBuilderDescription')) clearPersonalityBuilder();
-  if ($('#sceneBuilderDescription')) clearSceneBuilder();
-  setVisionImagePath('');
-  $('#cardImagePath').value = '';
-  $('#generatedImages').innerHTML = '';
-  emotionImageState = [];
-  $('#emotionImages').innerHTML = '';
-  conceptAttachments = [];
-  manualGuideState = {};
-  manualGuidePageIndex = 0;
-  renderManualGuide();
-  renderConceptAttachments();
-  $('#debugLogText').value = '';
-  lastQnaAnswers = '';
-  const qaBox = $('#qaAnswersText');
-  if (qaBox) qaBox.value = '';
+  addConceptWorkspaceTab();
   $('#cardMode').value = 'single';
   $('#multiCharacterCount').value = 2;
   if ($('#sharedScenePolicy')) $('#sharedScenePolicy').value = 'ai_reconcile';
-  multiBuilderSelectedIndex = 0;
-  multiBuilderStates = [];
   settings = collectSettings();
   settings.cardMode = 'single';
   settings.multiCharacterCount = 2;
@@ -3333,12 +4166,7 @@ async function newCard() {
   await window.pywebview.api.save_settings(settings);
   updateCardModeHint();
   updateAvailability();
-  setStatus('New card started. Card Mode reset to Single Character.', 'ok');
-  $$('.nav').forEach(b => b.classList.remove('active'));
-  $$('.tab').forEach(t => t.classList.remove('active'));
-  $('[data-tab="concept"]').classList.add('active');
-  $('#concept').classList.add('active');
-  switchSubTab('concept', 'concept-main');
+  setStatus('New linked card tab opened. Card Mode reset to Single Character.', 'ok');
 }
 
 async function loadSelectedTemplate() {
@@ -4431,28 +5259,75 @@ function restoreBuilderWorkspaceState(builderState) {
   updateCustomConditionalOptions();
 }
 
+function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSettings = null) {
+  captureActiveOutputTab();
+  captureActiveConceptTab();
+  captureActiveManualTab();
+  ensureLinkedWorkspaceTabs();
+  const tabs = Array.isArray(characterOutputTabs) ? characterOutputTabs : [];
+  const tab = tabs[tabIndex] || tabs[activeOutputTabIndex] || null;
+  const conceptTab = conceptWorkspaceTabs[tabIndex] || conceptWorkspaceTabs[activeConceptTabIndex] || makeBlankConceptTab(`Concept ${tabIndex + 1}`);
+  const isActiveOutput = tabIndex === activeOutputTabIndex;
+  const isActiveConcept = tabIndex === activeConceptTabIndex;
+  const tabOutput = isActiveOutput ? ($('#outputText')?.value || '') : (tab?.output || '');
+  const tabQa = isActiveOutput ? (($('#qaAnswersText')?.value || lastQnaAnswers || '')) : (tab?.qaAnswers || '');
+  const tabEmotions = isActiveOutput ? (emotionImageState || []) : (Array.isArray(tab?.emotionImages) ? tab.emotionImages : []);
+  const tabGenerated = Array.isArray(tab?.generatedImages) ? tab.generatedImages : [];
+  const tabImage = String(isActiveOutput ? ($('#cardImagePath')?.value || tab?.cardImagePath || '') : (tab?.cardImagePath || '')).trim();
+  const tabName = cleanOutputTabName(tab?.name || tab?.focusName || extractOutputNameForTab(tabOutput) || `Character ${tabIndex + 1}`);
+  const conceptValue = isActiveConcept ? ($('#conceptText')?.value || '') : (conceptTab?.concept || '');
+  const visionDescriptionValue = isActiveConcept ? ($('#visionDescription')?.value || '') : (conceptTab?.visionDescription || '');
+  const conceptAttachmentsValue = isActiveConcept ? (conceptAttachments || []) : (Array.isArray(conceptTab?.conceptAttachments) ? conceptTab.conceptAttachments : []);
+  let builderStateValue = conceptTab?.builderState || { mode: 'single', selectedIndex: 0, states: [{}] };
+  if (isActiveConcept) {
+    try { builderStateValue = collectBuilderWorkspaceState(); } catch (_) {}
+  }
+  const payloadSettings = { ...(baseSettings || settings || {}) };
+  payloadSettings.cardImagePath = tabImage;
+  payloadSettings.visionImagePath = isActiveConcept ? ($('#visionImagePath')?.value || '') : (conceptTab?.visionImagePath || '');
+  return {
+    concept: conceptValue,
+    output: tabOutput,
+    template,
+    settings: payloadSettings,
+    builderState: builderStateValue,
+    qnaAnswers: tabQa,
+    emotionImages: tabEmotions,
+    generatedImages: tabGenerated,
+    visionDescription: visionDescriptionValue,
+    visionImagePath: payloadSettings.visionImagePath || '',
+    conceptAttachments: conceptAttachmentsValue,
+    cardImagePath: tabImage,
+    imagePath: tabImage,
+    _disableSettingsCardImageFallback: !tabImage,
+    browserDescription: isActiveOutput ? (currentBrowserDescription || '') : '',
+    cardRating: isActiveOutput ? (currentCardRating || '') : '',
+    cardRatingReasoning: isActiveOutput ? (currentCardRatingReasoning || '') : '',
+    cardRatingDetails: isActiveOutput && Array.isArray(currentCardRatingDetails) ? currentCardRatingDetails : [],
+    cardRatingSourceHash: isActiveOutput ? (currentCardRatingSourceHash || '') : '',
+    name: tabName || `Character ${tabIndex + 1}`,
+    projectPath: canonicalWorkspaceProjectPath(tab?.projectPath || tab?.workspaceProjectPath || ''),
+    characterTabs: tabs || [],
+    conceptTabs: conceptWorkspaceTabs || [],
+    activeConceptTabIndex: tabIndex,
+    manualTabs: manualGuideTabs || [],
+    activeManualGuideTabIndex: tabIndex,
+    splitTabIndex: tabIndex,
+    splitTabCount: tabs.length,
+  };
+}
+
 function collectWorkspacePayload() {
   settings = collectSettings();
-  return {
-    concept: $('#conceptText')?.value || '',
-    output: $('#outputText')?.value || '',
-    template,
-    settings,
-    builderState: collectBuilderWorkspaceState(),
-    qnaAnswers: lastQnaAnswers || ($('#qaAnswersText')?.value || ''),
-    emotionImages: emotionImageState || [],
-    generatedImages: (characterOutputTabs[activeOutputTabIndex]?.generatedImages) || [],
-    visionDescription: $('#visionDescription')?.value || '',
-    conceptAttachments: conceptAttachments || [],
-    cardImagePath: settings.cardImagePath || $('#cardImagePath')?.value || '',
-    browserDescription: currentBrowserDescription || '',
-    cardRating: currentCardRating || '',
-    cardRatingReasoning: currentCardRatingReasoning || '',
-    cardRatingDetails: Array.isArray(currentCardRatingDetails) ? currentCardRatingDetails : [],
-    cardRatingSourceHash: currentCardRatingSourceHash || '',
-    name: currentOutputTabName(),
-    characterTabs: characterOutputTabs || [],
-  };
+  return collectWorkspacePayloadForTab(activeOutputTabIndex, settings);
+}
+
+function shouldSaveAllSplitOutputTabs(reason = '') {
+  const tabs = Array.isArray(characterOutputTabs) ? characterOutputTabs : [];
+  if (tabs.length <= 1) return false;
+  const mode = String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase();
+  if (mode === 'split_cards') return true;
+  return tabs.some(tab => String(tab?.splitCard || tab?.splitMode || '').toLowerCase() === 'split_cards');
 }
 
 function scheduleOutputEditorAutosave() {
@@ -4524,11 +5399,35 @@ async function saveCurrentWorkspace(reason='autosave') {
   captureActiveOutputTab();
   if (!hasOutput()) return null;
   try {
+    settings = collectSettings();
+    if (shouldSaveAllSplitOutputTabs(reason)) {
+      const tabs = Array.isArray(characterOutputTabs) ? characterOutputTabs : [];
+      const saved = [];
+      const failed = [];
+      for (let idx = 0; idx < tabs.length; idx += 1) {
+        const payload = collectWorkspacePayloadForTab(idx, settings);
+        if (!String(payload.output || '').trim()) continue;
+        const res = await window.pywebview.api.save_character_workspace(payload);
+        if (res && res.ok) saved.push(res);
+        else failed.push({ index: idx, name: payload.name || `Character ${idx + 1}`, error: res?.error || 'Workspace save failed.' });
+      }
+      if (failed.length) {
+        const msg = failed.map(f => `${f.name}: ${f.error}`).join('; ');
+        throw new Error(`Saved ${saved.length} split card(s), but ${failed.length} failed. ${msg}`);
+      }
+      if (reason !== 'silent') {
+        const activeSaved = saved[activeOutputTabIndex] || saved[0];
+        setStatus(`Saved ${saved.length} split character workspace${saved.length === 1 ? '' : 's'} to the Character Browser${activeSaved?.folder ? `, including ${activeSaved.folder}` : ''}.`, 'ok');
+      }
+      await refreshCharacterBrowser(false);
+      return saved[activeOutputTabIndex] || saved[0] || null;
+    }
+
     const payload = collectWorkspacePayload();
     const res = await window.pywebview.api.save_character_workspace(payload);
     if (!res.ok) throw new Error(res.error || 'Workspace save failed.');
     if (reason !== 'silent') setStatus(`Workspace saved to ${res.folder}`, 'ok');
-    refreshCharacterBrowser(false);
+    await refreshCharacterBrowser(false);
     return res;
   } catch (err) {
     setStatus(`Workspace autosave failed: ${err.message || err}`, 'error');
@@ -6392,14 +7291,9 @@ async function loadSelectedCharacterWorkspace() {
   try {
     const res = await window.pywebview.api.load_character_project(selectedCharacterProjectPath);
     if (!res.ok) throw new Error(res.error || 'Could not load character project.');
-    applyLoadedState(res);
+    applyLoadedState(res, { appendOutputTab: true });
     updateAvailability();
-    setStatus(res.message || 'Character workspace loaded.', 'ok');
-    $$('.nav').forEach(b => b.classList.remove('active'));
-    $$('.tab').forEach(t => t.classList.remove('active'));
-    $('[data-tab="concept"]').classList.add('active');
-    $('#concept').classList.add('active');
-    switchSubTab('concept', 'concept-main');
+    setStatus(res.message || 'Character workspace loaded into a new Output / Editor tab.', 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -7446,17 +8340,12 @@ async function generateCard(options = {}) {
   const conceptForModel = applyGenerationOptionsToConcept(buildConceptForModel(), options);
   try {
     if (settings.cardMode === 'split_cards') {
-      setBusy('SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
-      setStatus('Generating one card per main character. Each card will get its own Output/Q&A/Emotion/Image tab.', '');
-      let splitQaAnswers = '';
-      if (options.runQa || (options.customQaQuestions || []).length) {
-        setBusy('SPLIT-CARD GENERATION — running shared Q&A first…');
-        const splitQaRes = await window.pywebview.api.generate_qa_context(conceptForModel, buildGenerationQaTemplate(template, options), settings);
-        if (!splitQaRes.ok) throw new Error(splitQaRes.error || 'Split-card Q&A generation failed.');
-        splitQaAnswers = splitQaRes.qaAnswers || '';
-      }
-      setBusy('SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
-      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, settings, splitQaAnswers, !(options.runQa || (options.customQaQuestions || []).length));
+      const runSplitQa = !!(options.runQa || (options.customQaQuestions || []).length);
+      setBusy(runSplitQa ? 'SPLIT-CARD GENERATION — identifying characters and running focused Q&A per card…' : 'SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
+      setStatus(runSplitQa
+        ? 'Generating one card per main character. Each card will get its own focused Q&A/Output/Emotion/Image tab.'
+        : 'Generating one card per main character. Each card will get its own Output/Emotion/Image tab.', '');
+      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, settings, '', !runSplitQa, options.customQaQuestions || []);
       if (!res.ok) throw new Error(res.error || 'Split-card generation failed.');
       setCharacterOutputTabs(res.cards || []);
       currentBrowserDescription = '';
@@ -7822,9 +8711,9 @@ async function loadSavedCardOrProject() {
       if (!res.cancelled) throw new Error(res.error || 'Load failed.');
       return;
     }
-    applyLoadedState(res);
+    applyLoadedState(res, { appendOutputTab: true });
     updateAvailability();
-    let statusMessage = res.message || 'Loaded saved card/project.';
+    let statusMessage = res.message || 'Loaded saved card/project into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
       const imported = await importCurrentOutputToBrowser(false);
       if (imported?.ok) statusMessage += ' Imported into Character Browser.';
@@ -7850,9 +8739,9 @@ async function importSavedFiles(files) {
     const dataUrl = await fileToDataUrl(file);
     const res = await window.pywebview.api.load_import_upload(file.name, dataUrl);
     if (!res.ok) throw new Error(res.error || 'Load failed.');
-    applyLoadedState(res);
+    applyLoadedState(res, { appendOutputTab: true });
     updateAvailability();
-    let statusMessage = res.message || 'Loaded saved card/project.';
+    let statusMessage = res.message || 'Loaded saved card/project into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
       const imported = await importCurrentOutputToBrowser(false);
       if (imported?.ok) statusMessage += ' Imported into Character Browser.';
@@ -7880,9 +8769,9 @@ async function loadSavedCardOrProjectFromUrl() {
   try {
     const res = await window.pywebview.api.load_import_url(url);
     if (!res.ok) throw new Error(res.error || 'Load URL failed.');
-    applyLoadedState(res);
+    applyLoadedState(res, { appendOutputTab: true });
     updateAvailability();
-    let statusMessage = res.message || 'Loaded saved card/project from URL.';
+    let statusMessage = res.message || 'Loaded saved card/project from URL into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
       const imported = await importCurrentOutputToBrowser(false);
       if (imported?.ok) statusMessage += ' Imported into Character Browser.';

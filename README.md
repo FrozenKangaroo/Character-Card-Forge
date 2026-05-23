@@ -1,3 +1,66 @@
+## Version 1.0.6
+
+### Highlights
+- Promoted the 1.0.6 line from beta to stable `1.0.6`.
+- Added focused per-character Q&A handling for Split Cards generation.
+- Added Q&A repair/canonicalization so missing/reordered questions are restored before saving.
+- Added linked workspace tabs across Output / Editor, Concept, and Guided Manual.
+- Improved split-card saving so each generated character can be preserved as its own browser project.
+- Hardened tab closing to avoid freezes with blank tabs, last tabs, and duplicate workspace tabs.
+- Improved startup update notifications, including beta-to-stable update detection.
+- Updated VERSION files and frontend cache-busting to `1.0.6`.
+
+### Split Cards and Q&A
+- Split-card generation now runs focused Q&A per split character instead of reusing one shared Q&A block for every character.
+- Each split output tab now keeps its own `qaAnswers` data.
+- Custom one-off Q&A questions still work in split mode.
+- Older shared Q&A compatibility data is treated only as reference context and is not copied into every split tab.
+- Q&A repair now detects when a model outputs `Q<number>: <answer>` without the matching `A<number>` line, reinserts the original template question, and moves the model text into the correct answer slot.
+- Q&A output is canonicalized into numeric order before saving/displaying, preventing retry answers from being appended out of order.
+- The saved Prompt Template questions are used as the source of truth for repaired `Q<number>` labels.
+- Duplicate question text at the start of answers is removed when models echo the question inside the answer.
+- Custom one-off questions are deduplicated before prompting/saving so they are not appended twice or knocked out of alignment.
+- Retry answers can still replace placeholder answers such as `No answer`.
+
+### Split Card Saving
+- Split-card mode now saves all generated split character tabs as separate Character Browser projects instead of only the first active tab.
+- Save Workspace in split-card mode saves every split-card output tab.
+- Autosave after split generation writes each generated character to its own browser folder/project.
+- Each split save uses that tab's own output text, Q&A answers, emotion images, generated images, card image path, and tab name.
+- Prevented the active tab's image/settings from leaking into other split-card saves.
+- Loading a split-card project now restores saved character tabs when available.
+
+### Linked Workspace Tabs
+- Output / Editor, Concept, and Guided Manual now use linked card tabs.
+- Loading a saved/browser character opens a new linked Output / Editor tab instead of overwriting the current card.
+- New Concept Tab, New Manual Tab, and New Output Tab now create matching linked tabs across all three areas.
+- Switching tabs in one area switches to the matching linked tab in the other areas.
+- Closing a tab from Output / Editor, Concept, or Guided Manual closes the matching linked tab in the other areas.
+- Concept tabs preserve their own Main Concept, Vision image path, Vision description, Concept attachments, and Builder state.
+- Guided Manual tabs preserve their own manual fields and current page.
+- Workspace save now preserves `characterTabs`, `conceptTabs`, `manualTabs`, and the active linked-tab indexes.
+- Loading a character into the workspace now restores saved Concept details including concept text, vision notes/path, concept attachments, and builder state.
+
+### Tab Closing Stability
+- Closing a never-generated blank linked tab avoids the heavy capture/preview/autosave path.
+- Placeholder Q&A text no longer counts as real tab content and is not saved into blank tabs.
+- Blank Guided Manual default render state no longer counts as real content.
+- Closing linked tabs is queued safely so the clicked tab is not removed while its click event is still active.
+- Closing the final remaining linked tab now replaces it with a fresh blank linked tab instead of deleting the last workspace tab.
+- Loading the same saved workspace twice now focuses and refreshes the existing linked tab instead of opening a duplicate.
+- Existing duplicate workspace tabs can still be closed safely without triggering the close-time autosave/browser-refresh race.
+
+### Update Notifications
+- Startup update checking now shows an Update Available modal when GitHub has a newer release.
+- The modal shows the current version, latest version, update type, release notes preview when available, and links to the GitHub Release and main GitHub project page.
+- Beta builds now notify when the matching stable release becomes available. For example, `1.0.6-beta9` reports `1.0.6` as an available stable update.
+- Update checking scans GitHub releases and falls back to tags if release lookup fails.
+- Added debug logging for current version, beta/stable state, latest stable version, update source, update kind, and release URL.
+
+### Debugging
+- Added debug log events for split-card focused Q&A and Q&A repair paths, including focused Q&A requests/responses and shared-Q&A ignore handling.
+- Added debug log events for Q&A format/order repair and retry repair.
+
 ## Version 1.0.5
 
 - Added **Guided Manual Mode**, a no-AI card creation flow that uses the active prompt template as a step-by-step manual form.
@@ -757,3 +820,5 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Added deterministic fallback per-element rating rows when the AI returns an overall score but omits the requested details array.
 - Details modal now shows a safe fallback breakdown for existing rated cards with no saved detail rows instead of an empty message.
 - Backend logs when fallback details are created, making missing-model-breakdown cases visible in debug output.
+
+
