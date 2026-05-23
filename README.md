@@ -1,5 +1,11 @@
 ## Version 1.0.6
 
+### v1.0.6 Critical Hotfix
+
+- Fixed a critical generation routing bug where a stale `sharedScenePolicy: split_cards` value could cause a card to split into multiple character cards even when the visible Card Mode was set to **Single Character**.
+- Card Mode dropdown is now the source of truth during generation. Switching back to Single Character clears stale split-card scene policy state.
+
+
 ### Highlights
 - Promoted the 1.0.6 line from beta to stable `1.0.6`.
 - Added focused per-character Q&A handling for Split Cards generation.
