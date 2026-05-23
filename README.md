@@ -1,10 +1,10 @@
 ## Version 1.0.6
 
-### v1.0.6 Critical Hotfix
-
-- Fixed a critical generation routing bug where a stale `sharedScenePolicy: split_cards` value could cause a card to split into multiple character cards even when the visible Card Mode was set to **Single Character**.
-- Card Mode dropdown is now the source of truth during generation. Switching back to Single Character clears stale split-card scene policy state.
-
+### Critical Hotfix Notes
+- Fixed a generation-start regression where clicking **Generate Card** could clear Main Concept before the modal flow read it, then incorrectly show `Enter a character concept first.`
+- Generation now captures the active Concept/Guided Manual tab before clearing output artifacts, validates the concept before any reset, and preserves the concept through autosave.
+- Fixed browser/workspace loading so saved Concept tab data is restored again, including `conceptTabs`, `manualTabs`, active tab indexes, Vision image path, Vision description, Concept attachments, and Builder state.
+- Kept the version as stable `1.0.6` because this is a hotfix for the current stable release.
 
 ### Highlights
 - Promoted the 1.0.6 line from beta to stable `1.0.6`.

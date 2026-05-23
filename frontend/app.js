@@ -1042,7 +1042,9 @@ function appendLoadedStateToOutputTabs(state) {
   switchToOutputTab('output-fulltext');
 }
 
-function clearGenerationArtifacts() {
+function clearGenerationArtifacts(options = {}) {
+  const preserveConceptTab = options && options.preserveConceptTab ? JSON.parse(JSON.stringify(options.preserveConceptTab)) : null;
+  const preserveManualTab = options && options.preserveManualTab ? JSON.parse(JSON.stringify(options.preserveManualTab)) : null;
   lastQnaAnswers = '';
   currentBrowserDescription = '';
   currentCardRating = '';
@@ -1051,20 +1053,16 @@ function clearGenerationArtifacts() {
   currentCardRatingSourceHash = '';
   emotionImageState = [];
   characterOutputTabs = [makeBlankOutputTab('Character')];
-  conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
-  manualGuideTabs = [makeBlankManualTab('Manual 1')];
+  conceptWorkspaceTabs = [normaliseConceptTab(preserveConceptTab || makeBlankConceptTab('Concept 1'), preserveConceptTab?.name || 'Concept 1')];
+  manualGuideTabs = [normaliseManualTab(preserveManualTab || makeBlankManualTab('Manual 1'), preserveManualTab?.name || 'Manual 1')];
   activeOutputTabIndex = 0;
   activeConceptTabIndex = 0;
   activeManualGuideTabIndex = 0;
   setTextareaValue('qaAnswersText', '');
   setTextareaValue('outputText', '');
   setTextareaValue('followupText', '');
-  setTextareaValue('conceptText', '');
-  setTextareaValue('visionDescription', '');
-  setVisionImagePath('');
-  conceptAttachments = [];
-  manualGuideState = {};
-  manualGuidePageIndex = 0;
+  manualGuideState = JSON.parse(JSON.stringify(manualGuideTabs[0]?.state || {}));
+  manualGuidePageIndex = Number(manualGuideTabs[0]?.pageIndex || 0);
   const emotions = $('#emotionImages');
   if (emotions) emotions.innerHTML = '';
   const generated = $('#generatedImages');
@@ -1073,6 +1071,8 @@ function clearGenerationArtifacts() {
   if (cardImage) cardImage.value = '';
   if (settings) settings.cardImagePath = '';
   renderAllWorkspaceTabRails();
+  applyActiveConceptTab();
+  applyActiveManualTab({ skipPreview: true });
   renderConceptAttachments();
   renderManualGuide();
 }
@@ -2181,22 +2181,8 @@ function scheduleAutoModelTokenFetch() {
 }
 
 function collectSettings() {
-  // v1.0.6 critical fix: the Card Mode dropdown is the source of truth.
-  // Previously a stale hidden/shared-scene value of "split_cards" could force
-  // cardMode back to split even after the user changed Card Mode to Single.
-  // That caused normal single-card generations to split into multiple cards.
-  const rawCardMode = ($('#cardMode') ? $('#cardMode').value : 'single');
-  let selectedCardMode = ['single', 'multi', 'split_cards'].includes(rawCardMode) ? rawCardMode : 'single';
-  let selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
-  if (selectedCardMode === 'single') {
-    selectedSharedScenePolicy = 'ai_reconcile';
-  } else if (selectedCardMode === 'split_cards') {
-    selectedSharedScenePolicy = 'split_cards';
-  } else if (selectedSharedScenePolicy === 'split_cards') {
-    // Split is now represented by Card Mode itself. If the user changes back
-    // to multi-card-single-output, clear the stale split scene policy.
-    selectedSharedScenePolicy = 'ai_reconcile';
-  }
+  const selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
+  const selectedCardMode = selectedSharedScenePolicy === 'split_cards' ? 'split_cards' : $('#cardMode').value;
   return {
     apiBaseUrl: $('#apiBaseUrl').value.trim(),
     apiKey: $('#apiKey').value.trim(),
@@ -3428,18 +3414,7 @@ function bindActions() {
   $('#altStyleRows')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
   $('#altStyleRows')?.addEventListener('change', () => { settings = collectSettings(); updateAvailability(); });
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
-  $('#cardMode').addEventListener('change', () => {
-    const mode = $('#cardMode')?.value || 'single';
-    if ($('#sharedScenePolicy')) {
-      if (mode === 'single') $('#sharedScenePolicy').value = 'ai_reconcile';
-      else if (mode === 'split_cards') $('#sharedScenePolicy').value = 'split_cards';
-      else if ($('#sharedScenePolicy').value === 'split_cards') $('#sharedScenePolicy').value = 'ai_reconcile';
-    }
-    settings = collectSettings();
-    if (mode === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); }
-    updateCardModeHint();
-    updateAvailability();
-  });
+  $('#cardMode').addEventListener('change', () => { settings = collectSettings(); if ($('#cardMode').value === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); } updateCardModeHint(); updateAvailability(); });
   $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
   $('#sharedScenePolicy')?.addEventListener('change', () => { if ($('#sharedScenePolicy')?.value === 'split_cards' && $('#cardMode')) $('#cardMode').value = 'split_cards'; settings = collectSettings(); updateAvailability(); updateMultiBuilderSelectors(false); });
   $('#builderGenerateBtn')?.addEventListener('click', generateBuilderDescription);
@@ -8344,7 +8319,21 @@ async function generateCard(options = {}) {
   options = { runQa: !!template?.qa?.enabled, temporaryNotes: '', customQaQuestions: [], ...(options || {}) };
   if ((options.customQaQuestions || []).length) options.runQa = true;
   if (!handleUnbuiltBuilderWarning()) return;
-  clearGenerationArtifacts();
+  captureActiveConceptTab();
+  captureActiveManualTab();
+  const preservedConceptTab = conceptWorkspaceTabs[activeConceptTabIndex] ? JSON.parse(JSON.stringify(conceptWorkspaceTabs[activeConceptTabIndex])) : makeBlankConceptTab('Concept 1');
+  const preservedManualTab = manualGuideTabs[activeManualGuideTabIndex] ? JSON.parse(JSON.stringify(manualGuideTabs[activeManualGuideTabIndex])) : makeBlankManualTab('Manual 1');
+  const conceptForModel = applyGenerationOptionsToConcept(buildConceptForModel(), options);
+  if (!String(conceptForModel || '').trim()) {
+    setStatus('Enter a character concept first.', 'error');
+    $$('.nav').forEach(b => b.classList.remove('active'));
+    $$('.tab').forEach(t => t.classList.remove('active'));
+    $('[data-tab="concept"]')?.classList.add('active');
+    $('#concept')?.classList.add('active');
+    switchSubTab('concept', 'concept-main');
+    return;
+  }
+  clearGenerationArtifacts({ preserveConceptTab: preservedConceptTab, preserveManualTab: preservedManualTab });
   setStatus('Starting generation…', '');
   $$('.nav').forEach(b => b.classList.remove('active'));
   $$('.tab').forEach(t => t.classList.remove('active'));
@@ -8353,14 +8342,6 @@ async function generateCard(options = {}) {
   switchSubTab('output', 'output-fulltext');
   await rememberCurrentModel(true);
   settings = collectSettings();
-  const liveCardMode = ($('#cardMode') ? $('#cardMode').value : settings.cardMode || 'single');
-  if (['single', 'multi', 'split_cards'].includes(liveCardMode) && settings.cardMode !== liveCardMode) {
-    // Last-line defence against stale saved/shared-scene state changing the
-    // generation route. The visible Card Mode control wins.
-    settings.cardMode = liveCardMode;
-    if (liveCardMode === 'single') settings.sharedScenePolicy = 'ai_reconcile';
-    if (liveCardMode === 'split_cards') settings.sharedScenePolicy = 'split_cards';
-  }
   const settingsError = validateTextApiSettings(settings);
   if (settingsError) {
     setBusy('');
@@ -8370,7 +8351,6 @@ async function generateCard(options = {}) {
     updateAvailability();
     return;
   }
-  const conceptForModel = applyGenerationOptionsToConcept(buildConceptForModel(), options);
   try {
     if (settings.cardMode === 'split_cards') {
       const runSplitQa = !!(options.runQa || (options.customQaQuestions || []).length);
@@ -8430,7 +8410,7 @@ async function generateCard(options = {}) {
     lastQnaAnswers = res.qaAnswers || qaAnswers || '';
     const qaBox = $('#qaAnswersText');
     if (qaBox) qaBox.value = lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.';
-    setCharacterOutputTabs([{ name: extractOutputNameForTab(res.output) || (settings.cardMode === 'multi' ? 'Characters' : 'Character'), output: res.output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '' }]);
+    setCharacterOutputTabs([{ name: extractOutputNameForTab(res.output) || (settings.cardMode === 'multi' ? 'Characters' : 'Character'), output: res.output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '', conceptTab: preservedConceptTab, manualTab: preservedManualTab }]);
     updateAvailability();
     const backupMsg = describeBackupInfo(res.backupInfo, 'character_generation');
     if (res.backupInfo?.used) {
