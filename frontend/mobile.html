@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Character Card Forge Mobile</title>
+  <style>
+    :root{color-scheme:dark;--bg:#11131a;--card:#1b1f2b;--soft:#252b3a;--text:#f2f4ff;--muted:#a9b0c5;--accent:#8eb6ff;--danger:#ff8e9e;--ok:#9df0be}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(160deg,#0f1118,#171b26 55%,#1d2230);color:var(--text);min-height:100vh}main{max-width:780px;margin:0 auto;padding:18px}header{padding:8px 0 18px}h1{font-size:1.45rem;margin:0 0 6px}.subtitle{color:var(--muted);line-height:1.45}.card{background:rgba(27,31,43,.92);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:14px 0;box-shadow:0 16px 40px rgba(0,0,0,.28)}label{display:block;font-size:.92rem;color:var(--muted);margin:12px 0 6px}textarea,input{width:100%;border:1px solid rgba(255,255,255,.1);background:var(--soft);color:var(--text);border-radius:14px;padding:12px;font:inherit}textarea{min-height:220px;resize:vertical}button{border:0;border-radius:14px;padding:12px 16px;font-weight:700;background:var(--accent);color:#10131b;width:100%;margin-top:12px}button.secondary{background:#32394c;color:var(--text)}button:disabled{opacity:.55}.status{white-space:pre-wrap;color:var(--muted);font-size:.92rem}.ok{color:var(--ok)}.error{color:var(--danger)}details{margin-top:12px}summary{cursor:pointer;color:var(--accent);font-weight:700}pre{white-space:pre-wrap;word-break:break-word;background:#11141d;border-radius:14px;padding:12px;max-height:360px;overflow:auto}.small{font-size:.84rem;color:var(--muted)}a{color:var(--accent)}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Character Card Forge Mobile</h1>
+    <div class="subtitle">Type a Main Concept, generate using the desktop app's current prompt template, then find the saved card in Character Browser when you get home.</div>
+  </header>
+
+  <section class="card">
+    <div id="serverStatus" class="status">Checking server…</div>
+    <label for="accessCode">Access Code <span class="small">only needed if configured on desktop</span></label>
+    <input id="accessCode" autocomplete="one-time-code" placeholder="Optional" />
+  </section>
+
+  <section class="card">
+    <label for="concept">Main Concept</label>
+    <textarea id="concept" placeholder="Example: A confident university gyaru who works part-time at a cafe and has a hidden soft side..."></textarea>
+    <label for="note">Optional note for this mobile generation</label>
+    <input id="note" placeholder="Example: keep it wholesome, make the scenario workplace-focused, etc." />
+    <button id="generateBtn">Generate Card</button>
+    <button id="clearBtn" class="secondary">Clear</button>
+  </section>
+
+  <section class="card">
+    <div id="result" class="status">No mobile generation yet.</div>
+    <details id="outputDetails" hidden>
+      <summary>Output preview</summary>
+      <pre id="outputPreview"></pre>
+    </details>
+    <details id="qaDetails" hidden>
+      <summary>Q&A preview</summary>
+      <pre id="qaPreview"></pre>
+    </details>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const tokenFromUrl = new URLSearchParams(location.search).get('token') || '';
+if (tokenFromUrl) { localStorage.setItem('ccfMobileToken', tokenFromUrl); }
+$('#accessCode').value = tokenFromUrl || localStorage.getItem('ccfMobileToken') || '';
+function token(){ const v=$('#accessCode').value.trim(); if(v) localStorage.setItem('ccfMobileToken', v); return v; }
+function setResult(text, cls=''){ const el=$('#result'); el.className='status '+cls; el.textContent=text; }
+async function api(path, opts={}){ const headers={...(opts.headers||{})}; const t=token(); if(t) headers['X-CCF-Mobile-Token']=t; const res=await fetch(path,{...opts,headers}); const data=await res.json().catch(()=>({ok:false,error:'Invalid server response'})); if(!res.ok && data.ok!==true) throw new Error(data.error||res.statusText); return data; }
+async function refreshStatus(){ try{ const s=await api('/api/status'); $('#serverStatus').innerHTML = `${s.running?'Running':'Stopped'} on port ${s.port||''}${s.authRequired?' — access code required':''}<br><span class="small">Keep the desktop app open while generating.</span>`; }catch(e){ $('#serverStatus').textContent='Status check failed: '+(e.message||e); } }
+$('#generateBtn').addEventListener('click', async()=>{ const concept=$('#concept').value.trim(); if(!concept){ setResult('Enter a Main Concept first.','error'); return; } $('#generateBtn').disabled=true; setResult('Generating… keep this page open. This can take a while depending on your model.'); $('#outputDetails').hidden=true; $('#qaDetails').hidden=true; try{ const data=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({concept,note:$('#note').value.trim()})}); setResult(`Saved: ${data.name||'Character'}\nProject: ${data.projectPath||''}`,'ok'); $('#outputPreview').textContent=data.outputPreview||''; $('#qaPreview').textContent=data.qaPreview||''; $('#outputDetails').hidden=!data.outputPreview; $('#qaDetails').hidden=!data.qaPreview; }catch(e){ setResult(e.message||String(e),'error'); }finally{ $('#generateBtn').disabled=false; }});
+$('#clearBtn').addEventListener('click',()=>{ $('#concept').value=''; $('#note').value=''; setResult('Cleared.'); $('#outputDetails').hidden=true; $('#qaDetails').hidden=true; });
+$('#accessCode').addEventListener('input', refreshStatus);
+refreshStatus();
+</script>
+</body>
+</html>

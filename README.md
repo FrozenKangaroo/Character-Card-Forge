@@ -1,10 +1,90 @@
+## Version 1.0.7
+
+### Highlights
+
+- Promoted the 1.0.7 line from beta to stable `1.0.7`.
+- Added Front Porch database auditing with rollback-only insert testing to verify Character Card Forge's direct-write integration safely.
+- Added Mobile Remote Server support so a phone/tablet can submit a Main Concept and generate a card into Character Browser.
+- Hardened generation so API errors preserve the active Main Concept and workspace inputs.
+- Added concept-fidelity protection so explicit source details, first-message beats, names, relationships, outfits, and generation notes are not casually replaced.
+- Reworked Quick Save / Image into a cleaner import/export/card-image workflow.
+- Added configurable generated-image count, defaulting to 4.
+- Fixed GitHub update checking by merging Releases and Tags.
+- Added Relationship Matrix generation for open workspace characters.
+- Fixed a beta7 regression where Relationship Matrix refresh could clear loaded Output / Editor tabs during Character Browser loads.
+- Fixed Character Browser workspace loading so selected cards restore Output / Editor, Q&A, Quick Save / Image, generated images, Emotion Images, and Concept data without reopening sibling split-card tabs.
+- Updated version files and frontend cache-busting to `1.0.7`.
+
+### Front Porch Database Audit
+
+- Added Front Porch audit tools in Settings.
+- The audit checks the live SQLite schema for the tables Character Card Forge writes during direct Front Porch export, including `characters`, `sessions`, `messages`, `avatar_images`, and `sync_meta`.
+- Added rollback-only insertion testing. Temporary character/session/message/avatar rows are inserted inside a savepoint, rolled back, and verified as deleted.
+- Audit reports missing tables/columns, required `NOT NULL` columns Character Card Forge does not provide, nullable mismatches, and `sessions.start_day_of_week` compatibility.
+- The audit is designed to be safe and read-only after rollback; it does not intentionally leave test records behind.
+
+### Mobile Remote Server
+
+- Added an optional Mobile Remote Server for LAN/mobile generation.
+- When enabled, Character Card Forge serves `mobile.html` so you can enter a Main Concept from a phone/tablet, generate with the current prompt template, and have the saved card appear in Character Browser on the desktop.
+- Added Mobile Remote Server settings under Data / Browser, including host, port, optional access code, status refresh, and Open Mobile Page button.
+- Added `/api/status` and `/api/generate` endpoints for the mobile page.
+- Mobile generation forces a safe single-card route internally, then restores the desktop app's saved card-mode/settings afterward.
+
+### Generation Safety and Concept Fidelity
+
+- Fixed a main-app generation error path where clicking Generate could clear the active Main Concept before validation/API failure handling. API errors now preserve Main Concept, Vision notes/path, concept attachments, and builder state so the user can retry.
+- Generation cleanup now clears only active Output / Editor artifacts while preserving workspace input tabs.
+- Main Concept is now labelled as the authoritative user source when building the model prompt. Builder guidance may supplement missing details, but must not override explicit names, relationships, outfit, scenario, First Message, or temporary generation notes.
+- Temporary Generation Notes are marked as mandatory direction.
+- Added concept-fidelity checks after generation. If the output drops obvious source markers such as the main character name or unique tokens/captions, the backend retries once with a strict source-preservation prompt.
+- Added debug logs for `concept_fidelity_drift_detected`, `concept_fidelity_retry_request`, and `concept_fidelity_retry_response`.
+
+### Quick Save / Image Workflow
+
+- Reworked Quick Save / Image into a clearer card import/export/image workflow.
+- Top buttons are now Import Card, Export Card, and Copy. Manual Save Workspace was removed from this page because workspace saving is automatic.
+- Added an Import Card modal with drop zone, selected path/URL display, editable import URL/path field, and Stable Diffusion Prompt options.
+- Import options include no SD prompt generation, Vision → SD Prompt, and Full Text → SD Prompt. If prompt generation is skipped, the output still receives an empty Stable Diffusion Prompt section for later manual editing.
+- Added an Export Card modal with export format selection and export folder selection/path entry.
+- Added a compact current-card image preview with Change Card Image / Clear controls underneath.
+- Card image path editing now lives inside Change Card Image instead of taking space on the main page.
+- Fixed broken local card image previews by routing local files through a backend data URL preview helper.
+- Fixed Import Card and Change Card Image drop-zone/click-to-browse behavior using stronger file input/drop handling.
+- Added local path import support alongside file upload and URL import.
+- Added configurable Stable Diffusion candidate count for card image generation, defaulting to 4 and supporting 1–16 images.
+- Backend export now respects a custom export destination folder when provided.
+
+### Update Checking
+
+- Fixed update checking so GitHub Releases and GitHub Tags are merged instead of only using tags when releases fail.
+- This helps beta builds detect newer beta tags and stable releases even when a tag exists without a full GitHub Release object.
+- Added a manual Check Updates button under Settings → Data / Browser.
+- Update debug logging now reports the source as `releases`, `releases+tags`, or `tags`.
+
+### Relationship Matrix
+
+- Added Relationship Matrix under Output / Editor for open workspace characters.
+- Generates a Markdown relationship matrix for multi-character roleplay development.
+- Includes group dynamic overview, character-to-character matrix table, pair hooks, and group roleplay seeds.
+- Added Refresh List, Generate Matrix, and Copy controls.
+- Relationship Matrix list refresh is read-only and no longer captures/mutates the active Output / Editor state during tab rendering or workspace loading.
+
+### Character Browser Workspace Loading
+
+- Loading a card from Character Browser now opens only the selected card instead of reopening all sibling cards from older split-card projects.
+- Restores the selected card's Full Text Output, Q&A answers, Quick Save / Image card image, generated images, Emotion Images, Concept tab data, and Guided Manual tab data.
+- Future per-card saves now store only the active card tab inside that card's project metadata, preventing split/multi-card sibling tabs from leaking into individual Character Browser entries.
+- Loader now falls back through project-level output, workspace-level output, selected character tab output, older output aliases, and sidecar files such as `latest_output.md`, `qna_answers.md`, `emotion_images_state.json`, and `generated_images_state.json`.
+- Added debug log `character_project_load_restore_summary`.
+
 ## Version 1.0.6
 
-### Critical Hotfix Notes
-- Fixed a generation-start regression where clicking **Generate Card** could clear Main Concept before the modal flow read it, then incorrectly show `Enter a character concept first.`
-- Generation now captures the active Concept/Guided Manual tab before clearing output artifacts, validates the concept before any reset, and preserves the concept through autosave.
-- Fixed browser/workspace loading so saved Concept tab data is restored again, including `conceptTabs`, `manualTabs`, active tab indexes, Vision image path, Vision description, Concept attachments, and Builder state.
-- Kept the version as stable `1.0.6` because this is a hotfix for the current stable release.
+### v1.0.6 Critical Hotfix
+
+- Fixed a critical generation routing bug where a stale `sharedScenePolicy: split_cards` value could cause a card to split into multiple character cards even when the visible Card Mode was set to **Single Character**.
+- Card Mode dropdown is now the source of truth during generation. Switching back to Single Character clears stale split-card scene policy state.
+
 
 ### Highlights
 - Promoted the 1.0.6 line from beta to stable `1.0.6`.
@@ -826,5 +906,7 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Added deterministic fallback per-element rating rows when the AI returns an overall score but omits the requested details array.
 - Details modal now shows a safe fallback breakdown for existing rated cards with no saved detail rows instead of an empty message.
 - Backend logs when fallback details are created, making missing-model-breakdown cases visible in debug output.
+
+
 
 

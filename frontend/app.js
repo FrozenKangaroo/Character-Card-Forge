@@ -39,6 +39,9 @@ let appVersion = "unknown";
 let modelTokenFetchTimer = null;
 let conceptImportFile = null;
 let conceptImportUrlValue = "";
+let quickImportFile = null;
+let quickImportUrlValue = "";
+let cardImagePreviewToken = 0;
 let currentLoadedType = "";
 let characterOutputTabs = [];
 let activeOutputTabIndex = 0;
@@ -59,6 +62,8 @@ let manualGuideTabs = [];
 let activeManualGuideTabIndex = 0;
 let workspaceTabCloseInProgress = false;
 let workspaceTabRenderSuspendAutoScroll = false;
+let relationshipMatrixText = '';
+
 
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
@@ -214,6 +219,85 @@ function cleanQaAnswersForStorage(value, outputText = '') {
   return text;
 }
 
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value ?? '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function loadedOutputTextFromTab(tab = {}) {
+  if (!tab || typeof tab !== 'object') return '';
+  return firstNonEmptyString(
+    tab.output,
+    tab.fullTextOutput,
+    tab.fullText,
+    tab.fullTextOutputText,
+    tab.outputText,
+    tab.cardText,
+    tab.cardOutput,
+    tab.raw_card,
+    tab.rawCard,
+    tab.text,
+    tab.content
+  );
+}
+
+function loadedQaTextFromTab(tab = {}) {
+  if (!tab || typeof tab !== 'object') return '';
+  return firstNonEmptyString(tab.qaAnswers, tab.qnaAnswers, tab.qa, tab.qna, tab.answers, tab.qAndA);
+}
+
+function loadedOutputTextFromState(state = {}, fallbackTab = {}) {
+  const workspace = (state && typeof state.workspace === 'object') ? state.workspace : {};
+  return firstNonEmptyString(
+    state.output,
+    state.fullTextOutput,
+    state.fullText,
+    state.outputText,
+    state.cardText,
+    state.cardOutput,
+    state.raw_card,
+    state.rawCard,
+    workspace.output,
+    workspace.fullTextOutput,
+    workspace.fullText,
+    workspace.outputText,
+    workspace.cardText,
+    workspace.cardOutput,
+    workspace.raw_card,
+    workspace.rawCard,
+    loadedOutputTextFromTab(fallbackTab)
+  );
+}
+
+function loadedQaTextFromState(state = {}, fallbackTab = {}) {
+  const workspace = (state && typeof state.workspace === 'object') ? state.workspace : {};
+  return firstNonEmptyString(
+    state.qnaAnswers,
+    state.qaAnswers,
+    state.qna,
+    state.qa,
+    workspace.qnaAnswers,
+    workspace.qaAnswers,
+    workspace.qna,
+    workspace.qa,
+    loadedQaTextFromTab(fallbackTab)
+  );
+}
+
+function loadedImageListFromState(state = {}, key, fallbackTab = {}) {
+  const workspace = (state && typeof state.workspace === 'object') ? state.workspace : {};
+  const direct = state[key];
+  if (Array.isArray(direct) && direct.length) return direct;
+  const nested = workspace[key];
+  if (Array.isArray(nested) && nested.length) return nested;
+  const tabList = fallbackTab && typeof fallbackTab === 'object' ? fallbackTab[key] : null;
+  if (Array.isArray(tabList) && tabList.length) return tabList;
+  return Array.isArray(direct) ? direct : (Array.isArray(nested) ? nested : (Array.isArray(tabList) ? tabList : []));
+}
+
 function captureActiveOutputTab() {
   if (!characterOutputTabs.length) return;
   const tab = characterOutputTabs[activeOutputTabIndex];
@@ -238,6 +322,7 @@ function applyActiveOutputTab() {
   const cardImage = $('#cardImagePath');
   if (cardImage) cardImage.value = tab.cardImagePath || '';
   if (settings) settings.cardImagePath = tab.cardImagePath || '';
+  updateCardImagePreview();
   updateAvailability();
 }
 
@@ -310,8 +395,8 @@ function normaliseManualTab(tab = {}, fallbackName = '') {
   return merged;
 }
 
-function makeConceptTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '') {
-  const sourceTabs = Array.isArray(state?.conceptTabs) ? state.conceptTabs : [];
+function makeConceptTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '', options = {}) {
+  const sourceTabs = (!options.singleProject && Array.isArray(state?.conceptTabs)) ? state.conceptTabs : [];
   const selected = sourceTabs[tabIndex] || sourceTabs[Number(state?.activeConceptTabIndex || 0)] || sourceTabs[0] || {};
   const merged = normaliseConceptTab(selected, fallbackName || selected.name || state.name || `Concept ${tabIndex + 1}`);
   if (!String(merged.concept || '').trim() && typeof state?.concept === 'string') merged.concept = state.concept;
@@ -322,10 +407,25 @@ function makeConceptTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName
   return merged;
 }
 
-function makeManualTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '') {
-  const sourceTabs = Array.isArray(state?.manualTabs) ? state.manualTabs : [];
+function makeManualTabFromWorkspaceState(state = {}, tabIndex = 0, fallbackName = '', options = {}) {
+  const sourceTabs = (!options.singleProject && Array.isArray(state?.manualTabs)) ? state.manualTabs : [];
   const selected = sourceTabs[tabIndex] || sourceTabs[Number(state?.activeManualGuideTabIndex || 0)] || sourceTabs[0] || {};
   return normaliseManualTab(selected, fallbackName || selected.name || state.name || `Manual ${tabIndex + 1}`);
+}
+
+function bestLoadedCharacterTabForSingleProject(state = {}) {
+  const tabs = Array.isArray(state?.characterTabs) ? state.characterTabs.filter(tab => tab && typeof tab === 'object') : [];
+  if (!tabs.length) return {};
+  const stateOutput = String(state?.output || state?.workspace?.output || '').trim();
+  const stateName = cleanOutputTabName(state?.name || extractOutputNameForTab(stateOutput) || '');
+  const stateProject = canonicalWorkspaceProjectPath(state?.projectPath || state?.sourcePath || '');
+  const matchByProject = tabs.find(tab => canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || tab.sourcePath || '') === stateProject);
+  if (matchByProject) return matchByProject;
+  const matchByOutput = stateOutput ? tabs.find(tab => loadedOutputTextFromTab(tab) === stateOutput) : null;
+  if (matchByOutput) return matchByOutput;
+  const matchByName = stateName ? tabs.find(tab => cleanOutputTabName(tab.name || tab.focusName || extractOutputNameForTab(tab.output || '')) === stateName) : null;
+  if (matchByName) return matchByName;
+  return tabs.find(tab => loadedOutputTextFromTab(tab)) || tabs[0] || {};
 }
 
 function ensureLinkedWorkspaceTabs() {
@@ -345,6 +445,7 @@ function renderAllWorkspaceTabRails() {
   renderCharacterOutputTabs();
   renderConceptWorkspaceTabs();
   renderManualWorkspaceTabs();
+  refreshRelationshipMatrixOpenCharacterList();
 }
 
 function switchLinkedWorkspaceTab(index, source = '') {
@@ -371,12 +472,14 @@ function addLinkedWorkspaceTab({ outputTab = null, conceptTab = null, manualTab 
   captureActiveManualTab();
   const idx = characterOutputTabs.length;
   const output = outputTab ? { ...makeBlankOutputTab(outputTab.name || outputTab.focusName || `Character ${idx + 1}`), ...(outputTab || {}) } : makeBlankOutputTab(`Character ${idx + 1}`);
+  output.output = loadedOutputTextFromTab(output);
   const name = cleanOutputTabName(output.name || output.focusName || extractOutputNameForTab(output.output || '') || `Character ${idx + 1}`) || `Character ${idx + 1}`;
   output.name = name;
   output.focusName = output.focusName || name;
   output.projectPath = canonicalWorkspaceProjectPath(output.projectPath || output.workspaceProjectPath || output.sourcePath || '');
   output.workspaceProjectPath = output.projectPath || output.workspaceProjectPath || '';
-  output.qaAnswers = output.qaAnswers || output.qnaAnswers || '';
+  output.qaAnswers = loadedQaTextFromTab(output);
+  output.qnaAnswers = output.qaAnswers;
   output.emotionImages = Array.isArray(output.emotionImages) ? output.emotionImages : [];
   output.generatedImages = Array.isArray(output.generatedImages) ? output.generatedImages : [];
   output.cardImagePath = output.cardImagePath || output.imagePath || '';
@@ -439,7 +542,7 @@ function linkedWorkspaceTabHasContent(index) {
   const outputTab = characterOutputTabs[index] || {};
   const conceptTab = conceptWorkspaceTabs[index] || {};
   const manualTab = manualGuideTabs[index] || {};
-  const outputText = String(outputTab.output || '').trim();
+  const outputText = loadedOutputTextFromTab(outputTab);
   const rawQaText = String(outputTab.qaAnswers || outputTab.qnaAnswers || '').trim();
   const qaText = isPlaceholderQaText(rawQaText) ? '' : rawQaText;
   const conceptText = String(conceptTab.concept || '').trim();
@@ -641,14 +744,15 @@ function setCharacterOutputTabs(cards) {
   const previousConcept = conceptWorkspaceTabs[activeConceptTabIndex] ? JSON.parse(JSON.stringify(conceptWorkspaceTabs[activeConceptTabIndex])) : null;
   const previousManual = manualGuideTabs[activeManualGuideTabIndex] ? JSON.parse(JSON.stringify(manualGuideTabs[activeManualGuideTabIndex])) : null;
   characterOutputTabs = (cards || []).map((card, idx) => {
-    const extractedName = extractOutputNameForTab(card.output || '');
+    const cardOutput = loadedOutputTextFromTab(card);
+    const extractedName = extractOutputNameForTab(cardOutput || '');
     const originalName = card.name || card.focusName || `Character ${idx + 1}`;
     const finalName = isGenericOutputName(originalName) && extractedName ? extractedName : cleanOutputTabName(originalName) || extractedName || `Character ${idx + 1}`;
     return {
       name: finalName,
       focusName: card.focusName || finalName,
-      output: card.output || '',
-      qaAnswers: card.qaAnswers || card.qnaAnswers || '',
+      output: cardOutput || '',
+      qaAnswers: loadedQaTextFromTab(card),
       emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
       generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
       cardImagePath: card.cardImagePath || card.imagePath || '',
@@ -918,23 +1022,27 @@ function clearCurrentManualGuideDraft() {
   setStatus('Cleared current Guided Manual draft.', 'ok');
 }
 
-function buildLinkedWorkspaceTabsFromLoadedState(state = {}) {
+function buildLinkedWorkspaceTabsFromLoadedState(state = {}, options = {}) {
   const projectPath = canonicalWorkspaceProjectPath(state?.projectPath || state?.sourcePath || '');
-  const savedTabs = Array.isArray(state?.characterTabs)
-    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && String(tab.output || '').trim())
+  const forceSingleProject = !!options.singleProject;
+  const savedTabs = (!forceSingleProject && Array.isArray(state?.characterTabs))
+    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && loadedOutputTextFromTab(tab))
     : [];
   const rows = [];
   if (savedTabs.length) {
     savedTabs.forEach((tab, idx) => {
-      const name = tab.name || tab.focusName || extractOutputNameForTab(tab.output || '') || `Loaded ${idx + 1}`;
+      const name = tab.name || tab.focusName || extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || `Loaded ${idx + 1}`;
       const outputTab = {
         ...tab,
         name,
         focusName: tab.focusName || name,
         projectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || projectPath),
         workspaceProjectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || projectPath),
+        output: loadedOutputTextFromTab(tab),
+        fullTextOutput: loadedOutputTextFromTab(tab),
         cardImagePath: tab.cardImagePath || tab.imagePath || state.imagePath || state.cardImagePath || '',
-        qaAnswers: tab.qaAnswers || tab.qnaAnswers || '',
+        qaAnswers: loadedQaTextFromTab(tab),
+        qnaAnswers: loadedQaTextFromTab(tab),
         emotionImages: Array.isArray(tab.emotionImages) ? tab.emotionImages : [],
         generatedImages: Array.isArray(tab.generatedImages) ? tab.generatedImages : [],
       };
@@ -948,21 +1056,26 @@ function buildLinkedWorkspaceTabsFromLoadedState(state = {}) {
       }
       rows.push({ outputTab, conceptTab, manualTab });
     });
-  } else if (String(state?.output || '').trim()) {
-    const name = state.name || extractOutputNameForTab(state.output || '') || 'Loaded Character';
+  } else {
+    const fallbackTab = forceSingleProject ? bestLoadedCharacterTabForSingleProject(state) : {};
+    const outputText = loadedOutputTextFromState(state, fallbackTab);
+    if (!outputText) return rows;
+    const name = state.name || fallbackTab.name || fallbackTab.focusName || extractOutputNameForTab(outputText) || 'Loaded Character';
     const outputTab = {
+      ...fallbackTab,
       name,
-      focusName: name,
+      focusName: fallbackTab.focusName || name,
       projectPath,
       workspaceProjectPath: projectPath,
-      output: state.output || '',
-      qaAnswers: state.qnaAnswers || state.qaAnswers || '',
-      emotionImages: Array.isArray(state.emotionImages) ? state.emotionImages : [],
-      generatedImages: Array.isArray(state.generatedImages) ? state.generatedImages : [],
-      cardImagePath: state.imagePath || state.cardImagePath || '',
+      output: outputText,
+      qaAnswers: loadedQaTextFromState(state, fallbackTab),
+      qnaAnswers: loadedQaTextFromState(state, fallbackTab),
+      emotionImages: loadedImageListFromState(state, 'emotionImages', fallbackTab),
+      generatedImages: loadedImageListFromState(state, 'generatedImages', fallbackTab),
+      cardImagePath: state.imagePath || state.cardImagePath || state?.workspace?.cardImagePath || state?.workspace?.imagePath || fallbackTab.cardImagePath || fallbackTab.imagePath || '',
     };
-    const conceptTab = makeConceptTabFromWorkspaceState(state, 0, name);
-    const manualTab = makeManualTabFromWorkspaceState(state, 0, name);
+    const conceptTab = makeConceptTabFromWorkspaceState(state, 0, name, { singleProject: forceSingleProject });
+    const manualTab = makeManualTabFromWorkspaceState(state, 0, name, { singleProject: forceSingleProject });
     if (projectPath) {
       conceptTab.projectPath = projectPath;
       conceptTab.workspaceProjectPath = projectPath;
@@ -1004,9 +1117,14 @@ function applyLoadedStateToExistingWorkspaceTab(index, row, state = {}) {
   return idx;
 }
 
-function appendLoadedStateToOutputTabs(state) {
-  const loadedRows = buildLinkedWorkspaceTabsFromLoadedState(state);
+function appendLoadedStateToOutputTabs(state, options = {}) {
+  const loadedRows = buildLinkedWorkspaceTabsFromLoadedState(state, options);
   const projectPath = canonicalWorkspaceProjectPath(state?.projectPath || '');
+  if (!loadedRows.length) {
+    setStatus('Loaded the project file, but no saved Full Text Output was found to restore.', 'error');
+    try { writeClientDebugEvent('browser_load_empty_output_rows', { projectPath, hasOutput: !!loadedOutputTextFromState(state, {}), tabCount: Array.isArray(state?.characterTabs) ? state.characterTabs.length : 0 }); } catch (_) {}
+    return;
+  }
 
   if (projectPath) {
     const existingIndex = findOpenWorkspaceTabByProjectPath(projectPath);
@@ -1043,8 +1161,15 @@ function appendLoadedStateToOutputTabs(state) {
 }
 
 function clearGenerationArtifacts(options = {}) {
-  const preserveConceptTab = options && options.preserveConceptTab ? JSON.parse(JSON.stringify(options.preserveConceptTab)) : null;
-  const preserveManualTab = options && options.preserveManualTab ? JSON.parse(JSON.stringify(options.preserveManualTab)) : null;
+  const preserveWorkspaceInputs = !!options.preserveWorkspaceInputs;
+  const activeIndex = Math.max(0, Number(activeOutputTabIndex || 0));
+
+  if (preserveWorkspaceInputs) {
+    captureActiveConceptTab();
+    captureActiveManualTab();
+    ensureLinkedWorkspaceTabs();
+  }
+
   lastQnaAnswers = '';
   currentBrowserDescription = '';
   currentCardRating = '';
@@ -1052,17 +1177,36 @@ function clearGenerationArtifacts(options = {}) {
   currentCardRatingDetails = [];
   currentCardRatingSourceHash = '';
   emotionImageState = [];
-  characterOutputTabs = [makeBlankOutputTab('Character')];
-  conceptWorkspaceTabs = [normaliseConceptTab(preserveConceptTab || makeBlankConceptTab('Concept 1'), preserveConceptTab?.name || 'Concept 1')];
-  manualGuideTabs = [normaliseManualTab(preserveManualTab || makeBlankManualTab('Manual 1'), preserveManualTab?.name || 'Manual 1')];
-  activeOutputTabIndex = 0;
-  activeConceptTabIndex = 0;
-  activeManualGuideTabIndex = 0;
+
+  if (preserveWorkspaceInputs) {
+    ensureLinkedWorkspaceTabs();
+    const current = characterOutputTabs[activeIndex] || makeBlankOutputTab(`Character ${activeIndex + 1}`);
+    characterOutputTabs[activeIndex] = {
+      ...makeBlankOutputTab(current.name || current.focusName || `Character ${activeIndex + 1}`),
+      projectPath: current.projectPath || current.workspaceProjectPath || '',
+      workspaceProjectPath: current.workspaceProjectPath || current.projectPath || '',
+    };
+    activeOutputTabIndex = activeIndex;
+    activeConceptTabIndex = activeIndex;
+    activeManualGuideTabIndex = activeIndex;
+  } else {
+    characterOutputTabs = [makeBlankOutputTab('Character')];
+    conceptWorkspaceTabs = [makeBlankConceptTab('Concept 1')];
+    manualGuideTabs = [makeBlankManualTab('Manual 1')];
+    activeOutputTabIndex = 0;
+    activeConceptTabIndex = 0;
+    activeManualGuideTabIndex = 0;
+    setTextareaValue('conceptText', '');
+    setTextareaValue('visionDescription', '');
+    setVisionImagePath('');
+    conceptAttachments = [];
+    manualGuideState = {};
+    manualGuidePageIndex = 0;
+  }
+
   setTextareaValue('qaAnswersText', '');
   setTextareaValue('outputText', '');
   setTextareaValue('followupText', '');
-  manualGuideState = JSON.parse(JSON.stringify(manualGuideTabs[0]?.state || {}));
-  manualGuidePageIndex = Number(manualGuideTabs[0]?.pageIndex || 0);
   const emotions = $('#emotionImages');
   if (emotions) emotions.innerHTML = '';
   const generated = $('#generatedImages');
@@ -1071,10 +1215,10 @@ function clearGenerationArtifacts(options = {}) {
   if (cardImage) cardImage.value = '';
   if (settings) settings.cardImagePath = '';
   renderAllWorkspaceTabRails();
-  applyActiveConceptTab();
-  applyActiveManualTab({ skipPreview: true });
-  renderConceptAttachments();
-  renderManualGuide();
+  if (!preserveWorkspaceInputs) {
+    renderConceptAttachments();
+    renderManualGuide();
+  }
 }
 
 window.ccfStreamUpdate = function(payload) {
@@ -1585,6 +1729,7 @@ function bindSubTabs() {
       if (panel) panel.classList.add('active');
       setTimeout(() => btn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }), 0);
       if (btn.dataset.subtab === 'output-debug') refreshDebugLog(true);
+      if (btn.dataset.subtab === 'output-relationships') refreshRelationshipMatrixOpenCharacterList();
       refreshSubtabScrollControls();
       updateAvailability();
     }));
@@ -1663,6 +1808,11 @@ function hydrateSettings() {
   const allowedTags = $('#allowedTags'); if (allowedTags) allowedTags.value = settings.allowedTags || '';
   const nsfwBrowserMode = $('#nsfwBrowserMode'); if (nsfwBrowserMode) nsfwBrowserMode.value = settings.nsfwBrowserMode || 'show';
   const nsfwTags = $('#nsfwTags'); if (nsfwTags) nsfwTags.value = settings.nsfwTags || 'NSFW';
+  const mobileServerEnabled = $('#mobileServerEnabled'); if (mobileServerEnabled) mobileServerEnabled.checked = !!settings.mobileServerEnabled;
+  const mobileServerHost = $('#mobileServerHost'); if (mobileServerHost) mobileServerHost.value = settings.mobileServerHost || '0.0.0.0';
+  const mobileServerPort = $('#mobileServerPort'); if (mobileServerPort) mobileServerPort.value = settings.mobileServerPort || 8787;
+  const mobileServerAccessCode = $('#mobileServerAccessCode'); if (mobileServerAccessCode) mobileServerAccessCode.value = settings.mobileServerAccessCode || '';
+  refreshMobileServerStatus(false);
   const ideaRandomMax = $('#ideaGeneratorRandomMaxChoices'); if (ideaRandomMax) ideaRandomMax.value = Math.max(1, Math.min(20, Number(settings.ideaGeneratorRandomMaxChoices || DEFAULT_IDEA_RANDOM_MAX_CHOICES)));
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
   renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
@@ -1676,6 +1826,9 @@ function hydrateSettings() {
   const exportFormat = ['chara_v2_png','chara_v2_json','markdown'].includes(settings.exportFormat) ? settings.exportFormat : 'chara_v2_png';
   $('#exportFormat').value = exportFormat;
   $('#cardImagePath').value = settings.cardImagePath || '';
+  if ($('#sdImageCount')) $('#sdImageCount').value = settings.sdImageCount || 4;
+  if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = settings.exportDestinationFolder || '';
+  updateCardImagePreview();
   $('#altCount').value = settings.alternateFirstMessages ?? 2;
   const firstCustomStyle = $('#firstCustomStyle'); if (firstCustomStyle) firstCustomStyle.value = settings.firstMessageCustomStyle || '';
   const firstCustomInstructions = $('#firstCustomInstructions'); if (firstCustomInstructions) firstCustomInstructions.value = settings.firstMessageCustomInstructions || '';
@@ -1744,7 +1897,7 @@ function extractOutputNameForTab(output) {
 function applyLoadedState(state, options = {}) {
   currentLoadedType = String(state?.loadedType || "");
   if (options && options.appendOutputTab) {
-    appendLoadedStateToOutputTabs(state);
+    appendLoadedStateToOutputTabs(state, options);
     updateImportedCardToolsHint();
     updateAvailability();
     return;
@@ -1752,16 +1905,19 @@ function applyLoadedState(state, options = {}) {
   if (!settings) settings = collectSettings();
 
   const savedTabs = Array.isArray(state.characterTabs)
-    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && String(tab.output || '').trim())
+    ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && loadedOutputTextFromTab(tab))
     : [];
 
   if (savedTabs.length) {
     characterOutputTabs = savedTabs.map((tab, idx) => ({
       ...makeBlankOutputTab(tab.name || tab.focusName || `Character ${idx + 1}`),
       ...tab,
-      name: tab.name || tab.focusName || extractOutputNameForTab(tab.output || '') || `Character ${idx + 1}`,
+      output: loadedOutputTextFromTab(tab),
+      fullTextOutput: loadedOutputTextFromTab(tab),
+      name: tab.name || tab.focusName || extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || `Character ${idx + 1}`,
       focusName: tab.focusName || tab.name || `Character ${idx + 1}`,
-      qaAnswers: tab.qaAnswers || tab.qnaAnswers || '',
+      qaAnswers: loadedQaTextFromTab(tab),
+      qnaAnswers: loadedQaTextFromTab(tab),
       cardImagePath: tab.cardImagePath || tab.imagePath || '',
       projectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || state.projectPath || ''),
       workspaceProjectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || state.projectPath || ''),
@@ -1769,10 +1925,11 @@ function applyLoadedState(state, options = {}) {
   } else {
     characterOutputTabs = [{
       ...makeBlankOutputTab(state.name || extractOutputNameForTab(state.output || '') || 'Character'),
-      output: state.output || '',
-      qaAnswers: state.qnaAnswers || state.qaAnswers || '',
-      emotionImages: Array.isArray(state.emotionImages) ? state.emotionImages : [],
-      generatedImages: Array.isArray(state.generatedImages) ? state.generatedImages : [],
+      output: loadedOutputTextFromState(state, {}),
+      qaAnswers: loadedQaTextFromState(state, {}),
+      qnaAnswers: loadedQaTextFromState(state, {}),
+      emotionImages: loadedImageListFromState(state, 'emotionImages', {}),
+      generatedImages: loadedImageListFromState(state, 'generatedImages', {}),
       cardImagePath: state.imagePath || state.cardImagePath || '',
       projectPath: canonicalWorkspaceProjectPath(state.projectPath || ''),
       workspaceProjectPath: canonicalWorkspaceProjectPath(state.projectPath || ''),
@@ -1782,7 +1939,7 @@ function applyLoadedState(state, options = {}) {
   conceptWorkspaceTabs = characterOutputTabs.map((tab, idx) => makeConceptTabFromWorkspaceState(state, idx, tab.name || `Concept ${idx + 1}`));
   manualGuideTabs = characterOutputTabs.map((tab, idx) => makeManualTabFromWorkspaceState(state, idx, tab.name || `Manual ${idx + 1}`));
 
-  const loadedIdx = Math.max(0, characterOutputTabs.findIndex(tab => String(tab.output || '').trim() === String(state.output || '').trim()));
+  const loadedIdx = Math.max(0, characterOutputTabs.findIndex(tab => loadedOutputTextFromTab(tab) === loadedOutputTextFromState(state, tab)));
   activeOutputTabIndex = loadedIdx >= 0 ? loadedIdx : 0;
   activeConceptTabIndex = activeOutputTabIndex;
   activeManualGuideTabIndex = activeOutputTabIndex;
@@ -2181,8 +2338,22 @@ function scheduleAutoModelTokenFetch() {
 }
 
 function collectSettings() {
-  const selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
-  const selectedCardMode = selectedSharedScenePolicy === 'split_cards' ? 'split_cards' : $('#cardMode').value;
+  // v1.0.6 critical fix: the Card Mode dropdown is the source of truth.
+  // Previously a stale hidden/shared-scene value of "split_cards" could force
+  // cardMode back to split even after the user changed Card Mode to Single.
+  // That caused normal single-card generations to split into multiple cards.
+  const rawCardMode = ($('#cardMode') ? $('#cardMode').value : 'single');
+  let selectedCardMode = ['single', 'multi', 'split_cards'].includes(rawCardMode) ? rawCardMode : 'single';
+  let selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
+  if (selectedCardMode === 'single') {
+    selectedSharedScenePolicy = 'ai_reconcile';
+  } else if (selectedCardMode === 'split_cards') {
+    selectedSharedScenePolicy = 'split_cards';
+  } else if (selectedSharedScenePolicy === 'split_cards') {
+    // Split is now represented by Card Mode itself. If the user changes back
+    // to multi-card-single-output, clear the stale split scene policy.
+    selectedSharedScenePolicy = 'ai_reconcile';
+  }
   return {
     apiBaseUrl: $('#apiBaseUrl').value.trim(),
     apiKey: $('#apiKey').value.trim(),
@@ -2216,12 +2387,14 @@ function collectSettings() {
     sdSteps: Number($('#sdSteps').value || 28),
     sdCfgScale: Number($('#sdCfgScale').value || 7),
     sdSampler: $('#sdSampler').value.trim() || 'Euler a',
+    sdImageCount: Math.max(1, Math.min(16, Number(($('#sdImageCount') ? $('#sdImageCount').value : 4) || 4))),
     mode: $('#modeSelect').value,
     cardMode: selectedCardMode,
     multiCharacterCount: Number($('#multiCharacterCount').value || 2),
     sharedScenePolicy: selectedSharedScenePolicy,
     frontend: 'front_porch',
-    exportFormat: $('#exportFormat').value || 'chara_v2_png',
+    exportFormat: ($('#exportFormat') ? $('#exportFormat').value : 'chara_v2_png') || 'chara_v2_png',
+    exportDestinationFolder: ($('#exportDestinationFolder') ? $('#exportDestinationFolder').value.trim() : ''),
     cardImagePath: $('#cardImagePath').value.trim(),
     firstMessageStyle: $('#firstStyle').value,
     firstMessageCustomStyle: ($('#firstCustomStyle') ? $('#firstCustomStyle').value.trim() : ''),
@@ -2234,6 +2407,10 @@ function collectSettings() {
     browserTagMerges: browserTagMerges || {},
     browserVirtualFolders: browserVirtualFolders || [],
     browserShowSubfolders: !!browserShowSubfolders,
+    mobileServerEnabled: !!($('#mobileServerEnabled') && $('#mobileServerEnabled').checked),
+    mobileServerHost: ($('#mobileServerHost') ? $('#mobileServerHost').value.trim() : '0.0.0.0') || '0.0.0.0',
+    mobileServerPort: Number(($('#mobileServerPort') ? $('#mobileServerPort').value : 8787) || 8787),
+    mobileServerAccessCode: ($('#mobileServerAccessCode') ? $('#mobileServerAccessCode').value.trim() : ''),
     recentModels: normalizeRecentModels(recentModels),
     ...collectIdeaSettingsEditorState(settings || {}),
   };
@@ -3347,6 +3524,11 @@ function bindActions() {
   $('#openUpdateRepoBtn')?.addEventListener('click', openUpdateRepositoryPage);
   $('#updateAvailableModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'updateAvailableModal') closeUpdateAvailableModal(); });
   $('#newCardOutputBtn').addEventListener('click', addBlankOutputTab);
+  $('#checkUpdatesBtn')?.addEventListener('click', () => checkForAppUpdates(true));
+  $('#generateRelationshipMatrixBtn')?.addEventListener('click', generateRelationshipMatrixForOpenCharacters);
+  $('#refreshRelationshipMatrixCharactersBtn')?.addEventListener('click', refreshRelationshipMatrixOpenCharacterList);
+  $('#copyRelationshipMatrixBtn')?.addEventListener('click', copyRelationshipMatrixToClipboard);
+  $('#relationshipMatrixText')?.addEventListener('input', () => { relationshipMatrixText = $('#relationshipMatrixText').value || ''; });
   $('#manualBackBtn')?.addEventListener('click', manualGuidePreviousPage);
   $('#manualNextBtn')?.addEventListener('click', manualGuideNextPage);
   $('#manualBuildOutputBtn')?.addEventListener('click', buildManualGuideIntoOutput);
@@ -3378,6 +3560,7 @@ function bindActions() {
     const res = await window.pywebview.api.save_settings(settings);
     if (res?.settings) settings = res.settings;
     hydrateSettings();
+    renderMobileServerStatus(res?.mobileServer || await window.pywebview.api.mobile_server_status());
     renderCharacterBrowser();
     if (res?.dataFolder && !res.dataFolder.ok) {
       alert('Settings saved, but data folder was not changed: ' + (res.dataFolder.error || 'Unknown error'));
@@ -3404,9 +3587,16 @@ function bindActions() {
       setStatus(err.message || String(err), 'error');
     }
   });
+  $('#mobileServerStatusBtn')?.addEventListener('click', () => refreshMobileServerStatus(true));
+  $('#mobileServerOpenBtn')?.addEventListener('click', openMobileServerPage);
+  $('#mobileServerEnabled')?.addEventListener('change', async () => { settings = collectSettings(); const res = await window.pywebview.api.save_settings(settings); if (res?.settings) settings = res.settings; renderMobileServerStatus(res?.mobileServer || await window.pywebview.api.mobile_server_status()); });
+  ['mobileServerHost','mobileServerPort','mobileServerAccessCode'].forEach(id => $('#'+id)?.addEventListener('input', () => { settings = collectSettings(); }));
   $('#scanFrontPorchBtn')?.addEventListener('click', () => scanFrontPorchFolder());
   $('#scanFrontPorchStableBtn')?.addEventListener('click', () => scanFrontPorchFolder('stable'));
   $('#scanFrontPorchBetaBtn')?.addEventListener('click', () => scanFrontPorchFolder('beta'));
+  $('#auditFrontPorchBtn')?.addEventListener('click', () => auditFrontPorchDatabase());
+  $('#auditFrontPorchStableBtn')?.addEventListener('click', () => auditFrontPorchDatabase('stable'));
+  $('#auditFrontPorchBetaBtn')?.addEventListener('click', () => auditFrontPorchDatabase('beta'));
   $('#fetchSdModelsBtn')?.addEventListener('click', fetchStableDiffusionModels);
   $('#firstStyle')?.addEventListener('change', () => { settings = collectSettings(); updateFirstMessageCustomVisibility(); updateAvailability(); });
   $('#firstCustomStyle')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
@@ -3414,7 +3604,18 @@ function bindActions() {
   $('#altStyleRows')?.addEventListener('input', () => { settings = collectSettings(); updateAvailability(); });
   $('#altStyleRows')?.addEventListener('change', () => { settings = collectSettings(); updateAvailability(); });
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
-  $('#cardMode').addEventListener('change', () => { settings = collectSettings(); if ($('#cardMode').value === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); } updateCardModeHint(); updateAvailability(); });
+  $('#cardMode').addEventListener('change', () => {
+    const mode = $('#cardMode')?.value || 'single';
+    if ($('#sharedScenePolicy')) {
+      if (mode === 'single') $('#sharedScenePolicy').value = 'ai_reconcile';
+      else if (mode === 'split_cards') $('#sharedScenePolicy').value = 'split_cards';
+      else if ($('#sharedScenePolicy').value === 'split_cards') $('#sharedScenePolicy').value = 'ai_reconcile';
+    }
+    settings = collectSettings();
+    if (mode === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); }
+    updateCardModeHint();
+    updateAvailability();
+  });
   $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
   $('#sharedScenePolicy')?.addEventListener('change', () => { if ($('#sharedScenePolicy')?.value === 'split_cards' && $('#cardMode')) $('#cardMode').value = 'split_cards'; settings = collectSettings(); updateAvailability(); updateMultiBuilderSelectors(false); });
   $('#builderGenerateBtn')?.addEventListener('click', generateBuilderDescription);
@@ -3520,22 +3721,38 @@ function bindActions() {
   $('#loadCardToConceptUrlMainBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#loadCardToConceptUrlModeBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#reviseBtn').addEventListener('click', reviseCard);
-  $('#loadSavedBtn').addEventListener('click', loadSavedCardOrProject);
+  $('#loadSavedBtn')?.addEventListener('click', loadSavedCardOrProject);
   $('#loadSavedUrlBtn')?.addEventListener('click', loadSavedCardOrProjectFromUrl);
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
   $('#clearLogBtn').addEventListener('click', clearDebugLog);
   $('#copyBtn').addEventListener('click', copyOutput);
-  $('#exportBtn').addEventListener('click', exportCard);
-  $('#selectImageBtn').addEventListener('click', selectCardImage);
+  $('#exportBtn')?.addEventListener('click', openExportModal);
+  $('#openExportModalBtn')?.addEventListener('click', openExportModal);
+  $('#closeExportModalBtn')?.addEventListener('click', closeExportModal);
+  $('#runExportCardBtn')?.addEventListener('click', exportCard);
+  $('#selectExportFolderBtn')?.addEventListener('click', selectExportFolder);
+  $('#openQuickImportModalBtn')?.addEventListener('click', openQuickImportModal);
+  $('#closeQuickImportModalBtn')?.addEventListener('click', closeQuickImportModal);
+  $('#runQuickImportBtn')?.addEventListener('click', runQuickImport);
+  $('#clearQuickImportSourceBtn')?.addEventListener('click', clearQuickImportSource);
+  $('#quickImportFileInput')?.addEventListener('change', handleQuickImportFileSelected);
+  $('#openCardImageModalBtn')?.addEventListener('click', openCardImageModal);
+  $('#closeCardImageModalBtn')?.addEventListener('click', closeCardImageModal);
+  $('#applyCardImagePathBtn')?.addEventListener('click', applyCardImageModalPath);
+  $('#selectImageBtn')?.addEventListener('click', selectCardImage);
   $('#cardImageUrlBtn')?.addEventListener('click', importCardImageUrl);
-  $('#generateImagesBtn').addEventListener('click', generateSdImages);
+  $('#generateImagesBtn')?.addEventListener('click', generateSdImages);
   $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
   $('#generateSdPromptFromOutputBtn')?.addEventListener('click', generateSdPromptFromLoadedOutput);
   $('#generateEmotionImagesBtn').addEventListener('click', generateEmotionImages);
   $('#zipEmotionImagesBtn').addEventListener('click', createEmotionZip);
   $('#selectAllEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = true); });
   $('#clearEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = false); });
-  $('#clearImageBtn').addEventListener('click', () => { $('#cardImagePath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
+  $('#clearImageBtn')?.addEventListener('click', () => { $('#cardImagePath').value = ''; if ($('#cardImageModalPath')) $('#cardImageModalPath').value = ''; settings = collectSettings(); window.pywebview.api.save_settings(settings); updateCardImagePreview(); updateImportedCardToolsHint(); setStatus('Card image cleared. PNG export will use the built-in blank image.', 'ok'); });
+  $('#cardImagePath')?.addEventListener('input', () => { settings = collectSettings(); if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value.trim(); updateCardImagePreview(); updateAvailability(); });
+  $('#quickImportPath')?.addEventListener('input', () => { syncQuickImportUrlFromInput(); updateQuickImportSelected(); });
+  $('#quickImportPath')?.addEventListener('paste', () => { setTimeout(() => { syncQuickImportUrlFromInput(); updateQuickImportSelected(); }, 0); });
+  $('#sdImageCount')?.addEventListener('input', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
   $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
   $('#attachConceptUrlBtn')?.addEventListener('click', attachConceptUrl);
@@ -3543,7 +3760,7 @@ function bindActions() {
   // Hidden file inputs remain as an emergency browser fallback, but normal flow uses KDE/Zenity native dialogs from the backend.
   $('#conceptAttachmentInput').addEventListener('change', handleConceptAttachmentFiles);
   $('#visionFileInput').addEventListener('change', handleVisionFileSelected);
-  $('#cardImageFileInput').addEventListener('change', handleCardImageFileSelected);
+  $('#cardImageFileInput')?.addEventListener('change', handleCardImageFileSelected);
   $('#savedFileInput').addEventListener('change', handleSavedFileSelected);
   $('#builderCardFileInput')?.addEventListener('change', handleBuilderCardFileSelected);
   $('#conceptCardFileInput')?.addEventListener('change', handleConceptCardFileSelected);
@@ -3559,7 +3776,8 @@ function bindActions() {
   bindDropZone('savedFileDropZone', { inputId: 'savedFileInput', onFiles: importSavedFiles, onClick: loadSavedCardOrProject });
   bindDropZone('builderCardDropZoneMode', { inputId: 'builderCardFileInput', onFiles: importBuilderCardFiles, onClick: loadCardToBuildersNative });
   bindDropZone('conceptCardDropZoneMode', { inputId: 'conceptCardFileInput', onFiles: importCardToMainConceptFiles, onClick: loadCardToMainConceptNative });
-  bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles, onClick: selectCardImage });
+  bindDropZone('cardImageDropZone', { inputId: 'cardImageFileInput', onFiles: importCardImageFiles, onPaths: importCardImagePaths, onClick: () => openBrowserFileInput('cardImageFileInput', 'card image'), preferInputOnClick: true });
+  bindDropZone('quickImportDropZone', { inputId: 'quickImportFileInput', onFiles: importQuickImportFiles, onPaths: importQuickImportPaths, onClick: () => openBrowserFileInput('quickImportFileInput', 'card or project'), preferInputOnClick: true });
   bindConceptImportDropZone();
   enhanceBuilderAiButtons();
   populateBuilderPresets();
@@ -5189,10 +5407,18 @@ function buildConceptForModel() {
   const attachmentText = buildAttachmentTextForModel();
   const parts = [];
   const hasBuilder = !!builderGuidance.hasAny;
-  if (hasBuilder) {
-    parts.push('BUILDER PRIORITY RULE — if Main Concept, attachments, or Vision reference conflict with any Builder guidance below, the Builder guidance wins. Treat Builder guidance as the newest and most intentional version. Do not let older concept text override it.');
+  if (concept) {
+    parts.push([
+      'MAIN CONCEPT — AUTHORITATIVE USER SOURCE. Preserve these named characters, relationships, premise, scenario hook, visual details, clothing/props, captions/messages, and any explicit First Message/Greeting beats.',
+      'Clean up and expand the idea, but do not replace it with another character, different relationship, unrelated scenario, or stale builder/workspace content.',
+      concept
+    ].join('\n'));
   }
-  if (concept) parts.push(concept);
+  if (hasBuilder) {
+    parts.push(concept
+      ? 'BUILDER SUPPLEMENT RULE — builder guidance below may fill in missing details or refine compatible fields, but it must never override explicit Main Concept facts, names, relationships, outfit, scenario, First Message, or temporary generation notes. If it conflicts, ignore the builder detail.'
+      : 'BUILDER PRIORITY RULE — no Main Concept was entered, so builder guidance is the primary source for this generation.');
+  }
   if (attachmentText) parts.push(attachmentText);
   if (visual) {
     parts.push([
@@ -5269,8 +5495,8 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
   const conceptTab = conceptWorkspaceTabs[tabIndex] || conceptWorkspaceTabs[activeConceptTabIndex] || makeBlankConceptTab(`Concept ${tabIndex + 1}`);
   const isActiveOutput = tabIndex === activeOutputTabIndex;
   const isActiveConcept = tabIndex === activeConceptTabIndex;
-  const tabOutput = isActiveOutput ? ($('#outputText')?.value || '') : (tab?.output || '');
-  const tabQa = isActiveOutput ? (($('#qaAnswersText')?.value || lastQnaAnswers || '')) : (tab?.qaAnswers || '');
+  const tabOutput = isActiveOutput ? ($('#outputText')?.value || '') : loadedOutputTextFromTab(tab || {});
+  const tabQa = isActiveOutput ? (($('#qaAnswersText')?.value || lastQnaAnswers || '')) : loadedQaTextFromTab(tab || {});
   const tabEmotions = isActiveOutput ? (emotionImageState || []) : (Array.isArray(tab?.emotionImages) ? tab.emotionImages : []);
   const tabGenerated = Array.isArray(tab?.generatedImages) ? tab.generatedImages : [];
   const tabImage = String(isActiveOutput ? ($('#cardImagePath')?.value || tab?.cardImagePath || '') : (tab?.cardImagePath || '')).trim();
@@ -5285,6 +5511,30 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
   const payloadSettings = { ...(baseSettings || settings || {}) };
   payloadSettings.cardImagePath = tabImage;
   payloadSettings.visionImagePath = isActiveConcept ? ($('#visionImagePath')?.value || '') : (conceptTab?.visionImagePath || '');
+  const outputTabForProject = {
+    ...(tab || {}),
+    name: tabName || `Character ${tabIndex + 1}`,
+    focusName: tab?.focusName || tabName || `Character ${tabIndex + 1}`,
+    output: tabOutput,
+    qaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
+    qnaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
+    emotionImages: tabEmotions,
+    generatedImages: tabGenerated,
+    cardImagePath: tabImage,
+    imagePath: tabImage,
+    projectPath: canonicalWorkspaceProjectPath(tab?.projectPath || tab?.workspaceProjectPath || ''),
+    workspaceProjectPath: canonicalWorkspaceProjectPath(tab?.workspaceProjectPath || tab?.projectPath || ''),
+  };
+  const conceptTabForProject = normaliseConceptTab({
+    ...(conceptTab || {}),
+    name: tabName || conceptTab?.name || `Concept ${tabIndex + 1}`,
+    concept: conceptValue,
+    visionDescription: visionDescriptionValue,
+    visionImagePath: payloadSettings.visionImagePath || '',
+    conceptAttachments: conceptAttachmentsValue,
+    builderState: builderStateValue,
+  }, tabName || `Concept ${tabIndex + 1}`);
+  const manualTabForProject = normaliseManualTab(manualGuideTabs[tabIndex] || {}, tabName || `Manual ${tabIndex + 1}`);
   return {
     concept: conceptValue,
     output: tabOutput,
@@ -5307,11 +5557,11 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
     cardRatingSourceHash: isActiveOutput ? (currentCardRatingSourceHash || '') : '',
     name: tabName || `Character ${tabIndex + 1}`,
     projectPath: canonicalWorkspaceProjectPath(tab?.projectPath || tab?.workspaceProjectPath || ''),
-    characterTabs: tabs || [],
-    conceptTabs: conceptWorkspaceTabs || [],
-    activeConceptTabIndex: tabIndex,
-    manualTabs: manualGuideTabs || [],
-    activeManualGuideTabIndex: tabIndex,
+    characterTabs: [outputTabForProject],
+    conceptTabs: [conceptTabForProject],
+    activeConceptTabIndex: 0,
+    manualTabs: [manualTabForProject],
+    activeManualGuideTabIndex: 0,
     splitTabIndex: tabIndex,
     splitTabCount: tabs.length,
   };
@@ -5392,6 +5642,77 @@ async function generateSdPromptFromLoadedVision() {
     setStatus(err.message || String(err), 'error');
   } finally {
     setBusy('');
+  }
+}
+
+
+function collectOpenCharactersForRelationshipMatrix(options = {}) {
+  // Relationship Matrix must be read-only during normal tab rendering/load.
+  // Beta7 accidentally captured the active editor DOM while the loaded tab rail
+  // was being rendered, before the loaded output was applied to the textarea.
+  // That overwrote freshly loaded tabs with the previous/blank editor state.
+  // Only capture on an explicit Generate/Copy-style action where the user may
+  // have unsaved edits in the visible Output textarea.
+  if (options.captureCurrent) captureActiveOutputTab();
+  if (options.ensureTabs) ensureLinkedWorkspaceTabs();
+  return (characterOutputTabs || [])
+    .map((tab, idx) => ({
+      name: cleanOutputTabName(tab?.name || tab?.focusName || extractOutputNameForTab(tab?.output || '') || `Character ${idx + 1}`),
+      output: String(tab?.output || '').trim(),
+      index: idx + 1,
+    }))
+    .filter(item => item.output);
+}
+
+function refreshRelationshipMatrixOpenCharacterList() {
+  const holder = $('#relationshipMatrixOpenCharacters');
+  if (!holder) return;
+  const chars = collectOpenCharactersForRelationshipMatrix();
+  if (!chars.length) {
+    holder.innerHTML = '<div class="empty small">No generated characters are open yet.</div>';
+    return;
+  }
+  holder.innerHTML = chars.map(c => `<span class="tag-pill">${escapeHtml(c.name)}</span>`).join('');
+}
+
+function applyRelationshipMatrixText(value) {
+  relationshipMatrixText = String(value || '');
+  const box = $('#relationshipMatrixText');
+  if (box) box.value = relationshipMatrixText;
+}
+
+async function generateRelationshipMatrixForOpenCharacters() {
+  if (isInterfaceLocked()) return;
+  const chars = collectOpenCharactersForRelationshipMatrix({ captureCurrent: true, ensureTabs: true });
+  refreshRelationshipMatrixOpenCharacterList();
+  if (chars.length < 2) {
+    setStatus('Open or generate at least two characters before generating a relationship matrix.', 'error');
+    return;
+  }
+  settings = collectSettings();
+  const missing = validateTextApiSettings(settings);
+  if (missing) { setStatus(missing, 'error'); switchToSettingsTab(); return; }
+  setBusy('RELATIONSHIP MATRIX — analyzing open characters…');
+  try {
+    const res = await window.pywebview.api.generate_relationship_matrix(chars, settings);
+    if (!res.ok) throw new Error(res.error || 'Relationship matrix generation failed.');
+    applyRelationshipMatrixText(res.matrix || '');
+    setStatus(`Generated relationship matrix for ${chars.length} open character${chars.length === 1 ? '' : 's'}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function copyRelationshipMatrixToClipboard() {
+  const text = ($('#relationshipMatrixText')?.value || relationshipMatrixText || '').trim();
+  if (!text) { setStatus('No relationship matrix to copy yet.', 'error'); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus('Relationship matrix copied to clipboard.', 'ok');
+  } catch (_) {
+    setStatus('Could not access clipboard. Select the matrix text and copy manually.', 'warn');
   }
 }
 
@@ -7291,7 +7612,7 @@ async function loadSelectedCharacterWorkspace() {
   try {
     const res = await window.pywebview.api.load_character_project(selectedCharacterProjectPath);
     if (!res.ok) throw new Error(res.error || 'Could not load character project.');
-    applyLoadedState(res, { appendOutputTab: true });
+    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
     updateAvailability();
     setStatus(res.message || 'Character workspace loaded into a new Output / Editor tab.', 'ok');
   } catch (err) {
@@ -7331,6 +7652,50 @@ async function zipSelectedCharacterEmotions() {
 }
 
 
+function renderMobileServerStatus(res) {
+  const el = $('#mobileServerStatusText');
+  if (!el) return;
+  if (!res || res.ok === false) {
+    el.textContent = `Mobile server status unavailable${res?.error ? ': ' + res.error : '.'}`;
+    return;
+  }
+  if (!res.running) {
+    el.textContent = 'Mobile server is not running. Enable it and save settings to start it.';
+    return;
+  }
+  const urls = Array.isArray(res.urls) && res.urls.length ? res.urls : [`http://${res.host || '127.0.0.1'}:${res.port || 8787}/mobile.html`];
+  el.innerHTML = `Running at ${urls.map(url => `<code>${escapeHtml(url)}</code>`).join(' or ')}${res.authRequired ? '<br><span class="muted">Access code is required for mobile generation.</span>' : ''}`;
+}
+
+async function refreshMobileServerStatus(showToast = true) {
+  try {
+    if (!window.pywebview?.api?.mobile_server_status) return;
+    const res = await window.pywebview.api.mobile_server_status();
+    renderMobileServerStatus(res);
+    if (showToast) setStatus(res.running ? 'Mobile server is running.' : 'Mobile server is stopped.', res.running ? 'ok' : '');
+  } catch (err) {
+    renderMobileServerStatus({ ok: false, error: err.message || String(err) });
+  }
+}
+
+async function openMobileServerPage() {
+  try {
+    settings = collectSettings();
+    let res = await window.pywebview.api.mobile_server_status();
+    if (!res?.running) {
+      res = await window.pywebview.api.start_mobile_server(settings);
+      if (res?.ok === false) throw new Error(res.error || 'Could not start mobile server.');
+      if (settings) settings.mobileServerEnabled = true;
+      const enabled = $('#mobileServerEnabled'); if (enabled) enabled.checked = true;
+    }
+    renderMobileServerStatus(res);
+    const url = (Array.isArray(res.urls) && res.urls[0]) ? res.urls[0] : `http://127.0.0.1:${res.port || settings.mobileServerPort || 8787}/mobile.html`;
+    await window.pywebview.api.open_external_url(url);
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  }
+}
+
 async function scanFrontPorchFolder(targetOverride = null) {
   settings = collectSettings();
   const target = targetOverride || settings.frontPorchExportTarget || 'stable';
@@ -7346,6 +7711,73 @@ async function scanFrontPorchFolder(targetOverride = null) {
     const res = await window.pywebview.api.scan_front_porch_folder(scanSettings);
     if (!res.ok) throw new Error(res.error || 'Could not find Front Porch database.');
     setStatus(`${res.targetLabel || label} found: ${res.databaseName} — Characters folder: ${res.charactersDir}`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function formatFrontPorchAuditReport(res) {
+  const lines = [];
+  const target = res?.targetLabel || res?.target || 'Front Porch';
+  lines.push(`${target} Front Porch database audit`);
+  lines.push('');
+  lines.push(`Database: ${res?.database || 'Unknown'}`);
+  lines.push(`KoboldManager: ${res?.koboldManager || 'Unknown'}`);
+  lines.push(`Characters folder: ${res?.charactersDir || 'Unknown'}`);
+  if (Number.isFinite(res?.characterCount)) lines.push(`Existing characters: ${res.characterCount}`);
+  lines.push('');
+  lines.push(`Errors: ${res?.errorCount || 0}`);
+  lines.push(`Warnings: ${res?.warningCount || 0}`);
+  if (res?.insertRollbackTest) {
+    const test = res.insertRollbackTest;
+    lines.push(`Rollback insert test: ${test.ok ? 'PASSED' : 'FAILED'}${test.cleaned ? ' / temporary rows verified deleted' : ''}`);
+  }
+
+  const addItems = (title, items) => {
+    if (!items || !items.length) return;
+    lines.push('');
+    lines.push(title);
+    for (const item of items.slice(0, 20)) {
+      const table = item.table ? `[${item.table}] ` : '';
+      lines.push(`- ${table}${item.message || String(item)}`);
+    }
+    if (items.length > 20) lines.push(`- ...and ${items.length - 20} more.`);
+  };
+
+  addItems('Errors', res?.errors || []);
+  addItems('Warnings', res?.warnings || []);
+  addItems('Info', res?.info || []);
+
+  if (res?.tables && Object.keys(res.tables).length) {
+    lines.push('');
+    lines.push('Tables checked');
+    for (const [table, info] of Object.entries(res.tables)) {
+      lines.push(`- ${table}: ${info.columnCount || (info.columns || []).length} columns`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function auditFrontPorchDatabase(targetOverride = null) {
+  settings = collectSettings();
+  const target = targetOverride || settings.frontPorchExportTarget || 'stable';
+  const auditSettings = { ...settings, frontPorchExportTarget: target };
+  auditSettings.frontPorchDataFolder = target === 'beta' ? (settings.frontPorchBetaDataFolder || '') : (settings.frontPorchStableDataFolder || '');
+  const label = target === 'beta' ? 'Beta Front Porch' : 'Stable Front Porch';
+  setBusy(`AUDITING ${label.toUpperCase()} DATABASE…`);
+  try {
+    await window.pywebview.api.save_settings(settings);
+    const res = await window.pywebview.api.audit_front_porch_database(auditSettings);
+    if (!res.ok && res.error) throw new Error(res.error);
+    const report = formatFrontPorchAuditReport(res);
+    alert(report);
+    if (res.ok) {
+      setStatus(`${label} database audit passed: ${res.errorCount || 0} errors, ${res.warningCount || 0} warnings.`, 'ok');
+    } else {
+      setStatus(`${label} database audit found ${res.errorCount || 0} error(s) and ${res.warningCount || 0} warning(s).`, 'error');
+    }
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -8279,7 +8711,7 @@ function applyGenerationOptionsToConcept(concept, options={}) {
   const parts = [String(concept || '').trim()].filter(Boolean);
   const notes = String(options.temporaryNotes || '').trim();
   if (notes) {
-    parts.push(['TEMPORARY GENERATION NOTES FOR THIS CARD ONLY — use these as one-off direction. Do not create a separate section for them unless the template already asks for it:', notes].join('\n'));
+    parts.push(['TEMPORARY GENERATION NOTES FOR THIS CARD ONLY — MANDATORY. These notes clarify the current card and must be preserved. They override generic assumptions and stale builder/workspace context. Do not create a separate section for them unless the template already asks for it:', notes].join('\n'));
   }
   return parts.join('\n\n');
 }
@@ -8320,28 +8752,28 @@ async function generateCard(options = {}) {
   if ((options.customQaQuestions || []).length) options.runQa = true;
   if (!handleUnbuiltBuilderWarning()) return;
   captureActiveConceptTab();
-  captureActiveManualTab();
-  const preservedConceptTab = conceptWorkspaceTabs[activeConceptTabIndex] ? JSON.parse(JSON.stringify(conceptWorkspaceTabs[activeConceptTabIndex])) : makeBlankConceptTab('Concept 1');
-  const preservedManualTab = manualGuideTabs[activeManualGuideTabIndex] ? JSON.parse(JSON.stringify(manualGuideTabs[activeManualGuideTabIndex])) : makeBlankManualTab('Manual 1');
   const conceptForModel = applyGenerationOptionsToConcept(buildConceptForModel(), options);
   if (!String(conceptForModel || '').trim()) {
     setStatus('Enter a character concept first.', 'error');
-    $$('.nav').forEach(b => b.classList.remove('active'));
-    $$('.tab').forEach(t => t.classList.remove('active'));
-    $('[data-tab="concept"]')?.classList.add('active');
-    $('#concept')?.classList.add('active');
-    switchSubTab('concept', 'concept-main');
     return;
   }
-  clearGenerationArtifacts({ preserveConceptTab: preservedConceptTab, preserveManualTab: preservedManualTab });
+  clearGenerationArtifacts({ preserveWorkspaceInputs: true });
   setStatus('Starting generation…', '');
   $$('.nav').forEach(b => b.classList.remove('active'));
   $$('.tab').forEach(t => t.classList.remove('active'));
-  $('[data-tab="output"]').classList.add('active');
-  $('#output').classList.add('active');
+  $('[data-tab="output"]')?.classList.add('active');
+  $('#output')?.classList.add('active');
   switchSubTab('output', 'output-fulltext');
   await rememberCurrentModel(true);
   settings = collectSettings();
+  const liveCardMode = ($('#cardMode') ? $('#cardMode').value : settings.cardMode || 'single');
+  if (['single', 'multi', 'split_cards'].includes(liveCardMode) && settings.cardMode !== liveCardMode) {
+    // Last-line defence against stale saved/shared-scene state changing the
+    // generation route. The visible Card Mode control wins.
+    settings.cardMode = liveCardMode;
+    if (liveCardMode === 'single') settings.sharedScenePolicy = 'ai_reconcile';
+    if (liveCardMode === 'split_cards') settings.sharedScenePolicy = 'split_cards';
+  }
   const settingsError = validateTextApiSettings(settings);
   if (settingsError) {
     setBusy('');
@@ -8410,7 +8842,7 @@ async function generateCard(options = {}) {
     lastQnaAnswers = res.qaAnswers || qaAnswers || '';
     const qaBox = $('#qaAnswersText');
     if (qaBox) qaBox.value = lastQnaAnswers || 'Q&A was disabled or returned no answers for this generation.';
-    setCharacterOutputTabs([{ name: extractOutputNameForTab(res.output) || (settings.cardMode === 'multi' ? 'Characters' : 'Character'), output: res.output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '', conceptTab: preservedConceptTab, manualTab: preservedManualTab }]);
+    setCharacterOutputTabs([{ name: extractOutputNameForTab(res.output) || (settings.cardMode === 'multi' ? 'Characters' : 'Character'), output: res.output, qaAnswers: lastQnaAnswers, emotionImages: [], generatedImages: [], cardImagePath: '' }]);
     updateAvailability();
     const backupMsg = describeBackupInfo(res.backupInfo, 'character_generation');
     if (res.backupInfo?.used) {
@@ -8487,6 +8919,7 @@ async function selectCardImage() {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateCardImagePreview();
     updateImportedCardToolsHint();
     setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
@@ -8508,6 +8941,34 @@ async function importCardImageFiles(files) {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateCardImagePreview();
+    updateImportedCardToolsHint();
+    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+async function importCardImagePaths(paths) {
+  const path = String([...(paths || [])][0] || '').trim();
+  if (!path) return;
+  if (isProbablyUrl(path)) {
+    if ($('#cardImageModalPath')) $('#cardImageModalPath').value = path;
+    await applyCardImageModalPath();
+    return;
+  }
+  setBusy('IMPORTING CARD IMAGE…');
+  try {
+    const res = await window.pywebview.api.import_image_path(path, 'card');
+    if (!res.ok) throw new Error(res.error || 'Card image import failed.');
+    $('#cardImagePath').value = res.path;
+    if ($('#cardImageModalPath')) $('#cardImageModalPath').value = res.path;
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateCardImagePreview();
     updateImportedCardToolsHint();
     setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
@@ -8530,6 +8991,7 @@ async function importCardImageUrl() {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     if (hasOutput()) await saveCurrentWorkspace('silent');
+    updateCardImagePreview();
     updateImportedCardToolsHint();
     setStatus('Selected card image from URL: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
   } catch (err) {
@@ -8550,14 +9012,15 @@ async function generateSdImages() {
   settings = collectSettings();
   await window.pywebview.api.save_settings(settings);
   if (!hasStableDiffusionPrompt()) { setStatus('No Stable Diffusion prompt found. Add a Positive Prompt line or raw comma-separated tags under Stable Diffusion Prompt.', 'error'); return; }
-  setBusy('GENERATING 4 SD IMAGES — SD Forge / Automatic1111 is working…');
-  setStatus('Generating 4 images in SD Forge / Automatic1111 at 1024×1024…', '');
+  const imageCount = Math.max(1, Math.min(16, Number(settings.sdImageCount || 4)));
+  setBusy(`GENERATING ${imageCount} SD IMAGE${imageCount === 1 ? '' : 'S'} — SD Forge / Automatic1111 is working…`);
+  setStatus(`Generating ${imageCount} image${imageCount === 1 ? '' : 's'} in SD Forge / Automatic1111 at 1024×1024…`, '');
   try {
     const res = await window.pywebview.api.generate_sd_images($('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Image generation failed.');
     if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].generatedImages = res.images || [];
     renderGeneratedImages(res.images || []);
-    setStatus('Generated 4 image candidates. Select the one you like, delete rejects, or regenerate.', 'ok');
+    setStatus(`Generated ${res.images?.length || imageCount} image candidate${(res.images?.length || imageCount) === 1 ? '' : 's'}. Select the one you like, delete rejects, or regenerate.`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -8586,6 +9049,7 @@ function renderGeneratedImages(images) {
       await window.pywebview.api.save_settings(settings);
       if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = img.path;
       if (hasOutput()) await saveCurrentWorkspace('silent');
+      updateCardImagePreview();
       setStatus('Selected generated image for Character Card V2 PNG export' + (hasOutput() ? ' and updated the saved workspace.' : '.'), 'ok');
     });
     $('.delete-generated', card).addEventListener('click', async () => {
@@ -8599,6 +9063,7 @@ function renderGeneratedImages(images) {
         $('#cardImagePath').value = '';
         settings = collectSettings();
         await window.pywebview.api.save_settings(settings);
+        updateCardImagePreview();
       }
       setStatus('Deleted generated image.', 'ok');
     });
@@ -8724,7 +9189,7 @@ async function loadSavedCardOrProject() {
       if (!res.cancelled) throw new Error(res.error || 'Load failed.');
       return;
     }
-    applyLoadedState(res, { appendOutputTab: true });
+    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
     updateAvailability();
     let statusMessage = res.message || 'Loaded saved card/project into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
@@ -8752,7 +9217,7 @@ async function importSavedFiles(files) {
     const dataUrl = await fileToDataUrl(file);
     const res = await window.pywebview.api.load_import_upload(file.name, dataUrl);
     if (!res.ok) throw new Error(res.error || 'Load failed.');
-    applyLoadedState(res, { appendOutputTab: true });
+    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
     updateAvailability();
     let statusMessage = res.message || 'Loaded saved card/project into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
@@ -8782,7 +9247,7 @@ async function loadSavedCardOrProjectFromUrl() {
   try {
     const res = await window.pywebview.api.load_import_url(url);
     if (!res.ok) throw new Error(res.error || 'Load URL failed.');
-    applyLoadedState(res, { appendOutputTab: true });
+    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
     updateAvailability();
     let statusMessage = res.message || 'Loaded saved card/project from URL into a new Output / Editor tab.';
     if (!/project/i.test(String(res.loadedType || ''))) {
@@ -8799,6 +9264,284 @@ async function loadSavedCardOrProjectFromUrl() {
   } finally {
     setBusy('');
   }
+}
+
+
+function openQuickImportModal() {
+  if (isInterfaceLocked()) return;
+  const modal = $('#quickImportModal');
+  if (!modal) { loadSavedCardOrProject(); return; }
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  updateQuickImportSelected();
+}
+
+function closeQuickImportModal() {
+  const modal = $('#quickImportModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function syncQuickImportUrlFromInput(value = null) {
+  const input = $('#quickImportPath');
+  const raw = value !== null ? value : (input ? input.value : '');
+  quickImportUrlValue = String(raw || '').trim();
+  if (input && value !== null) input.value = String(raw || '');
+  return quickImportUrlValue;
+}
+
+function updateQuickImportSelected() {
+  const holder = $('#quickImportSelected');
+  if (!holder) return;
+  const value = syncQuickImportUrlFromInput();
+  if (quickImportFile) holder.textContent = `Selected file: ${quickImportFile.name || 'file'}${value && isProbablyUrl(value) ? ' + URL also entered; URL will be used first.' : ''}`;
+  else if (value) holder.textContent = isProbablyUrl(value) ? `Selected URL: ${value}` : `Selected path/text: ${value}`;
+  else holder.textContent = 'No file or URL selected.';
+}
+
+function clearQuickImportSource() {
+  quickImportFile = null;
+  quickImportUrlValue = '';
+  const input = $('#quickImportPath');
+  if (input) input.value = '';
+  const fileInput = $('#quickImportFileInput');
+  if (fileInput) fileInput.value = '';
+  updateQuickImportSelected();
+}
+
+function setQuickImportFile(file) {
+  if (!file) return;
+  quickImportFile = file;
+  const input = $('#quickImportPath');
+  if (input && !isProbablyUrl(input.value || '')) input.value = file.name || '';
+  quickImportUrlValue = '';
+  updateQuickImportSelected();
+}
+
+async function importQuickImportFiles(files) {
+  const file = [...(files || [])][0];
+  if (!file) return;
+  setQuickImportFile(file);
+}
+
+async function importQuickImportPaths(paths) {
+  const path = String([...(paths || [])][0] || '').trim();
+  if (!path) return;
+  quickImportFile = null;
+  const input = $('#quickImportPath');
+  if (input) input.value = path;
+  quickImportUrlValue = path;
+  updateQuickImportSelected();
+}
+
+function handleQuickImportFileSelected(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  setQuickImportFile(file);
+}
+
+function quickImportSdMode() {
+  return getCheckedRadioValue('quickImportSdMode', 'none');
+}
+
+function ensureEmptyStableDiffusionPromptSection() {
+  const out = $('#outputText');
+  if (!out) return;
+  const text = String(out.value || '').trimEnd();
+  if (/^\s*Stable Diffusion Prompt\s*$/im.test(text) || /Positive Prompt\s*:/i.test(text)) return;
+  const block = '------------------------------------------------\nStable Diffusion Prompt\n\nPositive Prompt:\nNegative Prompt:';
+  out.value = text ? `${text}\n\n${block}` : block;
+}
+
+async function runQuickImport() {
+  if (isInterfaceLocked()) return;
+  syncQuickImportUrlFromInput();
+  updateQuickImportSelected();
+  const sourceText = String(quickImportUrlValue || '').trim();
+  const url = sourceText && isProbablyUrl(sourceText) ? sourceText : '';
+  const localPath = sourceText && !url ? sourceText : '';
+  const file = quickImportFile;
+  if (!url && !localPath && !file) { setStatus('Choose a file or enter a card path/URL first.', 'error'); return; }
+  settings = collectSettings();
+  setBusy(url ? 'IMPORTING CARD FROM URL…' : (localPath ? 'IMPORTING CARD FROM PATH…' : 'IMPORTING CARD FROM FILE…'));
+  try {
+    let res;
+    if (url) {
+      res = await window.pywebview.api.load_import_url(url);
+    } else if (localPath) {
+      res = await window.pywebview.api.load_import_path(localPath);
+    } else {
+      const dataUrl = await fileToDataUrl(file);
+      res = await window.pywebview.api.load_import_upload(file.name, dataUrl);
+    }
+    if (!res.ok) throw new Error(res.error || 'Import failed.');
+    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
+    updateAvailability();
+    let statusMessage = res.message || 'Imported card/project into a new Output / Editor tab.';
+    if (!/project/i.test(String(res.loadedType || ''))) {
+      const imported = await importCurrentOutputToBrowser(false);
+      if (imported?.ok) statusMessage += ' Imported into Character Browser.';
+    }
+
+    const mode = quickImportSdMode();
+    if (mode === 'vision') {
+      setBusy('IMPORT CARD — generating Stable Diffusion Prompt from image…');
+      await generateSdPromptFromLoadedVision();
+      statusMessage += ' Stable Diffusion Prompt generated from image.';
+    } else if (mode === 'full_text') {
+      setBusy('IMPORT CARD — generating Stable Diffusion Prompt from full text…');
+      await generateSdPromptFromLoadedOutput();
+      statusMessage += ' Stable Diffusion Prompt generated from full text.';
+    } else {
+      ensureEmptyStableDiffusionPromptSection();
+      await saveCurrentWorkspace('silent');
+      statusMessage += ' Stable Diffusion Prompt section left empty for manual editing.';
+    }
+    closeQuickImportModal();
+    setStatus(statusMessage, 'ok');
+    switchSubTab('output', 'output-export');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+    updateCardImagePreview();
+    updateImportedCardToolsHint();
+  }
+}
+
+function openExportModal() {
+  if (isInterfaceLocked()) return;
+  const modal = $('#exportCardModal');
+  if (!modal) { exportCard(); return; }
+  if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = settings?.exportDestinationFolder || '';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeExportModal() {
+  const modal = $('#exportCardModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function selectExportFolder() {
+  if (isInterfaceLocked()) return;
+  if (!window.pywebview?.api?.select_export_folder) {
+    setStatus('This build does not expose an export-folder picker. Paste a folder path instead.', 'error');
+    return;
+  }
+  setBusy('SELECTING EXPORT FOLDER…');
+  try {
+    const res = await window.pywebview.api.select_export_folder();
+    if (!res.ok) {
+      if (!res.cancelled) throw new Error(res.error || 'Could not select export folder.');
+      return;
+    }
+    if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = res.path || '';
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    setStatus('Export folder selected: ' + res.path, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function openCardImageModal() {
+  if (isInterfaceLocked()) return;
+  const modal = $('#cardImageModal');
+  if (!modal) { selectCardImage(); return; }
+  if ($('#cardImageModalPath')) $('#cardImageModalPath').value = $('#cardImagePath')?.value || '';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeCardImageModal() {
+  const modal = $('#cardImageModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function applyCardImageModalPath() {
+  const value = String($('#cardImageModalPath')?.value || '').trim();
+  if (!value) { setStatus('Enter an image path/URL or drop/select an image first.', 'error'); return; }
+  if (isProbablyUrl(value)) {
+    setBusy('IMPORTING CARD IMAGE FROM URL…');
+    try {
+      const res = await window.pywebview.api.save_image_from_url(value, 'card');
+      if (!res.ok) throw new Error(res.error || 'Card image URL import failed.');
+      $('#cardImagePath').value = res.path;
+      closeCardImageModal();
+    } catch (err) {
+      setStatus(err.message || String(err), 'error');
+      return;
+    } finally {
+      setBusy('');
+    }
+  } else {
+    $('#cardImagePath').value = value;
+    closeCardImageModal();
+  }
+  settings = collectSettings();
+  await window.pywebview.api.save_settings(settings);
+  if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value;
+  if (hasOutput()) await saveCurrentWorkspace('silent');
+  updateCardImagePreview();
+  updateImportedCardToolsHint();
+  setStatus('Card image updated.', 'ok');
+}
+
+function cardImagePreviewSrc(path) {
+  const value = String(path || '').trim();
+  if (!value) return '';
+  if (/^data:image\//i.test(value)) return value;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (/^file:\/\//i.test(value)) return value;
+  const prefix = value.startsWith('/') ? 'file://' : 'file:///';
+  return prefix + value.split('/').map(part => encodeURIComponent(part)).join('/').replaceAll('%3A', ':');
+}
+
+function shortImageLabel(path) {
+  const value = String(path || '').trim();
+  if (!value) return '';
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      const url = new URL(value);
+      return url.pathname.split('/').filter(Boolean).pop() || url.hostname;
+    }
+  } catch (_) {}
+  return value.split(/[\/]/).filter(Boolean).pop() || value;
+}
+
+async function updateCardImagePreview() {
+  const input = $('#cardImagePath');
+  const img = $('#cardImagePreview');
+  const hint = $('#cardImagePreviewHint');
+  const path = String(input?.value || '').trim();
+  const token = ++cardImagePreviewToken;
+  if ($('#cardImageModalPath') && !$('#cardImageModal')?.classList.contains('hidden')) $('#cardImageModalPath').value = path;
+  if (img) {
+    img.alt = 'Current card image preview';
+    if (!path) {
+      img.removeAttribute('src');
+      img.classList.add('hidden');
+    } else {
+      img.classList.remove('hidden');
+      img.src = cardImagePreviewSrc(path);
+      if (window.pywebview?.api?.image_preview_data_url && !/^https?:\/\//i.test(path) && !/^data:image\//i.test(path)) {
+        try {
+          const res = await window.pywebview.api.image_preview_data_url(path);
+          if (token === cardImagePreviewToken && res?.ok && res.dataUrl) img.src = res.dataUrl;
+        } catch (_) {}
+      }
+    }
+  }
+  if (hint) hint.textContent = path ? `Current image set: ${shortImageLabel(path)}` : 'No custom image selected. PNG export will use the built-in blank image.';
 }
 
 
@@ -9300,7 +10043,7 @@ async function exportCard() {
       template,
       settings
     );
-    if (res.ok) { setStatus('Exported to: ' + res.path + (res.folder ? ' — folder: ' + res.folder : '') + (res.projectPath ? ' — project: ' + res.projectPath : ''), 'ok'); await saveCurrentWorkspace('silent'); }
+    if (res.ok) { closeExportModal(); setStatus('Exported to: ' + res.path + (res.folder ? ' — folder: ' + res.folder : '') + (res.projectPath ? ' — project: ' + res.projectPath : ''), 'ok'); await saveCurrentWorkspace('silent'); }
     else setStatus(res.error || 'Export failed.', 'error');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -9494,8 +10237,21 @@ function installConceptVisionAttachmentDelegatedHandlers() {
     if (vision) return { kind: 'vision', zone: vision };
     const attachment = event.target?.closest?.('#conceptAttachmentDropZone');
     if (attachment) return { kind: 'attachment', zone: attachment };
+    const quickImport = event.target?.closest?.('#quickImportDropZone');
+    if (quickImport) return { kind: 'quickImport', zone: quickImport };
+    const cardImage = event.target?.closest?.('#cardImageDropZone');
+    if (cardImage) return { kind: 'cardImage', zone: cardImage };
     return null;
   };
+
+  document.addEventListener('click', (event) => {
+    const hit = resolveDropZone(event);
+    if (!hit || (hit.kind !== 'quickImport' && hit.kind !== 'cardImage')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const inputId = hit.kind === 'quickImport' ? 'quickImportFileInput' : 'cardImageFileInput';
+    openBrowserFileInput(inputId, hit.kind === 'quickImport' ? 'card or project' : 'card image');
+  }, true);
 
   ['dragenter', 'dragover'].forEach(name => document.addEventListener(name, (event) => {
     const hit = resolveDropZone(event);
@@ -9532,6 +10288,18 @@ function installConceptVisionAttachmentDelegatedHandlers() {
       if (files.length) importConceptAttachmentFiles(files);
       else if (paths.length) importConceptAttachmentPaths(paths);
       else setStatus('No dropped concept attachment was detected. Try Attach Files instead.', 'error');
+      return;
+    }
+    if (hit.kind === 'quickImport') {
+      if (files.length) importQuickImportFiles(files.slice(0, 1));
+      else if (paths.length) importQuickImportPaths(paths.slice(0, 1));
+      else setStatus('No dropped card/project file was detected. Try clicking the drop zone to browse instead.', 'error');
+      return;
+    }
+    if (hit.kind === 'cardImage') {
+      if (files.length) importCardImageFiles(files.slice(0, 1));
+      else if (paths.length) importCardImagePaths(paths.slice(0, 1));
+      else setStatus('No dropped card image was detected. Try clicking the drop zone to browse instead.', 'error');
     }
   }, true);
 }

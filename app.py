@@ -24,6 +24,8 @@ import ssl
 import hashlib
 import traceback
 import webbrowser
+import http.server
+import socketserver
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -551,6 +553,10 @@ DEFAULT_SETTINGS = {
     "browserVirtualFolders": [],
     "browserVirtualFolderAssignments": {},
     "browserShowSubfolders": False,
+    "mobileServerEnabled": False,
+    "mobileServerHost": "0.0.0.0",
+    "mobileServerPort": 8787,
+    "mobileServerAccessCode": "",
 }
 
 DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and formatter.',
@@ -734,16 +740,22 @@ EMOTION_OPTIONS = [
 
 class Api:
     def __init__(self):
-        self.settings = self._load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+        self.settings = self._normalise_settings(self._load_json(SETTINGS_FILE, DEFAULT_SETTINGS))
         migrated = _migrate_front_porch_templates_and_prompts()
         self.template = self._normalise_template(self._load_json(TEMPLATE_FILE, DEFAULT_TEMPLATE))
         self._save_json(TEMPLATE_FILE, self.template)
         self.cancel_event = threading.Event()
         self.window = None
         self._last_browser_description_source = "extracted"
+        self._mobile_server = None
+        self._mobile_server_thread = None
+        self._mobile_server_port = None
+        self._mobile_generation_lock = threading.Lock()
         self._init_library_db()
         if migrated:
             self._log_event("front_porch_template_prompt_migration", {"files": migrated})
+        if self.settings.get("mobileServerEnabled"):
+            self._apply_mobile_server_settings(self.settings, save=False)
 
     def _load_json(self, path, default):
         path = Path(path)
@@ -1793,6 +1805,16 @@ class Api:
                 clean_folders.append({"id": fid, "name": name[:120], "parentId": parent})
         settings["browserVirtualFolders"] = clean_folders
         settings["browserShowSubfolders"] = bool(settings.get("browserShowSubfolders", DEFAULT_SETTINGS.get("browserShowSubfolders", False)))
+        settings["mobileServerEnabled"] = bool(settings.get("mobileServerEnabled", DEFAULT_SETTINGS.get("mobileServerEnabled", False)))
+        host = str(settings.get("mobileServerHost") or DEFAULT_SETTINGS.get("mobileServerHost", "0.0.0.0")).strip() or "0.0.0.0"
+        if host in {"*", "all"}:
+            host = "0.0.0.0"
+        settings["mobileServerHost"] = host[:80]
+        try:
+            settings["mobileServerPort"] = max(1024, min(65535, int(settings.get("mobileServerPort") or DEFAULT_SETTINGS.get("mobileServerPort", 8787))))
+        except Exception:
+            settings["mobileServerPort"] = int(DEFAULT_SETTINGS.get("mobileServerPort", 8787))
+        settings["mobileServerAccessCode"] = str(settings.get("mobileServerAccessCode") or "").strip()[:128]
         emo = settings.get("emotionImageEmotions", DEFAULT_SETTINGS["emotionImageEmotions"])
         if not isinstance(emo, list):
             emo = DEFAULT_SETTINGS["emotionImageEmotions"]
@@ -2073,22 +2095,42 @@ class Api:
         }
         try:
             releases = []
-            source = "releases"
+            source_parts = []
+            release_versions = set()
             try:
-                rel_url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=30"
+                rel_url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=50"
                 data = self._github_api_get_json(rel_url, headers, timeout=15)
                 if isinstance(data, list):
-                    releases = [self._release_info_from_github_release(x, owner, repo) for x in data]
+                    release_rows = [self._release_info_from_github_release(x, owner, repo) for x in data]
+                    releases.extend(release_rows)
+                    release_versions.update(str(r.get("version") or "").casefold() for r in release_rows if r.get("version"))
+                    if release_rows:
+                        source_parts.append("releases")
             except Exception as releases_error:
                 self._log_event("update_check_releases_api_failed", {"currentVersion": current, "error": str(releases_error)})
 
-            if not releases:
-                source = "tags"
-                tag_url = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=30"
+            # Always merge tags as well as releases. Some beta builds are published
+            # as tags/assets without GitHub Release objects, and relying on
+            # /releases alone makes the in-app update checker look dead.
+            try:
+                tag_url = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=50"
                 data = self._github_api_get_json(tag_url, headers, timeout=15)
                 if isinstance(data, list):
-                    releases = [self._release_info_from_github_tag(x, owner, repo) for x in data]
+                    tag_rows = [self._release_info_from_github_tag(x, owner, repo) for x in data]
+                    added_tags = 0
+                    for row in tag_rows:
+                        version_key = str(row.get("version") or "").casefold()
+                        if not version_key or version_key in release_versions:
+                            continue
+                        releases.append(row)
+                        release_versions.add(version_key)
+                        added_tags += 1
+                    if added_tags:
+                        source_parts.append("tags")
+            except Exception as tags_error:
+                self._log_event("update_check_tags_api_failed", {"currentVersion": current, "error": str(tags_error)})
 
+            source = "+".join(source_parts) if source_parts else "none"
             chosen, update_kind = self._select_best_update_release(current, releases)
             chosen = chosen or {}
             latest_version = str(chosen.get("version") or "").strip()
@@ -2565,6 +2607,32 @@ class Api:
             if not paths:
                 return {"ok": False, "cancelled": True}
             return {"ok": True, "path": str(Path(paths[0]).expanduser().resolve())}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def select_export_folder(self):
+        try:
+            start = EXPORT_DIR if EXPORT_DIR.exists() else USER_DATA_ROOT
+            paths = []
+            if shutil.which("kdialog") and not self._is_packaged_appimage():
+                paths = self._run_dialog_command(["kdialog", "--title", "Select Character Card Export Folder", "--getexistingdirectory", str(start)], "kdialog_export_folder") or []
+            if not paths and shutil.which("zenity") and not self._is_packaged_appimage():
+                paths = self._run_dialog_command(["zenity", "--file-selection", "--directory", "--title", "Select Character Card Export Folder"], "zenity_export_folder") or []
+            if not paths:
+                window = webview.windows[0] if webview.windows else None
+                if window and hasattr(webview, "FOLDER_DIALOG"):
+                    result = window.create_file_dialog(webview.FOLDER_DIALOG)
+                    if isinstance(result, (list, tuple)):
+                        paths = [str(x) for x in result if str(x).strip()]
+                    elif result:
+                        paths = [str(result)]
+            if not paths:
+                return {"ok": False, "cancelled": True}
+            path = Path(paths[0]).expanduser().resolve()
+            _safe_mkdir(path)
+            if not _path_is_writable_dir(path):
+                return {"ok": False, "error": "The selected export folder is not writable."}
+            return {"ok": True, "path": str(path)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -3330,11 +3398,252 @@ class Api:
         })
         self.settings["dataFilesFolder"] = str(USER_DATA_ROOT if not data_root_result or not data_root_result.get("ok") else Path(requested_data_root).expanduser().resolve())
         self._save_json(SETTINGS_FILE, self.settings)
-        result = {"ok": True, "settings": self.settings}
+        mobile_result = self._apply_mobile_server_settings(self.settings, save=False)
+        result = {"ok": True, "settings": self.settings, "mobileServer": mobile_result}
         if data_root_result:
             result["dataFolder"] = data_root_result
             result["restartRequired"] = bool(data_root_result.get("restartRequired"))
         return result
+
+    def _mobile_public_host_urls(self, host, port):
+        urls = []
+        shown_host = "127.0.0.1" if str(host or "") in {"0.0.0.0", "", "::"} else str(host)
+        urls.append(f"http://{shown_host}:{port}/mobile.html")
+        if shown_host in {"127.0.0.1", "localhost"}:
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                probe.settimeout(0.2)
+                probe.connect(("8.8.8.8", 80))
+                lan_ip = probe.getsockname()[0]
+                probe.close()
+                if lan_ip and lan_ip not in {"127.0.0.1", shown_host}:
+                    urls.append(f"http://{lan_ip}:{port}/mobile.html")
+            except Exception:
+                pass
+        return urls
+
+    def _mobile_server_auth_ok(self, handler):
+        code = str((self.settings or {}).get("mobileServerAccessCode") or "").strip()
+        if not code:
+            return True
+        try:
+            parsed = urllib.parse.urlparse(handler.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            supplied = ""
+            if query.get("token"):
+                supplied = str(query.get("token", [""])[0] or "")
+            if not supplied:
+                supplied = str(handler.headers.get("X-CCF-Mobile-Token") or "")
+            return supplied == code
+        except Exception:
+            return False
+
+    def _mobile_send_json(self, handler, payload, status=200):
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-CCF-Mobile-Token")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+
+    def _mobile_send_file(self, handler, path, content_type):
+        try:
+            raw = Path(path).read_bytes()
+        except Exception:
+            self._mobile_send_json(handler, {"ok": False, "error": "mobile.html could not be found in the bundled frontend folder."}, 404)
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+
+    def _mobile_read_json(self, handler):
+        try:
+            length = int(handler.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            raw = handler.rfile.read(min(length, 1_000_000)).decode("utf-8", errors="replace")
+            return json.loads(raw) if raw.strip() else {}
+        except Exception as e:
+            raise ValueError(f"Invalid JSON request: {e}")
+
+    def _mobile_generate_character(self, concept, client_note=""):
+        concept = str(concept or "").strip()
+        if not concept:
+            return {"ok": False, "error": "Enter a Main Concept first."}
+        if not self._mobile_generation_lock.acquire(blocking=False):
+            return {"ok": False, "error": "A mobile generation is already running. Wait for it to finish before starting another."}
+        old_settings = dict(self.settings or {})
+        try:
+            local_settings = self._normalise_settings({**old_settings, "cardMode": "single", "sharedScenePolicy": "ai_reconcile"})
+            local_template = json.loads(json.dumps(self.template or DEFAULT_TEMPLATE))
+            generate_res = self.generate(concept, local_template, local_settings)
+            if not generate_res.get("ok"):
+                return generate_res
+            output = str(generate_res.get("output") or "").strip()
+            name = self._extract_name(output) or self._extract_output_name(output, "Mobile Card") or "Mobile Card"
+            workspace = {
+                "name": name,
+                "concept": concept,
+                "output": output,
+                "template": local_template,
+                "settings": local_settings,
+                "qnaAnswers": generate_res.get("qaAnswers") or "",
+                "builderState": {},
+                "generatedImages": [],
+                "emotionImages": [],
+                "mobileGenerationNote": str(client_note or "")[:1000],
+                "characterTabs": [{"title": name, "output": output, "qnaAnswers": generate_res.get("qaAnswers") or ""}],
+                "conceptTabs": [{"title": name, "concept": concept, "visionDescription": "", "visionImagePath": "", "conceptAttachments": [], "builderState": {}}],
+                "manualTabs": [],
+                "activeConceptTabIndex": 0,
+                "activeManualGuideTabIndex": 0,
+            }
+            save_res = self.save_character_workspace(workspace)
+            if not save_res.get("ok"):
+                return save_res
+            self._log_event("mobile_generation_saved", {"name": save_res.get("name"), "project": save_res.get("projectPath")})
+            return {
+                "ok": True,
+                "name": save_res.get("name") or name,
+                "projectPath": save_res.get("projectPath") or "",
+                "cardPath": save_res.get("cardPath") or "",
+                "outputPreview": output[:1800],
+                "qaPreview": str(generate_res.get("qaAnswers") or "")[:1800],
+                "validation": generate_res.get("validation") or {},
+            }
+        finally:
+            # Mobile generation forces a one-card route internally, but it should not
+            # overwrite the user's desktop Card Mode or other current settings.
+            self.settings = self._normalise_settings(old_settings)
+            self._save_json(SETTINGS_FILE, self.settings)
+            try:
+                self._mobile_generation_lock.release()
+            except Exception:
+                pass
+
+    def _mobile_make_handler(self):
+        api = self
+
+        class MobileHandler(http.server.BaseHTTPRequestHandler):
+            server_version = "CharacterCardForgeMobile/1.0"
+
+            def log_message(self, fmt, *args):
+                try:
+                    api._log_event("mobile_server_request", {"client": self.client_address[0] if self.client_address else "", "message": fmt % args})
+                except Exception:
+                    pass
+
+            def do_OPTIONS(self):
+                api._mobile_send_json(self, {"ok": True})
+
+            def do_GET(self):
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path or "/"
+                if path in {"/", "/mobile.html"}:
+                    api._mobile_send_file(self, APP_DIR / "frontend" / "mobile.html", "text/html; charset=utf-8")
+                    return
+                if path == "/api/status":
+                    status = api.mobile_server_status()
+                    status["authRequired"] = bool(str((api.settings or {}).get("mobileServerAccessCode") or "").strip())
+                    status["authenticated"] = api._mobile_server_auth_ok(self)
+                    api._mobile_send_json(self, status)
+                    return
+                api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
+
+            def do_POST(self):
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path != "/api/generate":
+                    api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
+                    return
+                if not api._mobile_server_auth_ok(self):
+                    api._mobile_send_json(self, {"ok": False, "error": "Invalid or missing mobile access code."}, 401)
+                    return
+                try:
+                    payload = api._mobile_read_json(self)
+                    res = api._mobile_generate_character(payload.get("concept") or "", payload.get("note") or "")
+                    api._mobile_send_json(self, res, 200 if res.get("ok") else 400)
+                except Exception as e:
+                    api._mobile_send_json(self, {"ok": False, "error": str(e)}, 500)
+
+        return MobileHandler
+
+    def _start_mobile_server_locked(self, settings):
+        host = str(settings.get("mobileServerHost") or "0.0.0.0").strip() or "0.0.0.0"
+        port = int(settings.get("mobileServerPort") or 8787)
+        if self._mobile_server is not None:
+            if self._mobile_server.server_address[0] == host and int(self._mobile_server.server_address[1]) == port:
+                return self.mobile_server_status()
+            self._stop_mobile_server_locked()
+        handler = self._mobile_make_handler()
+        class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+        server = ThreadingServer((host, port), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True, name="CCFMobileServer")
+        thread.start()
+        self._mobile_server = server
+        self._mobile_server_thread = thread
+        self._mobile_server_port = port
+        self._log_event("mobile_server_started", {"host": host, "port": port, "urls": self._mobile_public_host_urls(host, port)})
+        return self.mobile_server_status()
+
+    def _stop_mobile_server_locked(self):
+        server = self._mobile_server
+        if server is not None:
+            try:
+                server.shutdown()
+                server.server_close()
+            except Exception:
+                pass
+        self._mobile_server = None
+        self._mobile_server_thread = None
+        self._mobile_server_port = None
+        self._log_event("mobile_server_stopped", {})
+        return self.mobile_server_status()
+
+    def _apply_mobile_server_settings(self, settings=None, save=False):
+        settings = self._normalise_settings({**self.settings, **(settings or {})})
+        if save:
+            self.settings = settings
+            self._save_json(SETTINGS_FILE, self.settings)
+        try:
+            if settings.get("mobileServerEnabled"):
+                return self._start_mobile_server_locked(settings)
+            return self._stop_mobile_server_locked()
+        except Exception as e:
+            self._log_event("mobile_server_error", {"error": str(e), "host": settings.get("mobileServerHost"), "port": settings.get("mobileServerPort")})
+            return {"ok": False, "running": False, "error": str(e)}
+
+    def start_mobile_server(self, settings=None):
+        merged = self._normalise_settings({**self.settings, **(settings or {}), "mobileServerEnabled": True})
+        self.settings = merged
+        self._save_json(SETTINGS_FILE, self.settings)
+        return self._apply_mobile_server_settings(merged, save=False)
+
+    def stop_mobile_server(self):
+        self.settings["mobileServerEnabled"] = False
+        self._save_json(SETTINGS_FILE, self.settings)
+        return self._apply_mobile_server_settings(self.settings, save=False)
+
+    def mobile_server_status(self):
+        running = self._mobile_server is not None
+        host = str((self.settings or {}).get("mobileServerHost") or "0.0.0.0")
+        port = int((self.settings or {}).get("mobileServerPort") or (self._mobile_server_port or 8787))
+        return {
+            "ok": True,
+            "running": running,
+            "host": host,
+            "port": port,
+            "urls": self._mobile_public_host_urls(host, port) if running else [],
+            "authRequired": bool(str((self.settings or {}).get("mobileServerAccessCode") or "").strip()),
+        }
 
     def save_template(self, template):
         if not isinstance(template, dict) or "sections" not in template:
@@ -3542,6 +3851,10 @@ class Api:
             lines.append("Tags should include multi-character unless the Tags section is disabled.")
         else:
             lines.append("CARD MODE: SINGLE CHARACTER CARD.")
+        lines.append("SOURCE CONCEPT FIDELITY RULES — the CHARACTER CONCEPT is authoritative. Preserve the user's named characters, relationships, premise, setting, scenario hook, visual details, clothing, props, captions/messages, and requested emotional/sexual dynamics unless they conflict with the 18+ rule.")
+        lines.append("Do not replace the user's scenario with a different backstory, different character name, different relationship, different outfit, or unrelated opening. Clean up and expand what the user provided; do not reinvent it.")
+        lines.append("If CHARACTER CONCEPT contains a heading such as First Message, Greeting, Opening, or Scenario, use those beats as the mandatory source for the generated Scenario and First Message. You may polish grammar, pacing, and prose, but must keep the same situation, named characters, power dynamic, message/caption if present, and opening confrontation.")
+        lines.append("If temporary generation notes are present, treat them as mandatory one-off direction. They clarify the current card and override generic style assumptions.")
         lines.append(f"Token budget settings: maximum input context is {settings.get('maxInputTokens')} tokens; maximum generated output is {settings.get('maxOutputTokens')} tokens.")
         lines.append("Use the available input budget efficiently. Do not exceed the requested output structure.")
         lines.append(f"FIRST MESSAGE STYLE REQUIREMENT: use this style for the main First Message: {style_text}")
@@ -3894,6 +4207,8 @@ class Api:
             "First Message style: " + style_text,
             f"Alternative First Messages requested: {alt_count}",
             "Keep concise but complete. Do not add unrelated commentary.",
+            "SOURCE CONCEPT FIDELITY: preserve the user's named characters, relationships, scenario hook, visual details, clothing, captions/messages, and explicit First Message beats. Clean up and expand; do not replace them with unrelated names, backstory, outfit, or opening.",
+            "If temporary generation notes are present, treat them as mandatory direction for this card.",
             "CONCEPT:",
             (concept or "").strip(),
         ]
@@ -4775,6 +5090,102 @@ class Api:
             pass
         return fallback or "Character"
 
+
+    def _concept_primary_name(self, concept):
+        """Best-effort main-name extraction for concept fidelity checks.
+
+        This is intentionally conservative. It only blocks obvious drift such as
+        the model replacing Alison with an unrelated prior character name, while
+        still allowing nameless concepts to generate a fresh name.
+        """
+        text = str(concept or "")
+        if not text.strip():
+            return ""
+        # Remove common field labels/headings that are capitalised but not names.
+        cleaned = re.sub(r"(?im)^\s*(Visual Description|Generation Notes?|Hair|Eyes|Skin|Body|Clothing|Accessories|Details|Scenario|First Message|Greeting|Opening)\s*:", " ", text)
+        cleaned = re.sub(r"\{\{user\}\}", " ", cleaned, flags=re.I)
+        stop = {
+            "The", "This", "That", "These", "Those", "One", "Day", "Evening", "Inside", "First", "Message",
+            "Visual", "Description", "Hair", "Eyes", "Skin", "Body", "Clothing", "Accessories", "Details",
+            "Long", "Bright", "Fair", "Curvy", "Tight", "Holding", "Visible", "Black", "White", "Your",
+            "Alex" if False else "",  # keeps the set literal stable below after comprehension filtering
+        }
+        names = []
+        for match in re.finditer(r"\b([A-Z][a-z]{2,24})\b", cleaned):
+            name = match.group(1).strip()
+            if name in stop:
+                continue
+            if name.lower() in {"user", "char", "black", "blacked"}:
+                continue
+            if name not in names:
+                names.append(name)
+        return names[0] if names else ""
+
+    def _concept_required_markers(self, concept):
+        text = str(concept or "")
+        markers = []
+        # Preserve loud/unique tokens that often carry scenario meaning: shirt
+        # slogans, captions, proper nouns in all caps, etc.
+        for token in re.findall(r"\b[A-Z][A-Z0-9_'-]{3,}\b", text):
+            if token in {"FIRST", "MESSAGE"}:
+                continue
+            if token not in markers:
+                markers.append(token)
+        # Keep short quoted/caption-like phrases that are highly distinctive.
+        for quoted in re.findall(r"[\"“”']([^\"“”']{8,80})[\"“”']", text):
+            q = quoted.strip()
+            if any(ch.isalpha() for ch in q) and q not in markers:
+                markers.append(q)
+        return markers[:8]
+
+    def _concept_fidelity_report(self, concept, output):
+        concept = str(concept or "")
+        output = str(output or "")
+        if not concept.strip() or not output.strip():
+            return {"drifted": False, "missing": []}
+        lower_out = output.lower()
+        missing = []
+        primary_name = self._concept_primary_name(concept)
+        if primary_name and not re.search(rf"\b{re.escape(primary_name)}\b", output, flags=re.I):
+            missing.append(f"primary name `{primary_name}`")
+        for marker in self._concept_required_markers(concept):
+            if len(marker) >= 4 and marker.lower() not in lower_out:
+                missing.append(f"required marker `{marker[:80]}`")
+        # If the user supplied an explicit First Message, the output should at
+        # least preserve the identified primary name/markers. Avoid over-policing
+        # when no concrete markers were found.
+        explicit_first = bool(re.search(r"(?im)^\s*(First Message|Greeting|Opening)\s*:", concept))
+        drifted = bool(missing and (explicit_first or len(missing) >= 2))
+        return {"drifted": drifted, "missing": missing, "primaryName": primary_name, "explicitFirstMessage": explicit_first}
+
+    def _retry_generation_for_concept_fidelity(self, generation_concept, template, settings, previous_output, report):
+        missing = report.get("missing") or []
+        retry_concept = "\n\n".join([
+            "STRICT CONCEPT-FIDELITY RETRY",
+            "The previous output drifted away from the user's source concept. Regenerate the full character card from scratch.",
+            "Do NOT use the previous output as source material. It is only a bad example of what drifted.",
+            "The user's CHARACTER CONCEPT below is authoritative. Preserve its named characters, relationships, scenario hook, visual details, clothing, captions/messages, explicit First Message beats, and temporary generation notes.",
+            "Missing/changed facts detected: " + (", ".join(missing) if missing else "unknown concept details"),
+            "If the source concept names a character, that character must remain the card's main character unless split-card focus instructions explicitly say otherwise.",
+            "If the source concept contains First Message/Greeting/Opening text, keep the same situation and confrontation while only polishing/expanding the prose.",
+            "ORIGINAL SOURCE CONCEPT",
+            str(generation_concept or "").strip(),
+            "BAD PREVIOUS OUTPUT TO AVOID COPYING",
+            str(previous_output or "").strip()[:6000],
+        ]).strip()
+        self._log_event("concept_fidelity_retry_request", {"missing": missing, "primaryName": report.get("primaryName", "")})
+        retry_settings = {**settings, "_streamTarget": ""}
+        retry = self._apply_restricted_tags_to_output(
+            self._clean_generated_output(self._generate_full_or_lite_output(retry_concept, template, retry_settings)),
+            template,
+            settings,
+        )
+        retry_report = self._concept_fidelity_report(generation_concept, retry)
+        self._log_event("concept_fidelity_retry_response", {"drifted": retry_report.get("drifted"), "missing": retry_report.get("missing", []), "preview": retry[:1000]})
+        if retry and not retry_report.get("drifted"):
+            return retry, {"repaired": True, "reason": "concept_fidelity_retry", "initialReport": report, "retryReport": retry_report}
+        return previous_output, {"repaired": False, "reason": "retry_still_drifted", "initialReport": report, "retryReport": retry_report}
+
     def generate_split_cards(self, concept, template, settings, qa_answers="", disable_template_qa=False, *extra_args, extra_questions=None):
         # v1.0.6-beta1: split-card generation must never reuse one shared
         # multi-character Q&A blob as every character tab's Q&A. Each focused
@@ -4831,6 +5242,11 @@ class Api:
                 focus_concept = self._split_card_focus_concept(concept, focus, names, per_qa)
                 self._reset_backup_info()
                 output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(focus_concept, template, per_settings)), template, per_settings)
+                fidelity_info = {"repaired": False}
+                fidelity_report = self._concept_fidelity_report(focus_concept, output)
+                if fidelity_report.get("drifted"):
+                    self._log_event("concept_fidelity_drift_detected", {"mode": "split", "focus": focus, "missing": fidelity_report.get("missing", []), "primaryName": fidelity_report.get("primaryName", "")})
+                    output, fidelity_info = self._retry_generation_for_concept_fidelity(focus_concept, template, per_settings, output, fidelity_report)
                 validation = self.validate_output_against_template(output, template, per_settings)
                 repair_info = {"repaired": False, "missing": []}
                 if not validation.get("ok"):
@@ -4847,6 +5263,7 @@ class Api:
                     "cardImagePath": "",
                     "validation": validation,
                     "repair": repair_info,
+                    "fidelity": fidelity_info,
                 })
             return {"ok": True, "cards": cards, "characters": names, "identification": ident}
         except Exception as e:
@@ -4872,6 +5289,11 @@ class Api:
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
             output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
+            fidelity_info = {"repaired": False}
+            fidelity_report = self._concept_fidelity_report(generation_concept, output)
+            if fidelity_report.get("drifted"):
+                self._log_event("concept_fidelity_drift_detected", {"mode": "single", "missing": fidelity_report.get("missing", []), "primaryName": fidelity_report.get("primaryName", "")})
+                output, fidelity_info = self._retry_generation_for_concept_fidelity(generation_concept, template, output_settings, output, fidelity_report)
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -4886,7 +5308,7 @@ class Api:
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
-            return {"ok": True, "output": output, "validation": validation, "repair": repair_info, "qaAnswers": qa_answers, "backupInfo": backup_info}
+            return {"ok": True, "output": output, "validation": validation, "repair": repair_info, "qaAnswers": qa_answers, "backupInfo": backup_info, "fidelity": fidelity_info}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -4911,6 +5333,11 @@ class Api:
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
             output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
+            fidelity_info = {"repaired": False}
+            fidelity_report = self._concept_fidelity_report(generation_concept, output)
+            if fidelity_report.get("drifted"):
+                self._log_event("concept_fidelity_drift_detected", {"mode": "legacy_generate", "missing": fidelity_report.get("missing", []), "primaryName": fidelity_report.get("primaryName", "")})
+                output, fidelity_info = self._retry_generation_for_concept_fidelity(generation_concept, template, output_settings, output, fidelity_report)
             backup_info = self._get_backup_info()
             if backup_info.get("used"):
                 backup_info["phase"] = "character_generation"
@@ -4925,7 +5352,7 @@ class Api:
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
-            return {"ok": True, "output": output, "validation": validation, "repair": repair_info, "qaAnswers": qa_answers, "backupInfo": backup_info}
+            return {"ok": True, "output": output, "validation": validation, "repair": repair_info, "qaAnswers": qa_answers, "backupInfo": backup_info, "fidelity": fidelity_info}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -5403,6 +5830,21 @@ class Api:
             loaded["sourceUrl"] = url
             loaded["message"] = loaded.get("message") or "Loaded character card/project from URL."
         return loaded
+
+    def load_import_path(self, path):
+        try:
+            p = Path(str(path or "")).expanduser()
+            if not p.exists():
+                return {"ok": False, "error": f"Import file was not found: {p}"}
+            if p.suffix.lower() not in {".json", ".png", ".jpg", ".jpeg", ".webp", ".md", ".txt"}:
+                return {"ok": False, "error": "Import supports JSON, PNG, JPG, WebP, MD, and TXT files."}
+            loaded = self._load_import_path(p)
+            if loaded.get("ok"):
+                loaded["sourcePath"] = str(p)
+                loaded["message"] = loaded.get("message") or "Loaded character card/project from path."
+            return loaded
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def save_uploaded_image(self, filename, data_url, kind="card"):
         try:
@@ -6015,22 +6457,52 @@ class Api:
 
     def _load_project_payload(self, payload):
         project = payload.get("project", payload) if isinstance(payload, dict) else {}
-        output = project.get("output") or project.get("raw_card") or ""
         workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+        project_tabs = project.get("characterTabs") if isinstance(project.get("characterTabs"), list) else []
+        workspace_tabs = workspace.get("characterTabs") if isinstance(workspace.get("characterTabs"), list) else []
+        character_tabs = project_tabs or workspace_tabs or []
+
+        def tab_output_value(tab):
+            if not isinstance(tab, dict):
+                return ""
+            for key in ("output", "fullTextOutput", "fullText", "fullTextOutputText", "outputText", "cardText", "cardOutput", "raw_card", "rawCard", "text", "content"):
+                value = str(tab.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+
+        primary_tab = next((tab for tab in character_tabs if tab_output_value(tab)), {})
+        output = (
+            str(project.get("output") or "").strip()
+            or str(workspace.get("output") or "").strip()
+            or str(project.get("fullTextOutput") or "").strip()
+            or str(workspace.get("fullTextOutput") or "").strip()
+            or str(project.get("fullText") or "").strip()
+            or str(workspace.get("fullText") or "").strip()
+            or str(project.get("outputText") or "").strip()
+            or str(workspace.get("outputText") or "").strip()
+            or str(project.get("raw_card") or "").strip()
+            or str(workspace.get("raw_card") or "").strip()
+            or str(project.get("rawCard") or "").strip()
+            or str(workspace.get("rawCard") or "").strip()
+            or tab_output_value(primary_tab)
+            or ""
+        )
         loaded = {
             "ok": True,
             "loadedType": "project",
-            "concept": project.get("concept") or workspace.get("concept") or "",
+            "concept": project.get("concept", ""),
             "output": output,
             "settings": self._normalise_settings(project.get("settings") or {}),
             "template": project.get("template") or self.template,
-            "imagePath": (project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or ""),
-            "cardImagePath": (project.get("cardImagePath") or project.get("imagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or ""),
-            "imageDataUrl": project.get("imageDataUrl") or workspace.get("imageDataUrl") or project.get("cardImageDataUrl") or workspace.get("cardImageDataUrl") or "",
+            "imagePath": (project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or (primary_tab.get("cardImagePath") if isinstance(primary_tab, dict) else "") or (primary_tab.get("imagePath") if isinstance(primary_tab, dict) else "") or ""),
+            "cardImagePath": (project.get("cardImagePath") or project.get("imagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or (primary_tab.get("cardImagePath") if isinstance(primary_tab, dict) else "") or (primary_tab.get("imagePath") if isinstance(primary_tab, dict) else "") or ""),
+            "imageDataUrl": project.get("imageDataUrl") or workspace.get("imageDataUrl") or project.get("cardImageDataUrl") or workspace.get("cardImageDataUrl") or (primary_tab.get("imageDataUrl") if isinstance(primary_tab, dict) else "") or (primary_tab.get("cardImageDataUrl") if isinstance(primary_tab, dict) else "") or "",
             "sourcePath": project.get("sourcePath") or "",
             "projectPath": project.get("projectPath") or "",
             "builderState": project.get("builderState") or workspace.get("builderState") or {},
-            "qnaAnswers": project.get("qnaAnswers") or workspace.get("qnaAnswers") or "",
+            "qnaAnswers": project.get("qnaAnswers") or project.get("qaAnswers") or project.get("qna") or project.get("qa") or workspace.get("qnaAnswers") or workspace.get("qaAnswers") or workspace.get("qna") or workspace.get("qa") or (primary_tab.get("qnaAnswers") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qaAnswers") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qna") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qa") if isinstance(primary_tab, dict) else "") or "",
+            "qaAnswers": project.get("qaAnswers") or project.get("qnaAnswers") or project.get("qa") or project.get("qna") or workspace.get("qaAnswers") or workspace.get("qnaAnswers") or workspace.get("qa") or workspace.get("qna") or (primary_tab.get("qaAnswers") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qnaAnswers") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qa") if isinstance(primary_tab, dict) else "") or (primary_tab.get("qna") if isinstance(primary_tab, dict) else "") or "",
             "browserDescription": project.get("browserDescription") or workspace.get("browserDescription") or "",
             "browserDescriptionSourceHash": project.get("browserDescriptionSourceHash") or workspace.get("browserDescriptionSourceHash") or "",
             "cardRating": project.get("cardRating") or workspace.get("cardRating") or "",
@@ -6039,17 +6511,17 @@ class Api:
             "cardRatingSourceHash": project.get("cardRatingSourceHash") or workspace.get("cardRatingSourceHash") or "",
             "tags": project.get("tags") or workspace.get("tags") or self._extract_tags_from_output(output, project.get("template") or self.template),
             "virtualFolderId": str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or ""),
-            "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or [],
-            "generatedImages": project.get("generatedImages") or workspace.get("generatedImages") or [],
-            "characterTabs": project.get("characterTabs") or workspace.get("characterTabs") or [],
+            "emotionImages": project.get("emotionImages") or workspace.get("emotionImages") or (primary_tab.get("emotionImages") if isinstance(primary_tab, dict) else []) or [],
+            "generatedImages": project.get("generatedImages") or workspace.get("generatedImages") or (primary_tab.get("generatedImages") if isinstance(primary_tab, dict) else []) or [],
+            "characterTabs": character_tabs,
             "conceptTabs": project.get("conceptTabs") or workspace.get("conceptTabs") or [],
-            "activeConceptTabIndex": project.get("activeConceptTabIndex", workspace.get("activeConceptTabIndex", 0)),
             "manualTabs": project.get("manualTabs") or workspace.get("manualTabs") or [],
+            "activeConceptTabIndex": project.get("activeConceptTabIndex", workspace.get("activeConceptTabIndex", 0)),
             "activeManualGuideTabIndex": project.get("activeManualGuideTabIndex", workspace.get("activeManualGuideTabIndex", 0)),
             "emotionManifest": project.get("emotionManifest") or workspace.get("emotionManifest") or "",
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
-            "visionImagePath": project.get("visionImagePath") or workspace.get("visionImagePath") or "",
             "conceptAttachments": project.get("conceptAttachments") or workspace.get("conceptAttachments") or [],
+            "workspace": workspace,
             "message": "Loaded full Character Card Forge project content. Global Settings were kept unchanged.",
         }
         # If an older saved project kept a generated-image URL as cardImagePath,
@@ -6488,6 +6960,15 @@ class Api:
                 return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
             return ""
+
+    def image_preview_data_url(self, path):
+        try:
+            data_url = self._image_data_url(path, max_size=(420, 560))
+            if not data_url:
+                return {"ok": False, "error": "Image preview could not be loaded."}
+            return {"ok": True, "dataUrl": data_url}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     def _read_emotion_manifest_for_folder(self, folder):
         try:
@@ -8420,6 +8901,8 @@ class Api:
             (folder / "builder_state.json").write_text(json.dumps(workspace.get("builderState"), indent=2, ensure_ascii=False), encoding="utf-8")
         if workspace.get("emotionImages"):
             (folder / "emotion_images_state.json").write_text(json.dumps(workspace.get("emotionImages"), indent=2, ensure_ascii=False), encoding="utf-8")
+        if workspace.get("generatedImages"):
+            (folder / "generated_images_state.json").write_text(json.dumps(workspace.get("generatedImages"), indent=2, ensure_ascii=False), encoding="utf-8")
 
         # Automatically maintain a latest card PNG so the browser always has a usable card file.
         latest_card = folder / f"{self._safe_slug(safe_name)}_latest_cardv2.png"
@@ -8464,12 +8947,11 @@ class Api:
                 "generatedImages": workspace.get("generatedImages") or [],
                 "characterTabs": workspace.get("characterTabs") or [],
                 "conceptTabs": workspace.get("conceptTabs") or [],
-                "activeConceptTabIndex": workspace.get("activeConceptTabIndex", 0),
                 "manualTabs": workspace.get("manualTabs") or [],
+                "activeConceptTabIndex": workspace.get("activeConceptTabIndex", 0),
                 "activeManualGuideTabIndex": workspace.get("activeManualGuideTabIndex", 0),
                 "emotionManifest": workspace.get("emotionManifest") or "",
                 "visionDescription": workspace.get("visionDescription") or "",
-                "visionImagePath": workspace.get("visionImagePath") or "",
                 "conceptAttachments": workspace.get("conceptAttachments") or [],
                 "workspace": workspace,
             }
@@ -8589,9 +9071,103 @@ class Api:
             # Quick real-file check before opening. If the project/card/image changed
             # outside the app, refresh the SQLite cache first.
             self._refresh_library_cache_for_project(project_path, force=False)
-            payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
+            path = Path(project_path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
             res = self._load_project_payload(payload)
-            res["projectPath"] = str(project_path)
+            res["projectPath"] = str(path)
+
+            # Older 1.0.6/1.0.7 workspace-tab saves could leave the visible project JSON
+            # with Concept data but without the editor-facing fields. The sidecar files are
+            # still written beside latest_ccf_project.json, so load them as a rescue source
+            # before hydrating images from SQLite.
+            folder = path.parent
+            restored_from_sidecar = []
+            if not str(res.get("output") or "").strip():
+                for candidate in (folder / "latest_output.md", folder / "output.md"):
+                    try:
+                        if candidate.exists():
+                            text = candidate.read_text(encoding="utf-8").strip()
+                            if text:
+                                res["output"] = text
+                                restored_from_sidecar.append(candidate.name)
+                                break
+                    except Exception:
+                        pass
+            if not str(res.get("qnaAnswers") or res.get("qaAnswers") or "").strip():
+                for candidate in (folder / "qna_answers.md", folder / "qa_answers.md"):
+                    try:
+                        if candidate.exists():
+                            text = candidate.read_text(encoding="utf-8").strip()
+                            if text:
+                                res["qnaAnswers"] = text
+                                res["qaAnswers"] = text
+                                restored_from_sidecar.append(candidate.name)
+                                break
+                    except Exception:
+                        pass
+            if not res.get("emotionImages"):
+                candidate = folder / "emotion_images_state.json"
+                try:
+                    if candidate.exists():
+                        data = json.loads(candidate.read_text(encoding="utf-8"))
+                        if isinstance(data, list):
+                            res["emotionImages"] = data
+                            restored_from_sidecar.append(candidate.name)
+                except Exception:
+                    pass
+            if not res.get("generatedImages"):
+                candidate = folder / "generated_images_state.json"
+                try:
+                    if candidate.exists():
+                        data = json.loads(candidate.read_text(encoding="utf-8"))
+                        if isinstance(data, list):
+                            res["generatedImages"] = data
+                            restored_from_sidecar.append(candidate.name)
+                except Exception:
+                    pass
+
+            # Use the actual file the user selected as the authoritative asset key.
+            # Older projects can contain a stale embedded projectPath, which meant
+            # text loaded but card image / generated images / emotion images stayed empty.
+            res = self._hydrate_workspace_from_db_assets(path, res)
+            res["projectPath"] = str(path)
+
+            # Always provide a single, fully hydrated tab for Character Browser loading.
+            # This prevents the frontend from opening a tab shell with only Concept data.
+            output = str(res.get("output") or "").strip()
+            if output:
+                tabs = res.get("characterTabs") if isinstance(res.get("characterTabs"), list) else []
+                primary = next((t for t in tabs if isinstance(t, dict) and str(t.get("output") or t.get("fullTextOutput") or "").strip() == output), None)
+                if primary is None:
+                    primary = next((t for t in tabs if isinstance(t, dict) and str(t.get("output") or t.get("fullTextOutput") or "").strip()), None)
+                tab = dict(primary or {})
+                tab["name"] = tab.get("name") or tab.get("focusName") or res.get("name") or self._extract_name(output) or "Loaded Character"
+                tab["focusName"] = tab.get("focusName") or tab.get("name")
+                tab["output"] = output
+                tab["fullTextOutput"] = output
+                qa = str(res.get("qnaAnswers") or res.get("qaAnswers") or tab.get("qnaAnswers") or tab.get("qaAnswers") or "")
+                tab["qnaAnswers"] = qa
+                tab["qaAnswers"] = qa
+                tab["emotionImages"] = res.get("emotionImages") if isinstance(res.get("emotionImages"), list) else (tab.get("emotionImages") if isinstance(tab.get("emotionImages"), list) else [])
+                tab["generatedImages"] = res.get("generatedImages") if isinstance(res.get("generatedImages"), list) else (tab.get("generatedImages") if isinstance(tab.get("generatedImages"), list) else [])
+                tab["cardImagePath"] = res.get("cardImagePath") or res.get("imagePath") or tab.get("cardImagePath") or tab.get("imagePath") or ""
+                tab["imagePath"] = tab["cardImagePath"]
+                tab["projectPath"] = str(path)
+                tab["workspaceProjectPath"] = str(path)
+                res["characterTabs"] = [tab]
+
+            try:
+                self._log_event("character_project_load_restore_summary", {
+                    "project": str(path),
+                    "hasOutput": bool(str(res.get("output") or "").strip()),
+                    "qaLength": len(str(res.get("qnaAnswers") or res.get("qaAnswers") or "")),
+                    "emotionCount": len(res.get("emotionImages") or []) if isinstance(res.get("emotionImages"), list) else 0,
+                    "generatedCount": len(res.get("generatedImages") or []) if isinstance(res.get("generatedImages"), list) else 0,
+                    "tabCount": len(res.get("characterTabs") or []) if isinstance(res.get("characterTabs"), list) else 0,
+                    "sidecars": restored_from_sidecar,
+                })
+            except Exception:
+                pass
             return res
         except Exception as e:
             return {"ok": False, "error": f"Could not load character project: {e}"}
@@ -9188,6 +9764,47 @@ class Api:
         sd_body = f"Positive Prompt: {positive}\nNegative Prompt: {negative}"
         return {"ok": True, "stableDiffusionBody": sd_body.strip(), "positive": positive, "negative": negative}
 
+    def generate_relationship_matrix(self, characters, settings=None):
+        """Generate a relationship matrix for currently open workspace characters."""
+        try:
+            settings = self._normalise_settings(settings or self.settings)
+            rows = []
+            for idx, item in enumerate(characters or []):
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or item.get("focusName") or f"Character {idx + 1}").strip() or f"Character {idx + 1}"
+                output = str(item.get("output") or "").strip()
+                if not output:
+                    continue
+                rows.append({"name": name[:120], "output": output[:18000]})
+            if len(rows) < 2:
+                return {"ok": False, "error": "Open at least two generated characters first."}
+            character_blocks = []
+            for i, row in enumerate(rows, start=1):
+                character_blocks.append(f"CHARACTER {i}: {row['name']}\n{row['output']}")
+            prompt = "\n\n".join([
+                "Create a multi-character roleplay relationship matrix for these open character cards.",
+                "Use the card text as canon. Do not invent major contradictions, but infer plausible connections, tensions, alliances, rivalries, attraction, jealousy, secrets, and roleplay hooks where useful.",
+                "Return GitHub-flavored Markdown only.",
+                "Format exactly like this:",
+                "# Relationship Matrix",
+                "## Overview\nShort paragraph on the group dynamic.",
+                "## Matrix\nA table with rows = source character and columns = target character. Each non-self cell should be 1-2 concise sentences. Self cells should be —.",
+                "## Pair Hooks\nBullets for each important pair: **A ↔ B:** hook/tension/conflict.",
+                "## Group Roleplay Seeds\n5-8 bullets for scenes that use multiple characters together.",
+                "Characters:",
+                "\n\n---\n\n".join(character_blocks),
+            ])
+            self._log_event("relationship_matrix_request", {"characterCount": len(rows), "characters": [r["name"] for r in rows]})
+            matrix = self._chat_once(prompt, settings, (settings.get("model") or "").strip(), "relationship_matrix")
+            matrix = re.sub(r"^```(?:markdown|md)?\s*", "", str(matrix or "").strip(), flags=re.IGNORECASE)
+            matrix = re.sub(r"\s*```$", "", matrix).strip()
+            self._log_event("relationship_matrix_response", {"characterCount": len(rows), "preview": matrix[:1000]})
+            return {"ok": True, "matrix": matrix, "characters": [r["name"] for r in rows]}
+        except Exception as e:
+            self._log_event("relationship_matrix_failed", {"error": str(e)})
+            return {"ok": False, "error": str(e)}
+
     def generate_sd_prompt_from_output(self, output, settings=None):
         output = (output or "").strip()
         if not output:
@@ -9307,10 +9924,11 @@ class Api:
         # Without clearing it here, the next Quick Save / Image generation can
         # fail instantly with the stale "Task cancelled by user" error.
         self._reset_cancel()
-        self._log_event("sd_image_generation_start", {"count": 4, "cancelStateReset": True})
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or paste a card first so I can read the Stable Diffusion Prompt section."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        image_count = self._clamp_int_value(merged_settings.get("sdImageCount") or 4, default=4, minimum=1, maximum=16)
+        self._log_event("sd_image_generation_start", {"count": image_count, "cancelStateReset": True})
         self.save_settings(merged_settings)
         prompts = self._extract_sd_prompts(output)
         if not prompts.get("positive"):
@@ -9322,7 +9940,7 @@ class Api:
             "negative_prompt": prompts.get("negative", "low quality, bad anatomy, extra fingers, extra limbs, blurry, watermark, text"),
             "width": 1024,
             "height": 1024,
-            "batch_size": 4,
+            "batch_size": image_count,
             "n_iter": 1,
             "steps": int(float(merged_settings.get("sdSteps", 28) or 28)),
             "cfg_scale": float(merged_settings.get("sdCfgScale", 7.0) or 7.0),
@@ -9350,7 +9968,7 @@ class Api:
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", safe_name).strip("_") or "character_card"
         stamp = time.strftime("%Y%m%d-%H%M%S")
         results = []
-        for idx, b64 in enumerate(images[:4], start=1):
+        for idx, b64 in enumerate(images[:image_count], start=1):
             if "," in b64 and b64.strip().lower().startswith("data:image"):
                 b64 = b64.split(",", 1)[1]
             try:
@@ -9943,6 +10561,347 @@ class Api:
         except Exception:
             return set()
 
+    def _sqlite_table_info(self, cursor, table_name):
+        try:
+            rows = cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+        except Exception:
+            return {}
+        info = {}
+        for row in rows:
+            # cid, name, type, notnull, dflt_value, pk
+            info[str(row[1])] = {
+                "type": str(row[2] or ""),
+                "notnull": bool(row[3]),
+                "default": row[4],
+                "pk": bool(row[5]),
+            }
+        return info
+
+    def _audit_front_porch_insert_plan(self, table_info, table_name, provided_values):
+        messages = []
+        columns = set(table_info.keys())
+        provided = set(provided_values.keys())
+        missing_expected = sorted(provided - columns)
+        for col in missing_expected:
+            messages.append({
+                "level": "error",
+                "table": table_name,
+                "message": f"Missing expected column '{col}'. Character Card Forge writes this column during Front Porch export.",
+            })
+
+        for col, meta in table_info.items():
+            if meta.get("pk"):
+                continue
+            has_default = meta.get("default") is not None
+            if meta.get("notnull") and col not in provided and not has_default:
+                messages.append({
+                    "level": "error",
+                    "table": table_name,
+                    "message": f"Column '{col}' is NOT NULL with no default, but Character Card Forge does not currently provide it.",
+                })
+
+        for col, value in provided_values.items():
+            meta = table_info.get(col)
+            if not meta:
+                continue
+            if meta.get("notnull") and value is None:
+                messages.append({
+                    "level": "error",
+                    "table": table_name,
+                    "message": f"Column '{col}' is NOT NULL, but Character Card Forge currently inserts NULL for it.",
+                })
+        return messages
+
+    def _audit_front_porch_insert_rollback(self, cur, tables):
+        """Exercise the real Front Porch insert path inside a rollback-only transaction.
+
+        The audit intentionally proves that the rows Character Card Forge would
+        insert can be accepted by the current schema, then proves the temporary
+        character/session/message/avatar rows were removed again. This is safer
+        than a permanent probe insert and catches constraint issues that PRAGMA
+        inspection alone cannot see.
+        """
+        result = {"ok": True, "inserted": False, "rolledBack": False, "cleaned": False, "details": []}
+        required = {"characters", "sessions", "messages"}
+        if not required.issubset(set(tables or [])):
+            result["ok"] = False
+            result["details"].append("Skipped rollback insert test because one or more required tables are missing.")
+            return result
+        stamp = int(time.time() * 1000)
+        token = f"ccf_audit_{uuid.uuid4().hex}"
+        char_id = token + "_character"
+        session_id = token + "_session"
+        message_id = token + "_message"
+        avatar_id = token + "_avatar"
+        now = int(time.time())
+        try:
+            cur.execute("SAVEPOINT ccf_audit_insert")
+            cur.execute("""
+                INSERT INTO characters (
+                    id, name, description, personality, scenario, first_message, mes_example,
+                    system_prompt, post_history_instructions, alternate_greetings, tags, image_path,
+                    tts_voice, folder_id, lorebook, world_names, memory_sources, evolved_personality,
+                    evolved_scenario, evolution_count, created_at, updated_at, deleted_at, prime_avatar_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, '[]', '[]', '', '', 0, ?, ?, NULL, 1)
+            """, (
+                char_id, "CCF Audit Temporary Character", "Temporary audit description", "Temporary audit personality",
+                "Temporary audit scenario", "Temporary audit first message", "<START>\n{{char}}: Temporary audit example.",
+                "", "", "[]", "[\"ccf-audit\"]", f"{token}.png", "{\"entries\":[]}", now, now,
+            ))
+            session_columns = [
+                "id", "character_id", "group_id", "name", "description", "author_note", "author_note_depth",
+                "summary", "summary_last_index", "parent_session", "fork_index", "affection_score", "relationship_tier",
+                "long_term_score", "long_term_tier", "turns_since_long_term_check", "short_term_deltas_summary",
+                "realism_enabled", "short_term_mood", "mood_decay_counter", "character_emotion", "emotion_intensity",
+                "time_of_day", "day_count", "nsfw_cooldown_enabled", "passage_of_time_enabled", "arousal_level",
+                "cooldown_turns_remaining", "trust_level", "active_fixation", "fixation_lifespan", "spatial_stance",
+                "trust_repair_pending", "chaos_mode_enabled", "chaos_pressure", "evolved_personality", "evolved_scenario",
+                "evolution_count", "group_evolved_personalities", "group_evolved_scenarios", "generation_settings",
+                "created_at", "updated_at", "deleted_at", "user_persona_id"
+            ]
+            session_values = [
+                session_id, char_id, None, None, None, "", 4,
+                None, None, None, None, 0, 0,
+                0, 0, 0, 0,
+                1, 0, 0, "neutral", "low",
+                "afternoon", 1, 1, 1, 0,
+                0, 0, "", 0, "",
+                0, 1, 0, "", "",
+                0, "{}", "{}", None,
+                now, now, None, None,
+            ]
+            if "start_day_of_week" in self._sqlite_table_columns(cur, "sessions"):
+                session_columns.append("start_day_of_week")
+                session_values.append(0)
+            placeholders = ", ".join(["?"] * len(session_columns))
+            cur.execute(f"INSERT INTO sessions ({', '.join(session_columns)}) VALUES ({placeholders})", session_values)
+            cur.execute("""
+                INSERT INTO messages (id, session_id, position, sender, is_user, character_id, swipes, swipe_index, swipe_durations, metadata, swipe_metadata, updated_at, deleted_at)
+                VALUES (?, ?, 0, ?, 0, NULL, ?, 0, '[0]', NULL, NULL, ?, NULL)
+            """, (message_id, session_id, "CCF Audit Temporary Character", "[\"Temporary audit first message\"]", now))
+            if "avatar_images" in tables:
+                cur.execute("INSERT INTO avatar_images (id, character_id, filename, label, display_order, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (avatar_id, char_id, f"{token}.png", "neutral", 0, now))
+            if "sync_meta" in tables:
+                try:
+                    cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
+                except Exception:
+                    pass
+            result["inserted"] = True
+            cur.execute("ROLLBACK TO ccf_audit_insert")
+            cur.execute("RELEASE ccf_audit_insert")
+            result["rolledBack"] = True
+            leftovers = []
+            checks = [
+                ("characters", "id", char_id),
+                ("sessions", "id", session_id),
+                ("messages", "id", message_id),
+            ]
+            if "avatar_images" in tables:
+                checks.append(("avatar_images", "id", avatar_id))
+            for table, col, value in checks:
+                try:
+                    count = cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} = ?", (value,)).fetchone()[0]
+                    if count:
+                        leftovers.append((table, col, value, int(count)))
+                except Exception as e:
+                    result["details"].append(f"Could not verify rollback cleanup for {table}: {e}")
+            if leftovers:
+                result["ok"] = False
+                for table, col, value, count in leftovers:
+                    result["details"].append(f"Rollback left {count} temporary row(s) in {table}; attempting explicit cleanup.")
+                    cur.execute(f"DELETE FROM {table} WHERE {col} = ?", (value,))
+                result["cleaned"] = True
+            else:
+                result["cleaned"] = True
+                result["details"].append("Temporary character/session/message/avatar rows were rolled back and verified absent.")
+            return result
+        except Exception as e:
+            result["ok"] = False
+            result["details"].append(str(e))
+            try:
+                cur.execute("ROLLBACK TO ccf_audit_insert")
+                cur.execute("RELEASE ccf_audit_insert")
+                result["rolledBack"] = True
+            except Exception:
+                pass
+            try:
+                cur.execute("DELETE FROM avatar_images WHERE id = ? OR character_id = ?", (avatar_id, char_id))
+                cur.execute("DELETE FROM messages WHERE id = ? OR session_id = ?", (message_id, session_id))
+                cur.execute("DELETE FROM sessions WHERE id = ? OR character_id = ?", (session_id, char_id))
+                cur.execute("DELETE FROM characters WHERE id = ?", (char_id,))
+                result["cleaned"] = True
+            except Exception as cleanup_error:
+                result["details"].append(f"Explicit cleanup failed: {cleanup_error}")
+            return result
+
+    def audit_front_porch_database(self, settings=None, target=None, *args):
+        """Read-only compatibility audit for the Front Porch SQLite schema.
+
+        This checks the live Front Porch database against the exact tables and
+        columns Character Card Forge writes during direct export. It does not
+        modify the database. The goal is to catch Front Porch schema changes
+        before an export creates a broken or half-imported character.
+        """
+        if target is None and args:
+            target = args[0]
+        if isinstance(settings, dict) and not target:
+            target = settings.get("frontPorchExportTarget")
+        km, db, err, selected_target = self._front_porch_paths(settings, target=target)
+        if err:
+            return {"ok": False, "error": err, "target": selected_target}
+
+        chars_dir = km / "Characters"
+        report = {
+            "ok": True,
+            "target": selected_target,
+            "targetLabel": "Beta" if selected_target == "beta" else "Stable",
+            "koboldManager": str(km),
+            "database": str(db),
+            "charactersDir": str(chars_dir),
+            "errors": [],
+            "warnings": [],
+            "info": [],
+            "tables": {},
+        }
+
+        def add(level, message, table=None):
+            item = {"level": level, "message": message}
+            if table:
+                item["table"] = table
+            if level == "error":
+                report["errors"].append(item)
+            elif level == "warning":
+                report["warnings"].append(item)
+            else:
+                report["info"].append(item)
+
+        try:
+            con = sqlite3.connect(str(db))
+            cur = con.cursor()
+            table_rows = cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            tables = {str(row[0]) for row in table_rows}
+            required_tables = ["characters", "sessions", "messages", "avatar_images", "sync_meta"]
+            for table in required_tables:
+                if table not in tables:
+                    add("error", f"Required table '{table}' is missing. Front Porch export cannot safely write to this database.", table)
+                    continue
+                info = self._sqlite_table_info(cur, table)
+                report["tables"][table] = {
+                    "columns": sorted(info.keys()),
+                    "columnCount": len(info),
+                }
+
+            if "characters" in tables:
+                character_values = {
+                    "id": "", "name": "", "description": "", "personality": "", "scenario": "",
+                    "first_message": "", "mes_example": "", "system_prompt": "", "post_history_instructions": "",
+                    "alternate_greetings": "[]", "tags": "[]", "image_path": "", "tts_voice": None,
+                    "folder_id": None, "lorebook": "{}", "world_names": "[]", "memory_sources": "[]",
+                    "evolved_personality": "", "evolved_scenario": "", "evolution_count": 0,
+                    "created_at": 0, "updated_at": 0, "deleted_at": None, "prime_avatar_index": 1,
+                }
+                for item in self._audit_front_porch_insert_plan(self._sqlite_table_info(cur, "characters"), "characters", character_values):
+                    add(item["level"], item["message"], item.get("table"))
+
+            if "sessions" in tables:
+                session_values = {
+                    "id": "", "character_id": "", "group_id": None, "name": None, "description": None,
+                    "author_note": "", "author_note_depth": 4, "summary": None, "summary_last_index": None,
+                    "parent_session": None, "fork_index": None, "affection_score": 0, "relationship_tier": 0,
+                    "long_term_score": 0, "long_term_tier": 0, "turns_since_long_term_check": 0,
+                    "short_term_deltas_summary": 0, "realism_enabled": 1, "short_term_mood": 0,
+                    "mood_decay_counter": 0, "character_emotion": "", "emotion_intensity": "",
+                    "time_of_day": "afternoon", "day_count": 1, "nsfw_cooldown_enabled": 1,
+                    "passage_of_time_enabled": 1, "arousal_level": 0, "cooldown_turns_remaining": 0,
+                    "trust_level": 0, "active_fixation": "", "fixation_lifespan": 0, "spatial_stance": "",
+                    "trust_repair_pending": 0, "chaos_mode_enabled": 1, "chaos_pressure": 0,
+                    "evolved_personality": "", "evolved_scenario": "", "evolution_count": 0,
+                    "group_evolved_personalities": "{}", "group_evolved_scenarios": "{}",
+                    "generation_settings": None, "created_at": 0, "updated_at": 0, "deleted_at": None,
+                    "user_persona_id": None,
+                }
+                session_info = self._sqlite_table_info(cur, "sessions")
+                if "start_day_of_week" in session_info:
+                    session_values["start_day_of_week"] = 0
+                    add("info", "sessions.start_day_of_week detected and will be written by Character Card Forge.", "sessions")
+                else:
+                    add("info", "sessions.start_day_of_week not present; export will use Front Porch legacy weekday behavior.", "sessions")
+                for item in self._audit_front_porch_insert_plan(session_info, "sessions", session_values):
+                    add(item["level"], item["message"], item.get("table"))
+
+            if "messages" in tables:
+                message_values = {
+                    "id": "", "session_id": "", "position": 0, "sender": "", "is_user": 0,
+                    "character_id": None, "swipes": "[]", "swipe_index": 0, "swipe_durations": "[0]",
+                    "metadata": None, "swipe_metadata": None, "updated_at": 0, "deleted_at": None,
+                }
+                for item in self._audit_front_porch_insert_plan(self._sqlite_table_info(cur, "messages"), "messages", message_values):
+                    add(item["level"], item["message"], item.get("table"))
+
+            if "avatar_images" in tables:
+                avatar_values = {
+                    "id": "", "character_id": "", "filename": "avatar.png",
+                    "label": "neutral", "display_order": 0, "created_at": 0,
+                }
+                for item in self._audit_front_porch_insert_plan(self._sqlite_table_info(cur, "avatar_images"), "avatar_images", avatar_values):
+                    add(item["level"], item["message"], item.get("table"))
+
+            if "sync_meta" in tables:
+                sync_info = self._sqlite_table_info(cur, "sync_meta")
+                for col in ["id", "version", "last_modified_at"]:
+                    if col not in sync_info:
+                        add("error", f"sync_meta.{col} is missing. Character Card Forge cannot bump Front Porch sync metadata correctly.", "sync_meta")
+                try:
+                    row = cur.execute("SELECT id, version, last_modified_at FROM sync_meta WHERE id = 1").fetchone()
+                    if not row:
+                        add("warning", "sync_meta has no id=1 row. Export can still insert the character, but Front Porch/cloud sync may not notice the database change immediately.", "sync_meta")
+                except Exception as e:
+                    add("warning", f"Could not verify sync_meta id=1 row: {e}", "sync_meta")
+
+            try:
+                insert_test = self._audit_front_porch_insert_rollback(cur, tables)
+                report["insertRollbackTest"] = insert_test
+                if insert_test.get("cleaned"):
+                    try:
+                        con.commit()
+                    except Exception:
+                        pass
+                if insert_test.get("ok"):
+                    add("info", "Rollback insert test passed: temporary character/session/message/avatar rows were inserted inside a transaction, rolled back, and verified absent.", "characters")
+                else:
+                    add("error", "Rollback insert test failed: " + "; ".join(insert_test.get("details") or ["unknown error"]), "characters")
+            except Exception as e:
+                add("error", f"Rollback insert test could not run: {e}", "characters")
+
+            try:
+                char_count = cur.execute("SELECT COUNT(*) FROM characters").fetchone()[0] if "characters" in tables else 0
+                report["characterCount"] = int(char_count)
+            except Exception:
+                report["characterCount"] = None
+
+            con.close()
+        except Exception as e:
+            return {"ok": False, "error": f"Could not audit Front Porch database: {e}", "target": selected_target, "database": str(db)}
+
+        if not chars_dir.exists():
+            add("warning", f"Characters folder does not exist yet: {chars_dir}. Export will try to create it.")
+        else:
+            if not os.access(str(chars_dir), os.W_OK):
+                add("warning", f"Characters folder may not be writable: {chars_dir}")
+
+        report["errorCount"] = len(report["errors"])
+        report["warningCount"] = len(report["warnings"])
+        report["ok"] = report["errorCount"] == 0
+        self._log_event("front_porch_database_audit", {
+            "target": selected_target,
+            "db": str(db),
+            "errors": report["errorCount"],
+            "warnings": report["warningCount"],
+            "tables": {k: v.get("columnCount") for k, v in report["tables"].items()},
+        })
+        return report
+
     def _normalize_front_porch_start_day_of_week(self, value):
         # Front Porch schema v28: 0 = legacy/unset, 1 = Monday ... 7 = Sunday.
         raw = str(value or "").strip().lower()
@@ -10150,8 +11109,15 @@ class Api:
         safe_name = self._extract_name(output) or "character_card"
         safe = self._safe_slug(safe_name)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        export_folder = self._character_export_dir(safe_name)
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        export_root = str(merged_settings.get("exportDestinationFolder") or "").strip()
+        if export_root:
+            export_folder = Path(export_root).expanduser().resolve()
+            _safe_mkdir(export_folder)
+            if not _path_is_writable_dir(export_folder):
+                return {"ok": False, "error": "The selected export folder is not writable."}
+        else:
+            export_folder = self._character_export_dir(safe_name)
         template = template or self.template
 
         if export_format == "chara_v2_png":

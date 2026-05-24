@@ -355,7 +355,7 @@
         </div>
 
         <div id="settings-frontporch" class="subtab-panel" data-subtab-panel="settings">
-          <div class="card wide"><div class="card-title"><div><h3>Front Porch Export</h3><p>Keep Stable and Beta Front Porch installs separate, then pick the target when exporting.</p></div><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Selected Target</button><button id="scanFrontPorchStableBtn" type="button">Scan Stable</button><button id="scanFrontPorchBetaBtn" type="button">Scan Beta</button></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Front Porch Export</h3><p>Keep Stable and Beta Front Porch installs separate, then pick the target when exporting.</p></div><div class="actions"><button id="scanFrontPorchBtn" type="button">Scan Selected Target</button><button id="scanFrontPorchStableBtn" type="button">Scan Stable</button><button id="scanFrontPorchBetaBtn" type="button">Scan Beta</button><button id="auditFrontPorchBtn" type="button" class="primary">Audit Selected DB</button><button id="auditFrontPorchStableBtn" type="button">Audit Stable</button><button id="auditFrontPorchBetaBtn" type="button">Audit Beta</button></div></div>
             <div class="settings-grid">
               <label>Front Porch Export Target<select id="frontPorchExportTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
               <label>Stable Front Porch Data Folder<input id="frontPorchStableDataFolder" placeholder="Stable Front Porch → Settings folder" /></label>
@@ -365,11 +365,20 @@
         </div>
 
         <div id="settings-data-browser" class="subtab-panel" data-subtab-panel="settings">
-          <div class="card wide"><div class="card-title"><div><h3>Data / Browser</h3><p>Where Character Card Forge keeps its local data and how saved cards display in the browser.</p></div><div class="actions"><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Data / Browser</h3><p>Where Character Card Forge keeps its local data and how saved cards display in the browser.</p></div><div class="actions"><button id="checkUpdatesBtn" type="button">Check Updates</button><button id="selectDataFolderBtn" type="button">Select Data Folder</button></div></div>
             <div class="settings-grid">
               <label>Data Files Folder<input id="dataFilesFolder" placeholder="Default user data folder" /></label>
               <label>NSFW Cards in Browser<select id="nsfwBrowserMode"><option value="show">Show normally</option><option value="blur">Show but blur images</option><option value="hide">Hide cards</option></select></label>
               <label class="wide-setting">NSFW Marker Tags<textarea id="nsfwTags" placeholder="NSFW&#10;One tag per line or comma-separated. Cards with any of these tags are treated as NSFW."></textarea></label>
+            </div>
+          </div>
+          <div class="card wide"><div class="card-title"><div><h3>Mobile Remote Server</h3><p>Serve a small mobile page on your LAN. Use it while away from the desktop to enter a Main Concept, generate with the current prompt template, and have the finished card waiting in Character Browser.</p></div><div class="actions"><button id="mobileServerStatusBtn" type="button">Refresh Status</button><button id="mobileServerOpenBtn" type="button" class="primary">Open Mobile Page</button></div></div>
+            <div class="settings-grid">
+              <label class="toggle-inline setting-toggle"><input id="mobileServerEnabled" type="checkbox" /> Enable mobile remote server</label>
+              <label>Bind Host<input id="mobileServerHost" placeholder="0.0.0.0" /></label>
+              <label>Port<input id="mobileServerPort" type="number" min="1024" max="65535" step="1" value="8787" /></label>
+              <label>Access Code <input id="mobileServerAccessCode" placeholder="Optional LAN access code" /></label>
+              <p id="mobileServerStatusText" class="wide-setting small muted">Mobile server is not running.</p>
             </div>
           </div>
         </div>
@@ -524,14 +533,17 @@
           <button class="subtab" data-subtab="output-emotions">Emotion Images</button>
           <button class="subtab" data-subtab="output-fulltext">Full Text Output</button>
           <button class="subtab" data-subtab="output-qa">Q&A Answers</button>
+          <button class="subtab" data-subtab="output-relationships">Relationship Matrix</button>
           <button class="subtab" data-subtab="output-debug">Debug Log</button>
         </div>
         <div class="workspace-tab-shell" data-workspace-tab-shell="output"><button class="workspace-scroll-btn" type="button" data-scroll-tabs="characterOutputTabs" data-scroll-dir="-1">‹</button><div id="characterOutputTabs" class="workspace-tabs character-output-tabs"></div><button class="workspace-scroll-btn" type="button" data-scroll-tabs="characterOutputTabs" data-scroll-dir="1">›</button></div>
         <div id="output-export" class="subtab-panel active" data-subtab-panel="output">
-          <div class="actions output-actions"><button id="loadSavedBtn">Load Saved</button><button id="loadSavedUrlBtn" type="button">Load URL</button><button id="importLoadedCardBtn" type="button">Import to Browser</button><button id="copyBtn">Copy</button><button id="exportBtn" class="primary">Quick Export</button><button id="saveWorkspaceBtn" type="button">Save Workspace</button></div>
-          <div id="savedFileDropZone" class="drop-zone compact">Drop a saved card / project here to load it, or click to browse</div>
-          <div class="card wide import-tools-card"><div class="card-title"><div><h3>Imported Card Tools</h3><p>Import existing cards straight into Character Browser, then generate new portraits, emotion images, or a missing Stable Diffusion Prompt.</p></div></div><div class="actions output-actions"><button id="generateSdPromptFromVisionBtn" type="button">Vision → SD Prompt</button><button id="generateSdPromptFromOutputBtn" type="button">Full Text → SD Prompt</button></div><div id="importedCardToolsHint" class="small muted">Load or import a card first. If it does not already include a Stable Diffusion Prompt, use one of the buttons above to generate and save it.</div></div>
-          <div class="card wide export-card"><div class="export-grid"><label>Export Format<select id="exportFormat"><option value="chara_v2_png">Character Card V2 PNG — embeds V2 JSON into the image</option><option value="chara_v2_json">Character Card V2 JSON — raw V2 metadata for debugging/imports</option><option value="markdown">Markdown/Text card</option></select></label><label>Card Image for V2 PNG<div class="image-picker-row"><input id="cardImagePath" placeholder="Optional. Leave blank to use the built-in blank PNG." /><button id="selectImageBtn" type="button">Select Image</button><button id="cardImageUrlBtn" type="button">Image URL</button><button id="clearImageBtn" type="button" class="danger-ghost">Clear</button><button id="generateImagesBtn" type="button" class="primary">Generate 4 Images</button></div></label></div><p>Character Card Forge now exports Front Porch AI-style Character Card V2 by default. PNG is the default/recommended format; JSON is only there if you want the raw metadata.</p><p>For Character Card V2 PNG export, choose a PNG/JPG/WebP portrait before exporting. Stable Diffusion Prompt is used for image generation, not embedded.</p><div id="cardImageDropZone" class="drop-zone compact">Drop a card image here to use it for PNG export, or click to browse</div><div id="generatedImages" class="generated-images"></div></div>
+          <div class="actions output-actions quick-save-main-actions"><button id="openQuickImportModalBtn" type="button">Import Card</button><button id="openExportModalBtn" type="button" class="primary">Export Card</button><button id="copyBtn">Copy</button></div>
+          <div class="quick-image-workflow">
+            <div class="card card-image-small-card"><div class="card-title compact"><div><h3>Card Image</h3><p>Current V2 PNG portrait.</p></div></div><div class="card-image-small-preview"><img id="cardImagePreview" alt="Current card image preview" /></div><div id="cardImagePreviewHint" class="small muted card-image-small-hint">No custom image selected.</div><div class="actions vertical-actions"><button id="openCardImageModalBtn" type="button">Change Card Image</button><button id="clearImageBtn" type="button" class="danger-ghost">Clear</button></div><input id="cardImagePath" class="hidden-field" aria-hidden="true" tabindex="-1" placeholder="Optional. Leave blank to use the built-in blank PNG." /></div>
+            <div class="card image-generation-card"><div class="card-title"><div><h3>Generate Images</h3><p>Generate candidate portraits from the Stable Diffusion Prompt in the full card output. Results appear below.</p></div><div class="actions"><label class="inline-number-label">Images<input id="sdImageCount" type="number" min="1" max="16" value="4" /></label><button id="generateImagesBtn" type="button" class="primary">Generate Images</button></div></div><div id="importedCardToolsHint" class="small muted">Load or import a card first. Imported cards can generate a missing Stable Diffusion Prompt from the import modal.</div></div>
+          </div>
+          <div id="generatedImages" class="generated-images"></div>
         </div>
         <div id="output-emotions" class="subtab-panel" data-subtab-panel="output">
           <div class="card wide emotion-card"><div class="card-title"><div><h3>Emotion Images</h3><p>Generate Front Porch-compatible emotion portraits and zip them for import.</p></div><div class="actions"><button id="selectAllEmotionsBtn" type="button">Select All</button><button id="clearEmotionsBtn" type="button" class="danger-ghost">Clear</button><button id="generateEmotionImagesBtn" type="button" class="primary">Generate Emotion Images</button><button id="zipEmotionImagesBtn" type="button">Create Front Porch ZIP</button></div></div><div id="emotionOptions" class="emotion-options"></div><div id="emotionImages" class="generated-images emotion-images"></div></div>
@@ -541,6 +553,7 @@
           <div class="card wide followup-card"><div class="card-title"><div><h3>Follow-up Revision</h3><p>Ask the model to change, add, remove, or rewrite something in the generated card.</p></div><button id="reviseBtn" class="primary">Send Follow-up</button></div><textarea id="followupText" class="followup" placeholder="Example: Add two more alternative first messages, make the First Message more flirty, and change Occupation into a Job section."></textarea></div>
         </div>
         <div id="output-qa" class="subtab-panel" data-subtab-panel="output"><div class="card wide"><div class="card-title"><div><h3>Q&A Answers</h3><p>Private pre-generation interview answers used as context for the card. These are not exported into the card itself.</p></div><button id="clearQaAnswersBtn" type="button" class="danger-ghost">Clear Answers</button></div><textarea id="qaAnswersText" class="debug-log" readonly placeholder="Q&A answers will appear here after generation if Q&A is enabled..."></textarea></div></div>
+        <div id="output-relationships" class="subtab-panel" data-subtab-panel="output"><div class="card wide relationship-matrix-card"><div class="card-title"><div><h3>Relationship Matrix</h3><p>Generate a multi-character relationship matrix from the characters currently open in workspace tabs. Useful for group roleplay planning, shared scenarios, rivalries, alliances, jealousy, secrets, and scene hooks.</p></div><div class="actions"><button id="refreshRelationshipMatrixCharactersBtn" type="button">Refresh List</button><button id="generateRelationshipMatrixBtn" type="button" class="primary">Generate Matrix</button><button id="copyRelationshipMatrixBtn" type="button">Copy</button></div></div><div class="relationship-matrix-open-list"><span class="small muted">Open characters:</span><div id="relationshipMatrixOpenCharacters" class="tag-list compact"><div class="empty small">No generated characters are open yet.</div></div></div><textarea id="relationshipMatrixText" class="debug-log relationship-matrix-output" placeholder="Generated relationship matrix will appear here..."></textarea></div></div>
         <div id="output-debug" class="subtab-panel" data-subtab-panel="output">
           <div class="card wide debug-log-card"><div class="card-title"><div><h3>Debug Log</h3><p>Automatically shows the latest log entries and scrolls to the bottom.</p></div><button id="clearLogBtn" type="button" class="danger-ghost">Clear Log</button></div><textarea id="debugLogText" class="debug-log" readonly placeholder="Debug log will appear here automatically..."></textarea></div>
         </div>
@@ -755,13 +768,67 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
     </div>
   </div>
 
+  <div id="quickImportModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Import Card</h3>
+          <p>Import a card/project from a file or URL. You can also choose whether to generate a missing Stable Diffusion Prompt during import.</p>
+        </div>
+        <button id="closeQuickImportModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <label id="quickImportDropZone" for="quickImportFileInput" class="drop-zone">Drop a PNG / JSON / TXT / project file here, or click to browse</label>
+      <div id="quickImportSelected" class="small muted">No file or URL selected.</div>
+      <label>Import Path or URL<input id="quickImportPath" placeholder="https://example.com/card.png or selected file name" /></label>
+      <div class="card mini-option-card">
+        <h4>Stable Diffusion Prompt on Import</h4>
+        <label class="toggle-inline"><input type="radio" name="quickImportSdMode" value="none" checked /> Do not generate now. Leave Stable Diffusion Prompt empty so I can fill it manually later.</label>
+        <label class="toggle-inline"><input type="radio" name="quickImportSdMode" value="vision" /> Vision → SD Prompt using the imported/current image.</label>
+        <label class="toggle-inline"><input type="radio" name="quickImportSdMode" value="full_text" /> Full Text → SD Prompt using the imported card text.</label>
+      </div>
+      <div class="actions modal-actions"><button id="clearQuickImportSourceBtn" type="button" class="danger-ghost">Clear</button><button id="runQuickImportBtn" type="button" class="primary">Import</button></div>
+    </div>
+  </div>
+
+  <div id="exportCardModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Export Card</h3>
+          <p>Choose the export format and destination folder.</p>
+        </div>
+        <button id="closeExportModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <label>Export Format<select id="exportFormat"><option value="chara_v2_png">Character Card V2 PNG — embeds V2 JSON into the image</option><option value="chara_v2_json">Character Card V2 JSON — raw V2 metadata for debugging/imports</option><option value="markdown">Markdown/Text card</option></select></label>
+      <label>Export Folder<div class="image-picker-row"><input id="exportDestinationFolder" placeholder="Leave blank to use the character export folder" /><button id="selectExportFolderBtn" type="button">Browse</button></div></label>
+      <p class="small muted">PNG export uses the current card image above. If no image is set, the built-in blank image is used.</p>
+      <div class="actions modal-actions"><button id="runExportCardBtn" type="button" class="primary">Export Card</button></div>
+    </div>
+  </div>
+
+  <div id="cardImageModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Card Image</h3>
+          <p>Set or replace the current card image from a local file, dropped image, path, or URL.</p>
+        </div>
+        <button id="closeCardImageModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <label id="cardImageDropZone" for="cardImageFileInput" class="drop-zone">Drop a PNG / JPG / WebP here, or click to browse</label>
+      <label>Image Path or URL<input id="cardImageModalPath" placeholder="Local path or https://example.com/image.png" /></label>
+      <div class="actions modal-actions"><button id="applyCardImagePathBtn" type="button" class="primary">Use This Image</button></div>
+    </div>
+  </div>
+
   <input id="conceptImportFileInput" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" hidden />
   <input id="visionFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" aria-hidden="true" tabindex="-1" />
-  <input id="cardImageFileInput" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden />
+  <input id="cardImageFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" aria-hidden="true" tabindex="-1" />
   <input id="savedFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
+  <input id="quickImportFileInput" class="ccf-file-input-hidden" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" aria-hidden="true" tabindex="-1" />
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.6"></script>
+  <script src="app.js?v=1.0.7"></script>
 </body>
 </html>
