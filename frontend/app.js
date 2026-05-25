@@ -19,6 +19,9 @@ let currentCardRatingSourceHash = "";
 let selectedCharacterProjectPath = "";
 let characterBrowserCards = [];
 let browserSortMode = "date_desc";
+let browserSortModesByFolder = {};
+let browserCustomOrdersByFolder = {};
+let browserDraggedCardPaths = [];
 let browserSearchTerm = "";
 let browserIncludeTags = new Set();
 let browserExcludeTags = new Set();
@@ -29,9 +32,17 @@ let aiTagCleanupSuggestions = [];
 let browserSelectedProjects = new Set();
 let browserVirtualFolders = [];
 let browserCurrentFolderId = "";
+let browserHasLoadedOnce = false;
+let browserNeedsRefresh = false;
+let browserFolderContextMenuId = "";
 let browserFolderScope = "global";
 let outputEditorSaveTimer = null;
 let browserShowSubfolders = false;
+let browserTagSearchTerm = "";
+let browserContextMenuPaths = [];
+let browserPendingMovePaths = [];
+let browserMoveTargetFolderId = "";
+let browserExpandedMoveFolders = new Set();
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
 let recentModels = [];
@@ -46,10 +57,16 @@ let currentLoadedType = "";
 let characterOutputTabs = [];
 let activeOutputTabIndex = 0;
 let updateCheckTimer = null;
+let updateStartupRetryTimers = [];
 let updateCheckInProgress = false;
+let updateCheckQueuedManual = false;
+let updateCheckQueuedAuto = false;
 let lastShownUpdateVersion = '';
+let lastDismissedUpdateVersion = '';
 let updateReleaseUrl = '';
 let updateRepositoryUrl = 'https://github.com/FrozenKangaroo/Character-Card-Forge/';
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const UPDATE_STARTUP_CHECK_DELAYS_MS = [2500, 15000, 60000];
 let ratingImprovementProjectPath = '';
 let ratingImproveFieldDiffs = [];
 let ratingImproveLostDetails = [];
@@ -63,6 +80,13 @@ let activeManualGuideTabIndex = 0;
 let workspaceTabCloseInProgress = false;
 let workspaceTabRenderSuspendAutoScroll = false;
 let relationshipMatrixText = '';
+let aiQueue = [];
+let aiQueueActiveJob = null;
+let aiQueueSequence = 1;
+let aiQueueInstalled = false;
+let aiQueueRawApi = null;
+let aiQueueBusyOverride = false;
+let pendingAiQueueLabel = '';
 
 
 const $ = (sel, root=document) => root.querySelector(sel);
@@ -103,6 +127,8 @@ function updateAppVersionDisplay() {
 function closeUpdateAvailableModal() {
   const modal = $('#updateAvailableModal');
   if (!modal) return;
+  const latest = ($('#updateLatestVersion')?.textContent || '').trim();
+  if (latest && latest !== 'unknown') lastDismissedUpdateVersion = latest;
   modal.classList.add('hidden');
   modal.setAttribute('aria-hidden', 'true');
 }
@@ -170,30 +196,87 @@ async function openUpdateRepositoryPage() {
   await openAllowedExternalPage(url, 'GitHub page');
 }
 
-async function checkForAppUpdates(manual = false) {
-  if (updateCheckInProgress) return;
+async function checkForAppUpdates(manual = false, options = {}) {
+  const source = String(options?.source || (manual ? 'manual' : 'auto'));
+  const forceModal = !!options?.forceModal;
+  if (updateCheckInProgress) {
+    if (manual) updateCheckQueuedManual = true;
+    else updateCheckQueuedAuto = true;
+    return null;
+  }
   updateCheckInProgress = true;
   try {
+    try { await writeClientDebugEvent('update_check_frontend_start', { manual, source, appVersion }); } catch (_) {}
     const res = await window.pywebview.api.check_for_updates();
+    try {
+      await writeClientDebugEvent('update_check_frontend_result', {
+        manual,
+        source,
+        ok: !!res?.ok,
+        isNewer: !!res?.isNewer,
+        currentVersion: res?.currentVersion || appVersion || 'unknown',
+        latestVersion: res?.latestVersion || res?.latestTag || '',
+        updateKind: res?.updateKind || '',
+        error: res?.error || ''
+      });
+    } catch (_) {}
     if (res?.ok && res.isNewer && res.latestVersion) {
-      if (manual || !isUpdateAvailableModalOpen()) showUpdateAvailableModal(res);
-    } else if (manual) {
+      const latest = String(res.latestVersion || res.latestTag || '').trim();
+      const dismissedThisSession = latest && latest === lastDismissedUpdateVersion;
+      // Manual checks should always show the modal. Startup checks should also
+      // show it even if a previous auto check already found the same version.
+      // Hourly checks respect Remind Me Later for the current session unless
+      // forceModal is passed.
+      if (manual || forceModal || !dismissedThisSession || !isUpdateAvailableModalOpen()) {
+        showUpdateAvailableModal(res);
+        try { await writeClientDebugEvent('update_check_frontend_modal_shown', { manual, source, latestVersion: latest }); } catch (_) {}
+      }
+      return res;
+    }
+    if (manual) {
       const latest = res?.latestVersion || res?.latestTag || 'unknown';
       if (res?.ok) setStatus(`No newer release found. Latest GitHub release is ${latest}.`, 'ok');
       else setStatus(res?.error || 'Could not check for updates.', 'error');
     }
+    return res || null;
   } catch (err) {
     if (manual) setStatus(err.message || String(err), 'error');
-    try { await writeClientDebugEvent('update_check_frontend_error', { error: err.message || String(err) }); } catch (_) {}
+    try { await writeClientDebugEvent('update_check_frontend_error', { manual, source, error: err.message || String(err) }); } catch (_) {}
+    return { ok: false, error: err.message || String(err) };
   } finally {
     updateCheckInProgress = false;
+    if (updateCheckQueuedManual || updateCheckQueuedAuto) {
+      const runManual = updateCheckQueuedManual;
+      updateCheckQueuedManual = false;
+      updateCheckQueuedAuto = false;
+      setTimeout(() => checkForAppUpdates(runManual, { source: runManual ? 'manual-queued' : 'auto-queued', forceModal: runManual }), 250);
+    }
   }
+}
+
+function scheduleStartupUpdateChecks() {
+  updateStartupRetryTimers.forEach(timer => clearTimeout(timer));
+  updateStartupRetryTimers = [];
+  UPDATE_STARTUP_CHECK_DELAYS_MS.forEach((delay, index) => {
+    const timer = setTimeout(async () => {
+      // If a modal is already open, do not stack another startup check result.
+      if (isUpdateAvailableModalOpen()) return;
+      const res = await checkForAppUpdates(false, { source: `startup-${index + 1}`, forceModal: true });
+      // Once an update modal has appeared, later startup retries become noise.
+      if (res?.ok && res.isNewer && isUpdateAvailableModalOpen()) {
+        updateStartupRetryTimers.forEach(t => clearTimeout(t));
+        updateStartupRetryTimers = [];
+      }
+    }, delay);
+    updateStartupRetryTimers.push(timer);
+  });
 }
 
 function startUpdateChecks() {
   if (updateCheckTimer) clearInterval(updateCheckTimer);
-  setTimeout(() => checkForAppUpdates(false), 3500);
-  updateCheckTimer = setInterval(() => checkForAppUpdates(false), 60 * 60 * 1000);
+  scheduleStartupUpdateChecks();
+  updateCheckTimer = setInterval(() => checkForAppUpdates(false, { source: 'hourly', forceModal: false }), UPDATE_CHECK_INTERVAL_MS);
+  try { writeClientDebugEvent('update_check_frontend_schedule_started', { startupDelaysMs: UPDATE_STARTUP_CHECK_DELAYS_MS, intervalMs: UPDATE_CHECK_INTERVAL_MS }); } catch (_) {}
 }
 
 function setTextareaValue(id, value) {
@@ -328,7 +411,8 @@ function applyActiveOutputTab() {
 
 
 function workspaceTabNameForIndex(index) {
-  const outputName = characterOutputTabs[index]?.name || characterOutputTabs[index]?.focusName;
+  const outputTab = characterOutputTabs[index] || {};
+  const outputName = extractOutputNameForTab(loadedOutputTextFromTab(outputTab) || outputTab.output || '') || outputTab.name || outputTab.focusName;
   const conceptName = conceptWorkspaceTabs[index]?.name;
   const manualName = manualGuideTabs[index]?.name;
   return cleanOutputTabName(outputName || conceptName || manualName || `Character ${Number(index || 0) + 1}`) || `Character ${Number(index || 0) + 1}`;
@@ -473,9 +557,9 @@ function addLinkedWorkspaceTab({ outputTab = null, conceptTab = null, manualTab 
   const idx = characterOutputTabs.length;
   const output = outputTab ? { ...makeBlankOutputTab(outputTab.name || outputTab.focusName || `Character ${idx + 1}`), ...(outputTab || {}) } : makeBlankOutputTab(`Character ${idx + 1}`);
   output.output = loadedOutputTextFromTab(output);
-  const name = cleanOutputTabName(output.name || output.focusName || extractOutputNameForTab(output.output || '') || `Character ${idx + 1}`) || `Character ${idx + 1}`;
+  const name = cleanOutputTabName(extractOutputNameForTab(output.output || '') || output.name || output.focusName || `Character ${idx + 1}`) || `Character ${idx + 1}`;
   output.name = name;
-  output.focusName = output.focusName || name;
+  output.focusName = name;
   output.projectPath = canonicalWorkspaceProjectPath(output.projectPath || output.workspaceProjectPath || output.sourcePath || '');
   output.workspaceProjectPath = output.projectPath || output.workspaceProjectPath || '';
   output.qaAnswers = loadedQaTextFromTab(output);
@@ -1318,23 +1402,245 @@ function updateImportedCardToolsHint() {
     ? 'This card does not currently have a Stable Diffusion Prompt. Use Vision → SD Prompt to infer one from the current card image, or Full Text → SD Prompt to build one from the loaded metadata.'
     : 'This card does not currently have a Stable Diffusion Prompt. Use Full Text → SD Prompt to build one from the loaded metadata, or choose a card image first and then use Vision → SD Prompt.';
 }
+const AI_QUEUE_METHODS = new Set([
+  'ai_builder_randomize_preset', 'ai_builder_suggest', 'ai_transfer_to_builders',
+  'generate_idea', 'generateIdea', 'generateIdeaFromOptions',
+  'analyze_vision_image',
+  'generate_sd_prompt_from_output', 'generate_sd_prompt_from_vision',
+  'generate_relationship_matrix',
+  'ai_suggest_tag_cleanup',
+  'regenerate_browser_description_for_project', 'ensure_card_rating_details_for_project',
+  'generate_card_improvement_from_rating', 'generateCardImprovementFromRating', 'improveCardFromRating',
+  'generate_split_cards', 'generate_qa_context', 'generate_with_qa_answers', 'generate', 'revise_card',
+  'generate_sd_images', 'generate_emotion_images', 'regenerate_emotion_image',
+  'card_upload_to_builders', 'card_url_to_builders', 'pick_card_to_builders'
+]);
+
+function looksLikeAiTaskText(value) {
+  const task = String(value || '').toLowerCase();
+  return /\b(ai|generation|generating|q&a|vision|stable diffusion|sd forge|sd images|emotion image|tag cleanup|description|revision|revise|suggestion|random theme|transfer to builders|backup text model|model|relationship matrix|idea generator)\b/.test(task);
+}
+
+function humanizeAiMethodName(name) {
+  const pretty = {
+    generate: 'Generate Card',
+    generate_split_cards: 'Generate Split Cards',
+    generate_qa_context: 'Generate Q&A Context',
+    generate_with_qa_answers: 'Generate Card from Q&A',
+    revise_card: 'Revise Card',
+    generate_idea: 'Idea Generator',
+    generateIdea: 'Idea Generator',
+    generateIdeaFromOptions: 'Idea Generator',
+    analyze_vision_image: 'Vision Analysis',
+    ai_transfer_to_builders: 'Transfer to Builders',
+    ai_builder_suggest: 'AI Builder Suggestion',
+    ai_builder_randomize_preset: 'Random Theme Builder',
+    generate_relationship_matrix: 'Relationship Matrix',
+    generate_sd_prompt_from_output: 'Full Text → SD Prompt',
+    generate_sd_prompt_from_vision: 'Vision → SD Prompt',
+    ai_suggest_tag_cleanup: 'AI Tag Cleanup',
+    regenerate_browser_description_for_project: 'AI Browser Analysis',
+    ensure_card_rating_details_for_project: 'Rating Detail Repair',
+    generate_card_improvement_from_rating: 'AI Card Improvement',
+    generateCardImprovementFromRating: 'AI Card Improvement',
+    improveCardFromRating: 'AI Card Improvement',
+    generate_sd_images: 'Stable Diffusion Images',
+    generate_emotion_images: 'Emotion Images',
+    regenerate_emotion_image: 'Regenerate Emotion Image',
+    card_upload_to_builders: 'Load Card to Builders',
+    card_url_to_builders: 'Load Card URL to Builders',
+    pick_card_to_builders: 'Load Card to Builders'
+  };
+  return pretty[name] || String(name || 'AI Job').replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function renderAiQueuePanel() {
+  const count = $('#aiQueueCount');
+  const list = $('#aiQueueList');
+  const active = $('#aiQueueActive');
+  const viewBtn = $('#viewAiQueueBtn');
+  const queued = aiQueue.filter(job => !job.cancelled);
+  const activeText = aiQueueActiveJob ? `Running: ${aiQueueActiveJob.label}` : '';
+  const queueText = queued.length ? `${queued.length} queued` : 'No queued jobs';
+
+  if (count) count.textContent = activeText ? `${activeText} · ${queueText}` : queueText;
+
+  if (active) {
+    active.innerHTML = aiQueueActiveJob
+      ? `<strong>Running now</strong><span>${escapeHtml(aiQueueActiveJob.label)}</span>`
+      : '<strong>Running now</strong><span>No active AI job.</span>';
+    active.classList.toggle('hidden', !aiQueueActiveJob);
+  }
+
+  if (list) {
+    if (!queued.length) {
+      list.innerHTML = '<div class="ai-queue-empty">No waiting AI jobs.</div>';
+    } else {
+      list.innerHTML = queued.map((job, index) => `
+        <div class="ai-queue-job" data-job-id="${job.id}">
+          <span class="ai-queue-position">#${index + 1}</span>
+          <span class="ai-queue-title">${escapeHtml(job.label)}</span>
+          <button type="button" class="ai-queue-cancel" data-cancel-ai-job="${job.id}">Cancel</button>
+        </div>
+      `).join('');
+    }
+  }
+
+  if (viewBtn) {
+    const hasQueueUi = !!aiQueueActiveJob || queued.length > 0;
+    viewBtn.classList.toggle('hidden', !hasQueueUi);
+    viewBtn.textContent = queued.length ? `View Queue (${queued.length})` : 'View Queue';
+    viewBtn.title = activeText ? `${activeText} · ${queueText}` : queueText;
+  }
+}
+
+function openAiQueueModal() {
+  renderAiQueuePanel();
+  const modal = $('#aiQueueModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeAiQueueModal() {
+  const modal = $('#aiQueueModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function rejectQueuedJob(job, reason = 'Queued AI job cancelled before start.') {
+  if (!job || job.cancelled) return;
+  job.cancelled = true;
+  try {
+    const err = new Error(reason);
+    err.cancelled = true;
+    job.reject(err);
+  } catch (_) {}
+}
+
+function cancelQueuedAiJob(id) {
+  const jobId = Number(id);
+  const job = aiQueue.find(item => item.id === jobId);
+  if (!job) return;
+  aiQueue = aiQueue.filter(item => item.id !== jobId);
+  rejectQueuedJob(job);
+  renderAiQueuePanel();
+  updateAvailability();
+  setStatus(`Cancelled queued AI job: ${job.label}`, 'ok');
+}
+
+function runNextAiQueueJob() {
+  if (aiQueueActiveJob) return;
+  while (aiQueue.length && aiQueue[0].cancelled) aiQueue.shift();
+  const job = aiQueue.shift();
+  if (!job) {
+    renderAiQueuePanel();
+    updateAvailability();
+    return;
+  }
+  aiQueueActiveJob = job;
+  aiQueueBusyOverride = true;
+  try { setBusy(job.label); }
+  finally { aiQueueBusyOverride = false; }
+  renderAiQueuePanel();
+  Promise.resolve()
+    .then(async () => {
+      try {
+        const reset = aiQueueRawApi?.reset_cancel_request || aiQueueRawApi?.resetCancelRequest;
+        if (typeof reset === 'function') await reset.call(aiQueueRawApi);
+      } catch (_) {}
+      return await job.original(...job.args);
+    })
+    .then(job.resolve, job.reject)
+    .finally(() => {
+      aiQueueActiveJob = null;
+      while (aiQueue.length && aiQueue[0].cancelled) aiQueue.shift();
+      renderAiQueuePanel();
+      // Let the frontend function that just resumed enqueue any follow-up AI call
+      // first. This keeps multi-step features, like Q&A -> final generation, from
+      // being split apart by unrelated queued jobs.
+      setTimeout(() => {
+        if (aiQueueActiveJob) return;
+        while (aiQueue.length && aiQueue[0].cancelled) aiQueue.shift();
+        if (aiQueue.length) {
+          runNextAiQueueJob();
+        } else {
+          aiQueueBusyOverride = true;
+          try { setBusy(''); }
+          finally { aiQueueBusyOverride = false; }
+          renderAiQueuePanel();
+          updateAvailability();
+        }
+      }, 0);
+    });
+}
+
+function enqueueAiApiCall(methodName, original, args) {
+  const label = pendingAiQueueLabel || humanizeAiMethodName(methodName);
+  pendingAiQueueLabel = '';
+  return new Promise((resolve, reject) => {
+    const job = { id: aiQueueSequence++, methodName, label, original, args, resolve, reject, createdAt: Date.now(), cancelled: false };
+    if (aiQueueActiveJob) {
+      aiQueue.push(job);
+      renderAiQueuePanel();
+      updateAvailability();
+      setStatus(`Queued AI job: ${label}`, 'ok');
+    } else {
+      const continuation = isBusy && looksLikeAiTaskText(currentTask) && aiQueue.length > 0;
+      if (continuation) aiQueue.unshift(job);
+      else aiQueue.push(job);
+      runNextAiQueueJob();
+    }
+  });
+}
+
+function installAiApiQueue() {
+  if (aiQueueInstalled || !window.pywebview || !window.pywebview.api) return;
+  const originalApi = window.pywebview.api;
+  aiQueueRawApi = originalApi;
+  window.pywebview.api = new Proxy(originalApi, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof prop === 'string' && AI_QUEUE_METHODS.has(prop) && typeof value === 'function') {
+        return (...args) => enqueueAiApiCall(prop, value.bind(target), args);
+      }
+      return value;
+    }
+  });
+  aiQueueInstalled = true;
+}
+
 function setBusy(task) {
-  isBusy = !!task;
-  currentTask = task || '';
+  const nextTask = task || '';
+  if (nextTask && aiQueueActiveJob && looksLikeAiTaskText(nextTask) && !aiQueueBusyOverride) {
+    pendingAiQueueLabel = nextTask;
+    renderAiQueuePanel();
+    updateAvailability();
+    return;
+  }
+  if (!nextTask && aiQueueActiveJob && !aiQueueBusyOverride) {
+    renderAiQueuePanel();
+    updateAvailability();
+    return;
+  }
+  isBusy = !!nextTask;
+  currentTask = nextTask;
   const banner = $('#busyBanner');
   const busyText = $('#busyText');
   if (banner) {
-    if (busyText) busyText.textContent = task || '';
-    banner.classList.toggle('hidden', !task);
+    if (busyText) busyText.textContent = nextTask || '';
+    banner.classList.toggle('hidden', !nextTask);
     banner.classList.toggle('ai-only-busy', isAiGenerationBusy());
   }
+  renderAiQueuePanel();
   updateAvailability();
 }
 
 function isAiGenerationBusy() {
+  if (aiQueueActiveJob) return true;
   if (!isBusy) return false;
-  const task = String(currentTask || '').toLowerCase();
-  return /\b(ai|generation|generating|q&a|vision|stable diffusion|sd forge|sd images|emotion image|tag cleanup|description|revision|revise|suggestion|random theme|transfer to builders|backup text model|model)\b/.test(task);
+  return looksLikeAiTaskText(currentTask);
 }
 
 function isInterfaceLocked() {
@@ -1402,13 +1708,13 @@ function setVisionImagePath(path) {
   const analyze = $('#analyzeVisionBtn');
   if (analyze) {
     analyze.dataset.visionPath = value;
-    analyze.disabled = isInterfaceLocked() || isAiGenerationBusy() ? true : !value;
+    analyze.disabled = isInterfaceLocked() ? true : !value;
     analyze.title = value ? '' : 'Select a vision image first.';
   }
   const fullCardAnalyze = $('#analyzeFullCardBtn');
   if (fullCardAnalyze) {
     fullCardAnalyze.dataset.visionPath = value;
-    fullCardAnalyze.disabled = isInterfaceLocked() || isAiGenerationBusy() ? true : !value;
+    fullCardAnalyze.disabled = isInterfaceLocked() ? true : !value;
     fullCardAnalyze.title = value ? '' : 'Select a vision image first.';
   }
 }
@@ -1595,9 +1901,9 @@ function updateAvailability() {
     if (el.id === 'status') return;
     if (hardLocked) {
       el.disabled = true;
-    } else if (aiBusy) {
-      el.disabled = isAiActionElement(el);
     } else {
+      // While an AI job is running, normal controls stay usable and AI controls
+      // remain clickable so their backend calls can be added to the queue.
       el.disabled = false;
     }
   });
@@ -1607,28 +1913,28 @@ function updateAvailability() {
 
   ['conceptAttachmentDropZone','visionDropZone','savedFileDropZone','cardImageDropZone','builderCardDropZoneMain','builderCardDropZoneMode','conceptCardDropZoneMain','conceptCardDropZoneMode'].forEach(id => {
     const z = $('#'+id);
-    if (z) z.classList.toggle('disabled', hardLocked || (aiBusy && isAiDropZoneId(id)));
+    if (z) z.classList.toggle('disabled', hardLocked);
   });
 
   if (!hardLocked) {
     ['copyBtn','exportBtn','zipEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
-    ['reviseBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output || aiBusy; });
+    ['reviseBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
     const genCard = $('#generateBtn');
-    if (genCard) genCard.disabled = aiBusy;
+    if (genCard) genCard.disabled = false;
     const genImg = $('#generateImagesBtn');
-    if (genImg) genImg.disabled = !sdReady || aiBusy;
+    if (genImg) genImg.disabled = !sdReady;
     const path = getVisionImagePath();
     const analyze = $('#analyzeVisionBtn');
     if (analyze) {
       analyze.dataset.visionPath = path;
-      analyze.disabled = !path || aiBusy;
-      analyze.title = path ? (aiBusy ? 'An AI task is already running.' : 'Open vision analysis options.') : 'Select a vision image first.';
+      analyze.disabled = !path;
+      analyze.title = path ? 'Open vision analysis options. If another AI job is running, this will be queued.' : 'Select a vision image first.';
     }
     const fullCardAnalyze = $('#analyzeFullCardBtn');
     if (fullCardAnalyze) {
       fullCardAnalyze.dataset.visionPath = path;
-      fullCardAnalyze.disabled = !path || aiBusy;
-      fullCardAnalyze.title = path ? (aiBusy ? 'An AI task is already running.' : 'Analyze the full card image into Main Concept.') : 'Select a vision image first.';
+      fullCardAnalyze.disabled = !path;
+      fullCardAnalyze.title = path ? 'Analyze the full card image into Main Concept. If another AI job is running, this will be queued.' : 'Select a vision image first.';
     }
     const follow = $('#followupText');
     if (follow) follow.disabled = !output;
@@ -1662,9 +1968,13 @@ function bindTabs() {
     btn.classList.add('active');
     $('#' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'browser') {
-      showBrowserLoadingModal();
-      await waitForNextFrame();
-      await refreshCharacterBrowser(false, { modal: true, keepModalVisible: true });
+      if (!browserHasLoadedOnce || browserNeedsRefresh) {
+        showBrowserLoadingModal();
+        await waitForNextFrame();
+        await refreshCharacterBrowser(false, { modal: true, keepModalVisible: true });
+      } else {
+        renderCharacterBrowser();
+      }
     }
     if (btn.dataset.tab === 'manual') {
       renderManualGuide();
@@ -1744,6 +2054,7 @@ async function init() {
   bindWorkspaceTabScrollers();
   bindSubTabs();
   const state = await window.pywebview.api.get_state();
+  installAiApiQueue();
   template = state.template;
   settings = state.settings;
   appVersion = (state.version || 'unknown').toString().trim() || 'unknown';
@@ -1834,6 +2145,9 @@ function hydrateSettings() {
   const firstCustomInstructions = $('#firstCustomInstructions'); if (firstCustomInstructions) firstCustomInstructions.value = settings.firstMessageCustomInstructions || '';
   browserTagMerges = cleanBrowserTagMerges(settings.browserTagMerges || {});
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
+  browserSortModesByFolder = (settings.browserSortModesByFolder && typeof settings.browserSortModesByFolder === 'object') ? settings.browserSortModesByFolder : {};
+  browserCustomOrdersByFolder = (settings.browserCustomOrdersByFolder && typeof settings.browserCustomOrdersByFolder === 'object') ? settings.browserCustomOrdersByFolder : {};
+  browserSortMode = getBrowserFolderSortMode(browserCurrentFolderId);
   browserShowSubfolders = !!settings.browserShowSubfolders;
   const showSubfolders = $('#browserShowSubfolders'); if (showSubfolders) showSubfolders.checked = browserShowSubfolders;
   initIdeaSettingsEditor();
@@ -1914,8 +2228,8 @@ function applyLoadedState(state, options = {}) {
       ...tab,
       output: loadedOutputTextFromTab(tab),
       fullTextOutput: loadedOutputTextFromTab(tab),
-      name: tab.name || tab.focusName || extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || `Character ${idx + 1}`,
-      focusName: tab.focusName || tab.name || `Character ${idx + 1}`,
+      name: extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || tab.name || tab.focusName || `Character ${idx + 1}`,
+      focusName: extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || tab.focusName || tab.name || `Character ${idx + 1}`,
       qaAnswers: loadedQaTextFromTab(tab),
       qnaAnswers: loadedQaTextFromTab(tab),
       cardImagePath: tab.cardImagePath || tab.imagePath || '',
@@ -2406,6 +2720,8 @@ function collectSettings() {
     emotionImageEmotions: $$('#emotionOptions input:checked').map(el => el.value),
     browserTagMerges: browserTagMerges || {},
     browserVirtualFolders: browserVirtualFolders || [],
+    browserSortModesByFolder: browserSortModesByFolder || {},
+    browserCustomOrdersByFolder: browserCustomOrdersByFolder || {},
     browserShowSubfolders: !!browserShowSubfolders,
     mobileServerEnabled: !!($('#mobileServerEnabled') && $('#mobileServerEnabled').checked),
     mobileServerHost: ($('#mobileServerHost') ? $('#mobileServerHost').value.trim() : '0.0.0.0') || '0.0.0.0',
@@ -3528,6 +3844,7 @@ function bindActions() {
   $('#generateRelationshipMatrixBtn')?.addEventListener('click', generateRelationshipMatrixForOpenCharacters);
   $('#refreshRelationshipMatrixCharactersBtn')?.addEventListener('click', refreshRelationshipMatrixOpenCharacterList);
   $('#copyRelationshipMatrixBtn')?.addEventListener('click', copyRelationshipMatrixToClipboard);
+  $('#insertRelationshipMatrixBtn')?.addEventListener('click', insertRelationshipMatrixIntoOpenCards);
   $('#relationshipMatrixText')?.addEventListener('input', () => { relationshipMatrixText = $('#relationshipMatrixText').value || ''; });
   $('#manualBackBtn')?.addEventListener('click', manualGuidePreviousPage);
   $('#manualNextBtn')?.addEventListener('click', manualGuideNextPage);
@@ -3644,6 +3961,14 @@ function bindActions() {
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
   $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
+  $('#viewAiQueueBtn')?.addEventListener('click', openAiQueueModal);
+  $('#closeAiQueueModalBtn')?.addEventListener('click', closeAiQueueModal);
+  $('#aiQueueModal')?.addEventListener('click', (event) => { if (event.target && event.target.id === 'aiQueueModal') closeAiQueueModal(); });
+  $('#aiQueueList')?.addEventListener('click', (event) => {
+    const btn = event.target?.closest?.('[data-cancel-ai-job]');
+    if (!btn) return;
+    cancelQueuedAiJob(btn.dataset.cancelAiJob);
+  });
   $('#generateBtn').addEventListener('click', openGenerationOptionsModal);
   $('#openIdeaGeneratorModalBtn')?.addEventListener('click', openIdeaGeneratorModal);
   $('#closeGenerationOptionsModalBtn')?.addEventListener('click', closeGenerationOptionsModal);
@@ -3673,23 +3998,51 @@ function bindActions() {
   $('#browserMultiDeleteBtn')?.addEventListener('click', deleteSelectedCharacterDirectories);
   $('#browserMultiExportPngBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_png'));
   $('#browserMultiExportJsonBtn')?.addEventListener('click', () => exportSelectedCharactersBatch('chara_v2_json'));
-  $('#browserMultiFrontPorchBtn')?.addEventListener('click', exportSelectedCharactersToFrontPorchBatch);
+  $('#browserMultiFrontPorchBtn')?.addEventListener('click', () => exportSelectedCharactersToFrontPorchBatch());
+  $('#browserSelectAllVisibleBtn')?.addEventListener('click', selectAllVisibleBrowserCards);
+  $('#browserUnselectAllBtn')?.addEventListener('click', clearBrowserMultiSelection);
   $('#browserCreateFolderBtn')?.addEventListener('click', createBrowserVirtualFolder);
-  $('#browserRenameFolderBtn')?.addEventListener('click', renameCurrentBrowserFolder);
-  $('#browserDeleteFolderBtn')?.addEventListener('click', deleteCurrentBrowserFolder);
   $('#browserMoveToFolderBtn')?.addEventListener('click', moveSelectedCharactersToFolder);
-  $('#browserShowSubfolders')?.addEventListener('change', (e) => { browserShowSubfolders = !!e.currentTarget.checked; settings = { ...(settings || {}), browserShowSubfolders }; try { window.pywebview.api.save_settings(settings); } catch (_) {} renderCharacterBrowser(); });
+  const setShowSubfolders = (checked) => { browserShowSubfolders = !!checked; settings = { ...(settings || {}), browserShowSubfolders }; try { window.pywebview.api.save_settings(settings); } catch (_) {} renderCharacterBrowser(); };
+  $('#browserShowSubfolders')?.addEventListener('change', (e) => setShowSubfolders(e.currentTarget.checked));
+  $('#browserShowSubfoldersModal')?.addEventListener('change', (e) => setShowSubfolders(e.currentTarget.checked));
   $('#browserFolderSelect')?.addEventListener('change', (e) => { setBrowserCurrentFolder(e.target.value || '', `Opened ${browserFolderPathLabel(e.target.value || '')}.`); });
   $('#browserFolderScope')?.addEventListener('change', (e) => { browserFolderScope = e.target.value || 'global'; renderCharacterBrowser(); });
-  $('#browserSortMode')?.addEventListener('change', (e) => { browserSortMode = e.target.value || 'date_desc'; renderCharacterBrowser(); });
+  $('#browserSortMode')?.addEventListener('change', (e) => { setBrowserFolderSortMode(e.target.value || 'date_desc'); renderCharacterBrowser(); });
   $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; renderCharacterBrowser(); });
-  $('#browserFilterBtn')?.addEventListener('click', () => { browserFilterPanelOpen = !browserFilterPanelOpen; renderBrowserFilterPanel(); });
+  $('#browserFilterBtn')?.addEventListener('click', openBrowserFilterModal);
+  $('#closeBrowserFilterModalBtn')?.addEventListener('click', closeBrowserFilterModal);
+  $('#browserFilterModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserFilterModal') closeBrowserFilterModal(); });
   $('#browserClearFiltersBtn')?.addEventListener('click', () => { browserIncludeTags.clear(); browserExcludeTags.clear(); renderCharacterBrowser(); });
   $('#browserTagSortMode')?.addEventListener('change', (e) => { browserTagSortMode = e.target.value || 'alpha'; renderBrowserFilterPanel(); });
+  $('#browserTagSearchInput')?.addEventListener('input', (e) => { browserTagSearchTerm = e.target.value || ''; renderBrowserTagSearchDropdown(); });
+  $('#browserTagSearchInput')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const first = $('#browserTagSearchDropdown .tag-search-option');
+    if (first) { e.preventDefault(); first.click(); }
+  });
+  $('#browserTagSearchInput')?.addEventListener('blur', () => setTimeout(() => $('#browserTagSearchDropdown')?.classList.add('hidden'), 160));
   $('#tagMergeAddBtn')?.addEventListener('click', addBrowserTagMerge);
   $('#aiTagCleanupBtn')?.addEventListener('click', runAiTagCleanup);
   $('#aiTagMergeAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('merge'));
   $('#aiTagRenameAllBtn')?.addEventListener('click', () => applyAiTagSuggestions('rename'));
+  $('#closeBrowserMoveModalBtn')?.addEventListener('click', closeBrowserMoveModal);
+  $('#cancelBrowserMoveBtn')?.addEventListener('click', closeBrowserMoveModal);
+  $('#applyBrowserMoveBtn')?.addEventListener('click', applyBrowserMoveFromModal);
+  $('#browserMoveModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserMoveModal') closeBrowserMoveModal(); });
+  $('#browserCardContextMenu')?.addEventListener('click', (e) => {
+    const btn = e.target?.closest?.('[data-browser-context-action]');
+    if (!btn || btn.disabled) return;
+    runBrowserContextAction(btn.dataset.browserContextAction || '');
+  });
+  $('#browserFolderContextMenu')?.addEventListener('click', (e) => {
+    const btn = e.target?.closest?.('[data-browser-folder-action]');
+    if (!btn || btn.disabled) return;
+    runBrowserFolderContextAction(btn.dataset.browserFolderAction || '');
+  });
+  document.addEventListener('click', (e) => { if (!e.target?.closest?.('#browserCardContextMenu') && !e.target?.closest?.('#browserFolderContextMenu')) { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); } });
+  window.addEventListener('scroll', () => { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); }, true);
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserImproveFromRatingBtn')?.addEventListener('click', generateRatingImprovementPreview);
   $('#browserRatingDetailsBtn')?.addEventListener('click', showSelectedRatingDetailsModal);
@@ -5500,7 +5853,7 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
   const tabEmotions = isActiveOutput ? (emotionImageState || []) : (Array.isArray(tab?.emotionImages) ? tab.emotionImages : []);
   const tabGenerated = Array.isArray(tab?.generatedImages) ? tab.generatedImages : [];
   const tabImage = String(isActiveOutput ? ($('#cardImagePath')?.value || tab?.cardImagePath || '') : (tab?.cardImagePath || '')).trim();
-  const tabName = cleanOutputTabName(tab?.name || tab?.focusName || extractOutputNameForTab(tabOutput) || `Character ${tabIndex + 1}`);
+  const tabName = cleanOutputTabName(extractOutputNameForTab(tabOutput) || tab?.name || tab?.focusName || `Character ${tabIndex + 1}`);
   const conceptValue = isActiveConcept ? ($('#conceptText')?.value || '') : (conceptTab?.concept || '');
   const visionDescriptionValue = isActiveConcept ? ($('#visionDescription')?.value || '') : (conceptTab?.visionDescription || '');
   const conceptAttachmentsValue = isActiveConcept ? (conceptAttachments || []) : (Array.isArray(conceptTab?.conceptAttachments) ? conceptTab.conceptAttachments : []);
@@ -5514,7 +5867,7 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
   const outputTabForProject = {
     ...(tab || {}),
     name: tabName || `Character ${tabIndex + 1}`,
-    focusName: tab?.focusName || tabName || `Character ${tabIndex + 1}`,
+    focusName: tabName || `Character ${tabIndex + 1}`,
     output: tabOutput,
     qaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
     qnaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
@@ -5646,19 +5999,23 @@ async function generateSdPromptFromLoadedVision() {
 }
 
 
+function canonicalRelationshipCharacterName(tab = {}, idx = 0) {
+  const outputText = loadedOutputTextFromTab(tab) || String(tab?.output || tab?.fullTextOutput || '');
+  const fromOutput = cleanOutputTabName(extractOutputNameForTab(outputText));
+  const fromTab = cleanOutputTabName(tab?.name || tab?.focusName || '');
+  return fromOutput || fromTab || `Character ${Number(idx || 0) + 1}`;
+}
+
 function collectOpenCharactersForRelationshipMatrix(options = {}) {
   // Relationship Matrix must be read-only during normal tab rendering/load.
-  // Beta7 accidentally captured the active editor DOM while the loaded tab rail
-  // was being rendered, before the loaded output was applied to the textarea.
-  // That overwrote freshly loaded tabs with the previous/blank editor state.
-  // Only capture on an explicit Generate/Copy-style action where the user may
-  // have unsaved edits in the visible Output textarea.
+  // Only capture on an explicit Generate/Insert action where the user may have
+  // unsaved edits in the visible Output textarea.
   if (options.captureCurrent) captureActiveOutputTab();
   if (options.ensureTabs) ensureLinkedWorkspaceTabs();
   return (characterOutputTabs || [])
     .map((tab, idx) => ({
-      name: cleanOutputTabName(tab?.name || tab?.focusName || extractOutputNameForTab(tab?.output || '') || `Character ${idx + 1}`),
-      output: String(tab?.output || '').trim(),
+      name: canonicalRelationshipCharacterName(tab, idx),
+      output: String(loadedOutputTextFromTab(tab) || tab?.output || '').trim(),
       index: idx + 1,
     }))
     .filter(item => item.output);
@@ -5713,6 +6070,556 @@ async function copyRelationshipMatrixToClipboard() {
     setStatus('Relationship matrix copied to clipboard.', 'ok');
   } catch (_) {
     setStatus('Could not access clipboard. Select the matrix text and copy manually.', 'warn');
+  }
+}
+
+
+const REL_MATRIX_INSERT_HEADING = 'Relationship Matrix Notes';
+
+function relationshipCanonicalSection(line) {
+  const raw = String(line || '').trim();
+  if (!raw || /^[-—_]{3,}$/.test(raw)) return '';
+  const cleaned = raw
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/[ *`_]+$/g, '')
+    .replace(/^[ *`_]+/g, '')
+    .replace(/\s*[:：]\s*$/g, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const aliases = {
+    'name': 'name',
+    'description': 'description',
+    'personality': 'personality',
+    'sexual traits': 'sexual_traits',
+    'background': 'background',
+    'scenario': 'scenario',
+    'first message': 'first_message',
+    'alternative first messages': 'alternate_first_messages',
+    'alternate first messages': 'alternate_first_messages',
+    'additional first messages': 'alternate_first_messages',
+    'example dialogues': 'example_dialogues',
+    'example dialogue': 'example_dialogues',
+    'lorebook entries': 'lorebook',
+    'lorebook': 'lorebook',
+    'tags': 'tags',
+    'custom system prompt': 'system_prompt',
+    'system prompt': 'system_prompt',
+    'state tracking': 'state_tracking',
+    'stable diffusion prompt': 'stable_diffusion',
+    'stable diffusion': 'stable_diffusion',
+    'creator notes': 'creator_notes',
+    'post history instructions': 'post_history_instructions',
+    'post-history instructions': 'post_history_instructions',
+  };
+  return aliases[cleaned] || '';
+}
+
+function findOutputSectionRange(lines, sectionId) {
+  let headingIndex = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (relationshipCanonicalSection(lines[i]) === sectionId) {
+      headingIndex = i;
+      break;
+    }
+  }
+  if (headingIndex < 0) return null;
+  let endIndex = lines.length;
+  for (let i = headingIndex + 1; i < lines.length; i += 1) {
+    if (relationshipCanonicalSection(lines[i])) {
+      endIndex = i;
+      // Keep the divider line attached to the following section instead of
+      // treating it as part of the current section body.
+      if (i > headingIndex + 1 && /^[-—_]{3,}$/.test(String(lines[i - 1] || '').trim())) endIndex = i - 1;
+      break;
+    }
+  }
+  let bodyStart = headingIndex + 1;
+  while (bodyStart < endIndex && !String(lines[bodyStart] || '').trim()) bodyStart += 1;
+  let bodyEnd = endIndex;
+  while (bodyEnd > bodyStart && !String(lines[bodyEnd - 1] || '').trim()) bodyEnd -= 1;
+  return { headingIndex, bodyStart, bodyEnd, endIndex };
+}
+
+function buildDividerSection(title, body) {
+  return ['------------------------------------------------', title, '', String(body || '').trim(), ''].join('\n');
+}
+
+function replaceOrInsertOutputSection(output, sectionId, title, body, insertAfterIds = []) {
+  const text = String(output || '').replace(/\r\n/g, '\n');
+  const lines = text.split('\n');
+  const range = findOutputSectionRange(lines, sectionId);
+  const cleanBody = String(body || '').trim();
+  if (range) {
+    const next = [
+      ...lines.slice(0, range.bodyStart),
+      cleanBody,
+      '',
+      ...lines.slice(range.endIndex),
+    ];
+    return next.join('\n').replace(/\n{4,}/g, '\n\n\n').trim() + '\n';
+  }
+
+  let insertAt = lines.length;
+  for (const afterId of insertAfterIds) {
+    const afterRange = findOutputSectionRange(lines, afterId);
+    if (afterRange) insertAt = Math.max(insertAt === lines.length ? 0 : insertAt, afterRange.endIndex);
+  }
+  if (insertAt < 0 || insertAt > lines.length) insertAt = lines.length;
+  const block = buildDividerSection(title, cleanBody).split('\n');
+  const next = [...lines.slice(0, insertAt), '', ...block, ...lines.slice(insertAt)];
+  return next.join('\n').replace(/\n{4,}/g, '\n\n\n').trim() + '\n';
+}
+
+function outputSectionText(output, sectionId) {
+  const lines = String(output || '').replace(/\r\n/g, '\n').split('\n');
+  const range = findOutputSectionRange(lines, sectionId);
+  if (!range) return '';
+  return lines.slice(range.bodyStart, range.bodyEnd).join('\n').trim();
+}
+
+function simpleNameKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\{\{char\}\}|\{\{user\}\}/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function nameAliasesForMatch(name) {
+  const full = simpleNameKey(name);
+  const parts = full.split(' ').filter(Boolean);
+  const aliases = new Set();
+  if (full) aliases.add(full);
+  if (parts[0] && parts[0].length >= 2) aliases.add(parts[0]);
+  if (parts.length > 1 && parts[parts.length - 1].length >= 2) aliases.add(parts[parts.length - 1]);
+  return Array.from(aliases);
+}
+
+function textContainsNameAlias(text, name) {
+  const hay = ` ${simpleNameKey(text)} `;
+  return nameAliasesForMatch(name).some(alias => alias && hay.includes(` ${alias} `));
+}
+
+function markdownSection(text, heading) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const target = simpleNameKey(heading);
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = String(lines[i] || '').trim();
+    const m = raw.match(/^#{1,6}\s*(.+?)\s*:?$/) || raw.match(/^(.+?)\s*:\s*$/);
+    if (m && simpleNameKey(m[1]) === target) {
+      start = i + 1;
+      break;
+    }
+  }
+  if (start < 0) return '';
+  let end = lines.length;
+  for (let i = start; i < lines.length; i += 1) {
+    const raw = String(lines[i] || '').trim();
+    if (/^#{1,6}\s*.+/.test(raw)) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join('\n').trim();
+}
+
+function splitMarkdownTableRow(line) {
+  let cells = String(line || '').trim().split('|').map(cell => cell.trim());
+  if (cells[0] === '') cells = cells.slice(1);
+  if (cells[cells.length - 1] === '') cells = cells.slice(0, -1);
+  return cells;
+}
+
+function parseRelationshipMatrixTable(matrixText) {
+  const section = markdownSection(matrixText, 'Matrix') || String(matrixText || '');
+  const tableLines = section.split(/\r?\n/).filter(line => String(line || '').includes('|'));
+  if (tableLines.length < 2) return [];
+  let headerIndex = -1;
+  for (let i = 0; i < tableLines.length - 1; i += 1) {
+    if (/\|/.test(tableLines[i]) && /\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?/.test(tableLines[i + 1])) {
+      headerIndex = i;
+      break;
+    }
+  }
+  if (headerIndex < 0) headerIndex = 0;
+  const headers = splitMarkdownTableRow(tableLines[headerIndex]);
+  const rows = [];
+  for (let i = headerIndex + 1; i < tableLines.length; i += 1) {
+    if (/^\s*\|?\s*:?-{2,}:?/.test(tableLines[i])) continue;
+    const cells = splitMarkdownTableRow(tableLines[i]);
+    if (cells.length < 2) continue;
+    const source = cells[0];
+    const values = [];
+    for (let c = 1; c < cells.length; c += 1) {
+      const target = headers[c] || headers[c - 1] || '';
+      const value = cells[c] || '';
+      if (target && value && !/^[-—]+$/.test(value.trim())) values.push({ target, value });
+    }
+    if (source && values.length) rows.push({ source, values });
+  }
+  return rows;
+}
+
+function relationshipMatrixCell(matrixRows, sourceName, targetName) {
+  for (const row of matrixRows || []) {
+    if (!textContainsNameAlias(row.source, sourceName)) continue;
+    for (const item of row.values || []) {
+      if (textContainsNameAlias(item.target, targetName)) return String(item.value || '').trim();
+    }
+  }
+  return '';
+}
+
+function relationshipPairHookLines(matrixText, sourceName, targetName = '') {
+  const pairSection = markdownSection(matrixText, 'Pair Hooks') || String(matrixText || '');
+  return pairSection
+    .split(/\r?\n/)
+    .map(line => line.trim().replace(/^[-*•]\s*/, '').trim())
+    .filter(line => line && textContainsNameAlias(line, sourceName) && (!targetName || textContainsNameAlias(line, targetName)))
+    .map(line => line.replace(/\*\*/g, '').replace(/^\*+|\*+$/g, '').trim());
+}
+
+function overviewRelationshipLine(matrixText) {
+  return markdownSection(matrixText, 'Overview')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function markdownBulletLines(sectionText) {
+  return String(sectionText || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => line.replace(/^[-*•]\s*/, '').trim())
+    .filter(Boolean)
+    .map(line => line.replace(/\*\*/g, '').replace(/^\*+|\*+$/g, '').trim())
+    .filter(Boolean);
+}
+
+function relationshipGroupSeedLines(matrixText, sourceName = '') {
+  const section = markdownSection(matrixText, 'Group Roleplay Seeds') || markdownSection(matrixText, 'Group Seeds') || '';
+  const lines = markdownBulletLines(section);
+  if (!sourceName) return lines;
+  const direct = lines.filter(line => textContainsNameAlias(line, sourceName));
+  return (direct.length ? direct : lines).slice(0, 5);
+}
+
+function buildPersonalityRelationshipBlock(matrixText, sourceName, allCharacters) {
+  const rows = parseRelationshipMatrixTable(matrixText);
+  const bullets = [];
+  const overview = overviewRelationshipLine(matrixText);
+  if (overview) bullets.push(`- Group dynamic: ${overview}`);
+  for (const other of allCharacters || []) {
+    const otherName = other?.name || '';
+    if (!otherName || simpleNameKey(otherName) === simpleNameKey(sourceName)) continue;
+    const direct = relationshipMatrixCell(rows, sourceName, otherName);
+    const reverse = relationshipMatrixCell(rows, otherName, sourceName);
+    const hooks = relationshipPairHookLines(matrixText, sourceName, otherName).slice(0, 3);
+    const parts = [];
+    if (direct) parts.push(`${sourceName} toward ${otherName}: ${direct}`);
+    if (reverse) parts.push(`${otherName} toward ${sourceName}: ${reverse}`);
+    hooks.forEach(hook => parts.push(`Hook: ${hook}`));
+    if (parts.length) bullets.push(`- With ${otherName}: ${parts.join(' ')}`);
+  }
+  const seedLines = relationshipGroupSeedLines(matrixText, sourceName).slice(0, 5);
+  seedLines.forEach(seed => bullets.push(`- ${String(seed || '').replace(/^Group seed:\s*/i, '').trim()}`));
+  if (!bullets.length) {
+    const hooks = relationshipPairHookLines(matrixText, sourceName).slice(0, 8);
+    hooks.forEach(hook => bullets.push(`- ${hook}`));
+  }
+  if (!bullets.length) {
+    const compactMatrix = String(matrixText || '').replace(/\s+/g, ' ').trim();
+    if (compactMatrix) bullets.push(`- Matrix context: ${compactMatrix}`);
+  }
+  if (!bullets.length) bullets.push(`- Use the generated relationship matrix as relationship context for ${sourceName}.`);
+  return `${REL_MATRIX_INSERT_HEADING}\n${bullets.join('\n')}`.trim();
+}
+
+function removeExistingRelationshipMatrixSubsection(personalityText) {
+  const lines = String(personalityText || '').replace(/\r\n/g, '\n').split('\n');
+  const idx = lines.findIndex(line => /^\s*(?:#{1,6}\s*)?relationship matrix notes\s*:?\s*$/i.test(line));
+  if (idx < 0) return String(personalityText || '').trim();
+  let end = idx + 1;
+  while (end < lines.length) {
+    const line = String(lines[end] || '');
+    if (!line.trim()) { end += 1; break; }
+    end += 1;
+  }
+  return [...lines.slice(0, idx), ...lines.slice(end)].join('\n').trim();
+}
+
+function upsertRelationshipMatrixIntoPersonality(output, sourceName, allCharacters, matrixText) {
+  const existing = outputSectionText(output, 'personality');
+  const cleaned = removeExistingRelationshipMatrixSubsection(existing);
+  const block = buildPersonalityRelationshipBlock(matrixText, sourceName, allCharacters);
+  const nextBody = [cleaned, block].filter(Boolean).join('\n\n').trim();
+  return replaceOrInsertOutputSection(output, 'personality', 'Personality', nextBody, ['description', 'name']);
+}
+
+function splitLorebookEntriesText(value) {
+  const text = String(value || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return [];
+  const chunks = text.split(/\n\s*\n(?=(?:Name|Entry|Title|Key|Keys|Keywords)\s*:)/i);
+  return chunks.map(chunk => chunk.trim()).filter(Boolean).map(parseLorebookEntryChunk);
+}
+
+function parseLorebookEntryChunk(chunk) {
+  const entry = { name: '', key: '', content: '', raw: chunk, extraFields: [] };
+  const lines = String(chunk || '').replace(/\r\n/g, '\n').split('\n');
+  let current = '';
+  for (const rawLine of lines) {
+    const raw = String(rawLine || '').replace(/\s+$/g, '');
+    const line = raw.trim();
+    let m = line.match(/^(Name|Entry|Title)\s*:\s*(.*)$/i);
+    if (m) { entry.name = m[2].trim(); current = 'name'; continue; }
+    m = line.match(/^(Key|Keys|Keywords)\s*:\s*(.*)$/i);
+    if (m) { entry.key = m[2].trim(); current = 'key'; continue; }
+    m = line.match(/^(Value|Content|Description)\s*:\s*(.*)$/i);
+    if (m) { entry.content = [entry.content, m[2].trim()].filter(Boolean).join('\n'); current = 'content'; continue; }
+    // Preserve non-standard lorebook metadata lines that appear before Content
+    // instead of discarding them during relationship insertion.
+    if (line && current !== 'content' && /^[A-Za-z][A-Za-z0-9 _/-]{1,40}\s*[:：]/.test(line)) {
+      entry.extraFields.push(raw.trim());
+      current = 'extra';
+      continue;
+    }
+    if (!line) {
+      if (current === 'content' && entry.content) entry.content = [entry.content, ''].join('\n');
+      continue;
+    }
+    if (!entry.name && !entry.key && !entry.content) { entry.name = line; current = 'name'; continue; }
+    if (current === 'content' || entry.content) entry.content = [entry.content, raw.trim()].filter(Boolean).join('\n');
+    else if (!entry.key) { entry.key = line; current = 'key'; }
+    else { entry.content = [entry.content, raw.trim()].filter(Boolean).join('\n'); current = 'content'; }
+  }
+  entry.content = String(entry.content || '').replace(/\n{3,}/g, '\n\n').trim();
+  if (!entry.key && entry.name) entry.key = entry.name;
+  if (!entry.name && entry.key) entry.name = entry.key.split(/[,;|/]+/)[0].trim();
+  return entry;
+}
+
+function lorebookEntryMatchesName(entry, characterName) {
+  const aliases = nameAliasesForMatch(characterName);
+  const fields = [entry?.name, entry?.key].concat(String(entry?.key || '').split(/[,;|/]+/));
+  const fieldKeys = fields.map(simpleNameKey).filter(Boolean);
+  return aliases.some(alias => fieldKeys.includes(alias));
+}
+
+function removeExistingLorebookRelationshipBlock(content) {
+  return String(content || '')
+    .replace(/\n?Relationship Matrix Notes\s*:\s*[\s\S]*?(?=\n\s*\n|$)/i, '')
+    .trim();
+}
+
+function buildLorebookRelationshipContent(matrixText, sourceName, targetName) {
+  const rows = parseRelationshipMatrixTable(matrixText);
+  const direct = relationshipMatrixCell(rows, sourceName, targetName);
+  const reverse = relationshipMatrixCell(rows, targetName, sourceName);
+  const hooks = relationshipPairHookLines(matrixText, sourceName, targetName).slice(0, 3);
+  const bullets = [];
+  if (direct) bullets.push(`- ${sourceName} toward ${targetName}: ${direct}`);
+  if (reverse) bullets.push(`- ${targetName} toward ${sourceName}: ${reverse}`);
+  hooks.forEach(hook => bullets.push(`- Pair hook: ${hook}`));
+  if (!bullets.length) bullets.push(`- ${targetName} has relationship context with ${sourceName} from the generated relationship matrix.`);
+  return `Relationship Matrix Notes:\n${bullets.join('\n')}`;
+}
+
+function serializeLorebookEntry(entry) {
+  const name = String(entry?.name || entry?.key || 'Entry').trim();
+  const key = String(entry?.key || name).trim();
+  const content = String(entry?.content || '').trim();
+  const extraFields = Array.isArray(entry?.extraFields) ? entry.extraFields.map(v => String(v || '').trim()).filter(Boolean) : [];
+  return [`Name: ${name}`, `Key: ${key}`, ...extraFields, `Content: ${content}`].join('\n');
+}
+
+function ensureLorebookKeyIncludesName(entry, characterName) {
+  const existingKeys = String(entry.key || entry.name || '')
+    .split(/[,;|/]+/)
+    .map(v => v.trim())
+    .filter(Boolean);
+  const wanted = [];
+  const cleanFull = String(characterName || '').trim();
+  if (cleanFull) wanted.push(cleanFull);
+  const parts = cleanFull.split(/\s+/).filter(Boolean);
+  if (parts[0] && parts[0].length >= 2) wanted.push(parts[0]);
+  if (parts.length > 1 && parts[parts.length - 1].length >= 2) wanted.push(parts[parts.length - 1]);
+  for (const key of wanted) {
+    if (!existingKeys.some(existing => simpleNameKey(existing) === simpleNameKey(key))) existingKeys.push(key);
+  }
+  entry.key = existingKeys.join(', ') || cleanFull || entry.key || entry.name;
+}
+
+function upsertRelationshipMatrixIntoLorebook(output, sourceName, allCharacters, matrixText) {
+  const existing = outputSectionText(output, 'lorebook');
+  const entries = splitLorebookEntriesText(existing);
+  for (const other of allCharacters || []) {
+    const targetName = other?.name || '';
+    if (!targetName || simpleNameKey(targetName) === simpleNameKey(sourceName)) continue;
+    let entry = entries.find(item => lorebookEntryMatchesName(item, targetName));
+    if (!entry) {
+      entry = { name: targetName, key: '', content: '', raw: '' };
+      entries.push(entry);
+    }
+    if (!entry.name) entry.name = targetName;
+    ensureLorebookKeyIncludesName(entry, targetName);
+    const base = removeExistingLorebookRelationshipBlock(entry.content);
+    const rel = buildLorebookRelationshipContent(matrixText, sourceName, targetName);
+    entry.content = [base, rel].filter(Boolean).join('\n\n').trim();
+  }
+  const nextBody = entries.map(serializeLorebookEntry).join('\n\n').trim();
+  return replaceOrInsertOutputSection(output, 'lorebook', 'Lorebook Entries', nextBody, ['example_dialogues', 'first_message', 'scenario']);
+}
+
+function collectWorkspacePayloadForRelationshipMatrixTab(tabIndex = activeOutputTabIndex, baseSettings = null) {
+  // Relationship Matrix inserts update multiple tabs at once. Build each save
+  // payload directly from that tab instead of re-capturing the active textarea
+  // for every save. This prevents one tab's name/output from bleeding into
+  // another tab when several cards are open.
+  ensureLinkedWorkspaceTabs();
+  const tabs = Array.isArray(characterOutputTabs) ? characterOutputTabs : [];
+  const idx = Math.max(0, Math.min(tabs.length - 1, Number(tabIndex || 0)));
+  const tab = tabs[idx] || makeBlankOutputTab(`Character ${idx + 1}`);
+  const tabOutput = String(loadedOutputTextFromTab(tab) || '').trim();
+  const tabName = cleanOutputTabName(extractOutputNameForTab(tabOutput) || tab?.name || tab?.focusName || `Character ${idx + 1}`) || `Character ${idx + 1}`;
+  const conceptTab = conceptWorkspaceTabs[idx] || makeBlankConceptTab(tabName || `Concept ${idx + 1}`);
+  const manualTab = manualGuideTabs[idx] || makeBlankManualTab(tabName || `Manual ${idx + 1}`);
+  const tabQa = loadedQaTextFromTab(tab);
+  const tabImage = String(tab?.cardImagePath || tab?.imagePath || '').trim();
+  const payloadSettings = { ...(baseSettings || settings || {}) };
+  payloadSettings.cardImagePath = tabImage;
+  payloadSettings.visionImagePath = String(conceptTab?.visionImagePath || '');
+
+  const outputTabForProject = {
+    ...(tab || {}),
+    name: tabName,
+    focusName: tabName,
+    output: tabOutput,
+    fullTextOutput: tabOutput,
+    qaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
+    qnaAnswers: cleanQaAnswersForStorage(tabQa, tabOutput),
+    emotionImages: Array.isArray(tab?.emotionImages) ? tab.emotionImages : [],
+    generatedImages: Array.isArray(tab?.generatedImages) ? tab.generatedImages : [],
+    cardImagePath: tabImage,
+    imagePath: tabImage,
+    projectPath: canonicalWorkspaceProjectPath(tab?.projectPath || tab?.workspaceProjectPath || ''),
+    workspaceProjectPath: canonicalWorkspaceProjectPath(tab?.workspaceProjectPath || tab?.projectPath || ''),
+  };
+  const conceptTabForProject = normaliseConceptTab({
+    ...(conceptTab || {}),
+    name: tabName || conceptTab?.name || `Concept ${idx + 1}`,
+    concept: conceptTab?.concept || '',
+    visionDescription: conceptTab?.visionDescription || '',
+    visionImagePath: payloadSettings.visionImagePath || '',
+    conceptAttachments: Array.isArray(conceptTab?.conceptAttachments) ? conceptTab.conceptAttachments : [],
+    builderState: conceptTab?.builderState || { mode: 'single', selectedIndex: 0, states: [{}] },
+  }, tabName || `Concept ${idx + 1}`);
+  const manualTabForProject = normaliseManualTab(manualTab || {}, tabName || `Manual ${idx + 1}`);
+
+  return {
+    concept: conceptTabForProject.concept || '',
+    output: tabOutput,
+    template,
+    settings: payloadSettings,
+    builderState: conceptTabForProject.builderState || {},
+    qnaAnswers: tabQa,
+    emotionImages: outputTabForProject.emotionImages,
+    generatedImages: outputTabForProject.generatedImages,
+    visionDescription: conceptTabForProject.visionDescription || '',
+    visionImagePath: payloadSettings.visionImagePath || '',
+    conceptAttachments: conceptTabForProject.conceptAttachments || [],
+    cardImagePath: tabImage,
+    imagePath: tabImage,
+    _disableSettingsCardImageFallback: !tabImage,
+    browserDescription: tab?.browserDescription || '',
+    cardRating: tab?.cardRating || '',
+    cardRatingReasoning: tab?.cardRatingReasoning || '',
+    cardRatingDetails: Array.isArray(tab?.cardRatingDetails) ? tab.cardRatingDetails : [],
+    cardRatingSourceHash: tab?.cardRatingSourceHash || '',
+    name: tabName,
+    projectPath: canonicalWorkspaceProjectPath(tab?.projectPath || tab?.workspaceProjectPath || ''),
+    characterTabs: [outputTabForProject],
+    conceptTabs: [conceptTabForProject],
+    activeConceptTabIndex: 0,
+    manualTabs: [manualTabForProject],
+    activeManualGuideTabIndex: 0,
+    splitTabIndex: idx,
+    splitTabCount: tabs.length,
+  };
+}
+
+async function saveRelationshipMatrixInsertedTabs(updatedIndexes) {
+  const failed = [];
+  const saved = [];
+  settings = collectSettings();
+  const uniqueIndexes = Array.from(new Set((updatedIndexes || []).map(v => Number(v)).filter(v => Number.isFinite(v))));
+  for (const idx of uniqueIndexes) {
+    try {
+      const payload = collectWorkspacePayloadForRelationshipMatrixTab(idx, settings);
+      const label = payload?.name || workspaceTabNameForIndex(idx) || `Character ${idx + 1}`;
+      if (!String(payload?.output || '').trim()) {
+        failed.push(`${label}: empty output, skipped`);
+        continue;
+      }
+      const res = await window.pywebview.api.save_character_workspace(payload);
+      if (res?.ok) {
+        saved.push(res);
+        const tab = characterOutputTabs[idx];
+        if (tab) {
+          tab.projectPath = canonicalWorkspaceProjectPath(res.projectPath || tab.projectPath || tab.workspaceProjectPath || '');
+          tab.workspaceProjectPath = tab.projectPath;
+        }
+      } else {
+        failed.push(`${label}: ${res?.error || 'save failed'}`);
+      }
+    } catch (err) {
+      failed.push(`${workspaceTabNameForIndex(idx)}: ${err.message || String(err)}`);
+    }
+  }
+  if (saved.length) await refreshCharacterBrowser(false);
+  return { saved, failed };
+}
+
+async function insertRelationshipMatrixIntoOpenCards() {
+  if (isInterfaceLocked()) return;
+  const matrixText = ($('#relationshipMatrixText')?.value || relationshipMatrixText || '').trim();
+  if (!matrixText) { setStatus('Generate or paste a relationship matrix first.', 'error'); return; }
+  captureActiveOutputTab();
+  const chars = collectOpenCharactersForRelationshipMatrix({ ensureTabs: true });
+  if (chars.length < 2) { setStatus('Open at least two character cards before inserting relationship data.', 'error'); return; }
+  const mode = ($('#relationshipMatrixInsertMode')?.value || 'personality').toLowerCase();
+  const insertPersonality = mode === 'personality' || mode === 'both';
+  const insertLorebook = mode === 'lorebook' || mode === 'both';
+  const updated = [];
+  for (const charInfo of chars) {
+    const idx = Math.max(0, Number(charInfo.index || 1) - 1);
+    const tab = characterOutputTabs[idx];
+    if (!tab || !String(tab.output || '').trim()) continue;
+    const sourceName = canonicalRelationshipCharacterName(tab, idx) || cleanOutputTabName(charInfo.name) || `Character ${idx + 1}`;
+    let nextOutput = String(tab.output || '');
+    if (insertPersonality) nextOutput = upsertRelationshipMatrixIntoPersonality(nextOutput, sourceName, chars, matrixText);
+    if (insertLorebook) nextOutput = upsertRelationshipMatrixIntoLorebook(nextOutput, sourceName, chars, matrixText);
+    if (nextOutput !== tab.output) {
+      const verifiedName = cleanOutputTabName(extractOutputNameForTab(nextOutput) || sourceName || tab.name || tab.focusName || `Character ${idx + 1}`) || `Character ${idx + 1}`;
+      tab.output = nextOutput;
+      tab.fullTextOutput = nextOutput;
+      tab.name = verifiedName;
+      tab.focusName = verifiedName;
+      updated.push(idx);
+    }
+  }
+  if (!updated.length) { setStatus('No open character cards were updated.', 'warn'); return; }
+  if (updated.includes(activeOutputTabIndex)) setTextareaValue('outputText', characterOutputTabs[activeOutputTabIndex]?.output || '');
+  renderAllWorkspaceTabRails();
+  updateImportedCardToolsHint();
+  const result = await saveRelationshipMatrixInsertedTabs(Array.from(new Set(updated)));
+  if (result.failed.length) {
+    setStatus(`Inserted relationship matrix into ${updated.length} card(s), but ${result.failed.length} save failed: ${result.failed.join('; ')}`, 'warn');
+  } else {
+    const dest = insertPersonality && insertLorebook ? 'Personality and Lorebook' : insertPersonality ? 'Personality' : 'Lorebook';
+    setStatus(`Inserted relationship matrix into ${updated.length} open card${updated.length === 1 ? '' : 's'} (${dest}) and saved workspace changes.`, 'ok');
   }
 }
 
@@ -5774,11 +6681,14 @@ async function refreshCharacterBrowser(showStatus=true, options={}) {
       selectedCharacterProjectPath = '';
     }
     browserSelectedProjects = new Set([...browserSelectedProjects].filter(path => characterBrowserCards.some(c => c.projectPath === path)));
+    browserHasLoadedOnce = true;
+    browserNeedsRefresh = false;
     renderCharacterBrowser();
     if (selectedCharacterProjectPath && characterBrowserCards.some(c => c.projectPath === selectedCharacterProjectPath)) {
       selectCharacterBrowserCard(selectedCharacterProjectPath);
     } else {
       renderSelectedCharacterTags(null);
+      renderBrowserTokenDetails(null);
       updateBrowserRatingPanel(null);
     }
     if (showStatus) setStatus(`Character Browser refreshed: ${characterBrowserCards.length} character(s).`, 'ok');
@@ -5792,6 +6702,53 @@ async function refreshCharacterBrowser(showStatus=true, options={}) {
 
 function normaliseFolderId(value) {
   return String(value || '').trim();
+}
+
+function browserFolderSortKey(folderId = browserCurrentFolderId) {
+  const id = normaliseFolderId(folderId);
+  return id === '__all__' ? '__all__' : (id || '__root__');
+}
+
+function validBrowserSortMode(mode) {
+  return ['date_desc', 'date_asc', 'alpha_asc', 'alpha_desc', 'custom'].includes(mode) ? mode : 'date_desc';
+}
+
+function getBrowserFolderSortMode(folderId = browserCurrentFolderId) {
+  const key = browserFolderSortKey(folderId);
+  return validBrowserSortMode((browserSortModesByFolder || {})[key] || browserSortMode || 'date_desc');
+}
+
+function setBrowserFolderSortMode(mode, folderId = browserCurrentFolderId, save = true) {
+  const key = browserFolderSortKey(folderId);
+  browserSortMode = validBrowserSortMode(mode);
+  browserSortModesByFolder = { ...(browserSortModesByFolder || {}), [key]: browserSortMode };
+  if (settings) settings.browserSortModesByFolder = browserSortModesByFolder;
+  if (save) saveBrowserSortSettings();
+}
+
+async function saveBrowserSortSettings() {
+  settings = { ...(settings || {}), browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserVirtualFolders: browserVirtualFolders || [], browserShowSubfolders: !!browserShowSubfolders };
+  try { await window.pywebview.api.save_settings(settings); }
+  catch (err) { setStatus(`Could not save browser sort settings: ${err.message || err}`, 'error'); }
+}
+
+function browserCustomOrderForFolder(folderId = browserCurrentFolderId) {
+  const key = browserFolderSortKey(folderId);
+  const raw = (browserCustomOrdersByFolder || {})[key];
+  return Array.isArray(raw) ? raw.filter(Boolean) : [];
+}
+
+function setBrowserCustomOrderForFolder(order, folderId = browserCurrentFolderId) {
+  const key = browserFolderSortKey(folderId);
+  const seen = new Set();
+  const clean = (order || []).filter(path => {
+    const value = String(path || '');
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+  browserCustomOrdersByFolder = { ...(browserCustomOrdersByFolder || {}), [key]: clean };
+  if (settings) settings.browserCustomOrdersByFolder = browserCustomOrdersByFolder;
 }
 
 function browserFolderChildren(parentId) {
@@ -5893,6 +6850,7 @@ function browserFolderPathParts(folderId) {
 
 function setBrowserCurrentFolder(folderId, message = '') {
   browserCurrentFolderId = normaliseFolderId(folderId);
+  browserSortMode = getBrowserFolderSortMode(browserCurrentFolderId);
   const folderSelect = $('#browserFolderSelect');
   if (folderSelect) folderSelect.value = browserCurrentFolderId;
   renderCharacterBrowser();
@@ -5952,15 +6910,13 @@ function selectedBrowserProjectPaths() {
 }
 
 function updateBrowserMultiActionState() {
-  const count = selectedBrowserProjectPaths().length;
+  const count = browserSelectedProjects.size;
   const el = $('#browserSelectedCount');
   if (el) el.textContent = count ? `${count} selected` : 'No multi-select';
-  const bulk = $('.browser-bulk-toolbar');
-  if (bulk && count) bulk.open = true;
 }
 
 async function saveBrowserVirtualFolders() {
-  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [], browserShowSubfolders: !!browserShowSubfolders };
+  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [], browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserShowSubfolders: !!browserShowSubfolders };
   try {
     await window.pywebview.api.save_settings(settings);
     if (window.pywebview.api.save_browser_virtual_folders) await window.pywebview.api.save_browser_virtual_folders(browserVirtualFolders || []);
@@ -6036,18 +6992,7 @@ ${affectedCards.length} character${affectedCards.length === 1 ? '' : 's'} will b
 async function moveSelectedCharactersToFolder() {
   const paths = selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
-  const folderId = $('#browserMoveFolderSelect')?.value || '';
-  setBusy('MOVING SELECTED CHARACTERS…');
-  try {
-    const res = await window.pywebview.api.move_character_projects_to_folder(paths, folderId);
-    if (!res.ok) throw new Error(res.error || 'Move failed.');
-    await refreshCharacterBrowser(false);
-    setStatus(`Moved ${res.updated || 0} character(s) to ${browserFolderLabel(folderId)}.`, 'ok');
-  } catch (err) {
-    setStatus(err.message || String(err), 'error');
-  } finally {
-    setBusy('');
-  }
+  openBrowserMoveModal(paths);
 }
 
 async function deleteSelectedCharacterCard() {
@@ -6091,8 +7036,8 @@ async function deleteSelectedCharacterDirectories() {
   }
 }
 
-async function exportSelectedCharactersBatch(format) {
-  const paths = selectedBrowserProjectPaths();
+async function exportSelectedCharactersBatch(format, pathsOverride=null) {
+  const paths = Array.isArray(pathsOverride) && pathsOverride.length ? pathsOverride.slice() : selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   setBusy('BATCH EXPORTING SELECTED CHARACTERS…');
   let ok = 0;
@@ -6109,8 +7054,8 @@ async function exportSelectedCharactersBatch(format) {
   setStatus(`Batch export complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
 }
 
-async function exportSelectedCharactersToFrontPorchBatch() {
-  const paths = selectedBrowserProjectPaths();
+async function exportSelectedCharactersToFrontPorchBatch(pathsOverride=null) {
+  const paths = Array.isArray(pathsOverride) && pathsOverride.length ? pathsOverride.slice() : selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   settings = collectSettings();
   const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: 'batch' });
@@ -6336,27 +7281,156 @@ function getVisibleBrowserCards() {
   const cards = browserScopeCards().filter(card => browserCardMatches(card) && browserCardAllowedByPrivacy(card));
   const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' });
   const byDate = (a, b) => browserUpdatedTime(b) - browserUpdatedTime(a);
-  if (browserSortMode === 'alpha_asc') cards.sort(byName);
-  else if (browserSortMode === 'alpha_desc') cards.sort((a, b) => byName(b, a));
-  else if (browserSortMode === 'date_asc') cards.sort((a, b) => browserUpdatedTime(a) - browserUpdatedTime(b));
-  else cards.sort(byDate);
+  const mode = getBrowserFolderSortMode();
+  browserSortMode = mode;
+  if (mode === 'alpha_asc') cards.sort(byName);
+  else if (mode === 'alpha_desc') cards.sort((a, b) => byName(b, a));
+  else if (mode === 'date_asc') cards.sort((a, b) => browserUpdatedTime(a) - browserUpdatedTime(b));
+  else if (mode === 'custom') {
+    const order = browserCustomOrderForFolder();
+    const index = new Map(order.map((path, idx) => [String(path || ''), idx]));
+    cards.sort((a, b) => {
+      const ai = index.has(a.projectPath) ? index.get(a.projectPath) : Number.MAX_SAFE_INTEGER;
+      const bi = index.has(b.projectPath) ? index.get(b.projectPath) : Number.MAX_SAFE_INTEGER;
+      if (ai !== bi) return ai - bi;
+      return byDate(a, b) || byName(a, b);
+    });
+  } else cards.sort(byDate);
   return cards;
+}
+
+function browserTagDisplayForKey(key) {
+  const lookup = new Map(allBrowserTags().concat(allOriginalBrowserTags()).map(tag => [browserTagKey(tag), tag]));
+  return lookup.get(browserTagKey(key)) || key;
+}
+
+function openBrowserFilterModal() {
+  browserFilterPanelOpen = true;
+  renderBrowserFilterPanel();
+  const modal = $('#browserFilterModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+  setTimeout(() => $('#browserTagSearchInput')?.focus(), 30);
+}
+
+function closeBrowserFilterModal() {
+  browserFilterPanelOpen = false;
+  const modal = $('#browserFilterModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+  $('#browserTagSearchDropdown')?.classList.add('hidden');
+}
+
+function setBrowserTagFilterMode(tag, mode = 'include') {
+  const key = browserTagKey(tag);
+  if (!key) return;
+  browserIncludeTags.delete(key);
+  browserExcludeTags.delete(key);
+  if (mode === 'exclude') browserExcludeTags.add(key);
+  else if (mode === 'include') browserIncludeTags.add(key);
+  renderCharacterBrowser();
+}
+
+function toggleActiveBrowserTagChip(tag) {
+  const key = browserTagKey(tag);
+  if (!key) return;
+  if (browserIncludeTags.has(key)) setBrowserTagFilterMode(key, 'exclude');
+  else setBrowserTagFilterMode(key, 'include');
+}
+
+function removeBrowserTagFilter(tag) {
+  const key = browserTagKey(tag);
+  if (!key) return;
+  browserIncludeTags.delete(key);
+  browserExcludeTags.delete(key);
+  renderCharacterBrowser();
+}
+
+function renderBrowserActiveFilterChips() {
+  const wrap = $('#browserActiveTagChips');
+  if (!wrap) return;
+  const chips = [];
+  [...browserIncludeTags].sort((a,b) => a.localeCompare(b)).forEach(key => chips.push({ key, mode: 'include', tag: browserTagDisplayForKey(key) }));
+  [...browserExcludeTags].sort((a,b) => a.localeCompare(b)).forEach(key => chips.push({ key, mode: 'exclude', tag: browserTagDisplayForKey(key) }));
+  if (!chips.length) {
+    wrap.innerHTML = '<div class="empty small">No tag filters selected yet.</div>';
+    return;
+  }
+  wrap.innerHTML = chips.map(chip => `
+    <span class="active-tag-chip ${chip.mode}" title="Click to toggle include/exclude">
+      <button type="button" class="active-tag-toggle" data-tag="${escapeAttr(chip.key)}">${chip.mode === 'exclude' ? '−' : '+'}${escapeHtml(chip.tag)}</button>
+      <button type="button" class="active-tag-remove" data-tag="${escapeAttr(chip.key)}" title="Remove filter">×</button>
+    </span>`).join('');
+  $$('.active-tag-toggle', wrap).forEach(btn => btn.addEventListener('click', () => toggleActiveBrowserTagChip(btn.dataset.tag)));
+  $$('.active-tag-remove', wrap).forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); removeBrowserTagFilter(btn.dataset.tag); }));
+}
+
+function renderBrowserTagSearchDropdown() {
+  const input = $('#browserTagSearchInput');
+  const dropdown = $('#browserTagSearchDropdown');
+  if (!input || !dropdown) return;
+  const query = String(input.value || browserTagSearchTerm || '').trim().toLowerCase();
+  browserTagSearchTerm = input.value || '';
+  if (!query) {
+    dropdown.classList.add('hidden');
+    dropdown.innerHTML = '';
+    return;
+  }
+  const tags = allBrowserTags()
+    .filter(tag => tag.toLowerCase().includes(query))
+    .filter(tag => !browserIncludeTags.has(browserTagKey(tag)) && !browserExcludeTags.has(browserTagKey(tag)))
+    .slice(0, 12);
+  dropdown.classList.remove('hidden');
+  if (!tags.length) {
+    dropdown.innerHTML = '<div class="tag-search-empty">No matching tags.</div>';
+    return;
+  }
+  dropdown.innerHTML = tags.map(tag => `<button type="button" class="tag-search-option" data-tag="${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join('');
+  $$('.tag-search-option', dropdown).forEach(btn => {
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => {
+      setBrowserTagFilterMode(btn.dataset.tag, 'include');
+      input.value = '';
+      browserTagSearchTerm = '';
+      renderBrowserTagSearchDropdown();
+      input.focus();
+    });
+  });
 }
 
 function renderBrowserFilterPanel() {
   const panel = $('#browserFilterPanel');
   if (!panel) return;
-  panel.classList.toggle('hidden', !browserFilterPanelOpen);
+  const modal = $('#browserFilterModal');
+  if (modal) {
+    modal.classList.toggle('hidden', !browserFilterPanelOpen);
+    modal.setAttribute('aria-hidden', browserFilterPanelOpen ? 'false' : 'true');
+  }
+  const sortSelect = $('#browserSortMode');
+  if (sortSelect) sortSelect.value = getBrowserFolderSortMode();
+  const scopeSelect = $('#browserFolderScope');
+  if (scopeSelect) scopeSelect.value = browserFolderScope;
+  const showSubfoldersModal = $('#browserShowSubfoldersModal');
+  if (showSubfoldersModal) showSubfoldersModal.checked = !!browserShowSubfolders;
   const tagStats = visibleBrowserTagStats();
   const count = browserIncludeTags.size + browserExcludeTags.size;
   const filterBtn = $('#browserFilterBtn');
-  if (filterBtn) filterBtn.textContent = count ? `Filter Tags (${count})` : 'Filter Tags';
+  if (filterBtn) {
+    filterBtn.classList.toggle('has-filters', count > 0 || getBrowserFolderSortMode() !== 'date_desc');
+    filterBtn.title = count ? `Sort and filter cards — ${count} active tag filter${count === 1 ? '' : 's'}` : 'Sort and filter cards';
+  }
   const summary = $('#browserFilterSummary');
   if (summary) {
-    const inc = [...browserIncludeTags].sort((a,b) => a.localeCompare(b)).map(t => `+${t}`);
-    const exc = [...browserExcludeTags].sort((a,b) => a.localeCompare(b)).map(t => `-${t}`);
-    summary.textContent = [...inc, ...exc].join('   ') || 'Click a tag once to include it, twice to exclude it, and a third time to clear it.';
+    const inc = [...browserIncludeTags].sort((a,b) => a.localeCompare(b)).map(t => `+${browserTagDisplayForKey(t)}`);
+    const exc = [...browserExcludeTags].sort((a,b) => a.localeCompare(b)).map(t => `−${browserTagDisplayForKey(t)}`);
+    summary.textContent = [...inc, ...exc].join('   ') || 'No tag filters active. Search for tags above or expand All Tags.';
   }
+  renderBrowserActiveFilterChips();
+  renderBrowserTagSearchDropdown();
   const wrap = $('#browserTagFilterList');
   if (!wrap) return;
   if (!tagStats.length) {
@@ -6693,7 +7767,8 @@ async function saveSelectedCharacterTags() {
 function renderBrowserLetterStrip(cards) {
   const strip = $('#browserLetterStrip');
   if (!strip) return;
-  const isAlpha = browserSortMode === 'alpha_asc' || browserSortMode === 'alpha_desc';
+  const activeSortMode = getBrowserFolderSortMode();
+  const isAlpha = activeSortMode === 'alpha_asc' || activeSortMode === 'alpha_desc';
   if (!isAlpha || characterBrowserCards.length <= 50 || !cards.length) {
     strip.classList.add('hidden');
     strip.innerHTML = '';
@@ -7460,6 +8535,432 @@ function updateBrowserRatingPanel(card) {
   }
 }
 
+
+function selectAllVisibleBrowserCards() {
+  getVisibleBrowserCards().forEach(card => { if (card?.projectPath) browserSelectedProjects.add(card.projectPath); });
+  renderCharacterBrowser();
+  const count = browserSelectedProjects.size;
+  setStatus(count ? `Selected ${count} visible character${count === 1 ? '' : 's'}. Right-click a card to run actions.` : 'No visible cards to select.', count ? 'ok' : '');
+}
+
+function clearBrowserMultiSelection() {
+  browserSelectedProjects.clear();
+  renderCharacterBrowser();
+  setStatus('Cleared multi-select.', 'ok');
+}
+
+function hideBrowserContextMenu() {
+  const menu = $('#browserCardContextMenu');
+  if (!menu) return;
+  menu.classList.add('hidden');
+  menu.setAttribute('aria-hidden', 'true');
+}
+
+function contextMenuPathsForProject(projectPath) {
+  const path = String(projectPath || '');
+  if (path && browserSelectedProjects.has(path) && browserSelectedProjects.size > 1) return [...browserSelectedProjects];
+  return path ? [path] : selectedBrowserProjectPaths();
+}
+
+function showBrowserContextMenu(event, projectPath) {
+  hideBrowserFolderContextMenu();
+  const clickedPath = String(projectPath || '');
+  if (!clickedPath) return;
+  const clickedWasMultiSelected = browserSelectedProjects.has(clickedPath);
+  if (!clickedWasMultiSelected) {
+    browserSelectedProjects.clear();
+    selectedCharacterProjectPath = clickedPath;
+    $$('.browser-card-checkbox').forEach(box => { box.checked = false; });
+    $$('.character-card-tile').forEach(el => el.classList.remove('multi-selected'));
+  }
+  browserContextMenuPaths = contextMenuPathsForProject(clickedPath).filter(Boolean);
+  selectCharacterBrowserCard(clickedPath);
+  updateBrowserMultiActionState();
+  const menu = $('#browserCardContextMenu');
+  if (!menu) return;
+  const title = $('#browserContextMenuTitle');
+  const count = browserContextMenuPaths.length;
+  const firstCard = characterBrowserCards.find(c => c.projectPath === browserContextMenuPaths[0]);
+  if (title) title.textContent = count > 1 ? `${count} selected cards` : (firstCard?.name || 'Card Actions');
+  $$('[data-browser-context-action="load"]', menu).forEach(btn => {
+    btn.disabled = false;
+    btn.title = count > 1 ? `Load ${count} selected workspaces into separate tabs.` : 'Load workspace';
+    btn.textContent = count > 1 ? `Load ${count} Workspaces` : 'Load Workspace';
+  });
+  menu.classList.remove('hidden');
+  menu.setAttribute('aria-hidden', 'false');
+  const rect = menu.getBoundingClientRect();
+  const x = Math.min(event.clientX, window.innerWidth - rect.width - 12);
+  const y = Math.min(event.clientY, window.innerHeight - rect.height - 12);
+  menu.style.left = `${Math.max(8, x)}px`;
+  menu.style.top = `${Math.max(8, y)}px`;
+}
+
+async function exportBrowserPaths(paths, format) {
+  const clean = (paths || []).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  if (clean.length === 1) {
+    selectedCharacterProjectPath = clean[0];
+    await exportSelectedCharacter(format);
+    return;
+  }
+  await exportSelectedCharactersBatch(format, clean);
+}
+
+async function createEmotionZipForBrowserPaths(paths) {
+  const clean = (paths || []).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  if (clean.length === 1) {
+    selectedCharacterProjectPath = clean[0];
+    await zipSelectedCharacterEmotions();
+    return;
+  }
+  setBusy(`CREATING ${clean.length} EMOTION ZIP FILES…`);
+  let ok = 0;
+  let failed = 0;
+  for (const path of clean) {
+    try {
+      const res = await window.pywebview.api.create_emotion_zip_for_project(path);
+      if (res?.ok) ok += 1;
+      else failed += 1;
+    } catch (_) { failed += 1; }
+  }
+  setBusy('');
+  setStatus(`Emotion ZIP batch complete: ${ok} succeeded${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'ok');
+}
+
+async function deleteBrowserPaths(paths) {
+  const clean = (paths || []).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  const ok = confirm(`Delete ${clean.length} physical saved Character Card Forge folder${clean.length === 1 ? '' : 's'} from disk?\n\nThis removes the real saved/export folder inside Character Card Forge. It does not delete virtual folders and does not touch Front Porch AI database entries.`);
+  if (!ok) return;
+  setBusy('DELETING PHYSICAL SAVED CHARACTER FOLDERS…');
+  try {
+    const res = await window.pywebview.api.delete_character_project_directories(clean);
+    if (!res.ok) throw new Error(res.error || 'Delete failed.');
+    clean.forEach(path => browserSelectedProjects.delete(path));
+    if (clean.includes(selectedCharacterProjectPath)) selectedCharacterProjectPath = '';
+    await refreshCharacterBrowser(false);
+    setStatus(`Deleted ${res.deleted || 0} physical saved character folder${res.deleted === 1 ? '' : 's'}. Virtual folders and Front Porch were not touched.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function openBrowserMoveModal(paths) {
+  browserPendingMovePaths = (paths || []).filter(Boolean);
+  if (!browserPendingMovePaths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  const first = characterBrowserCards.find(card => card.projectPath === browserPendingMovePaths[0]);
+  browserMoveTargetFolderId = browserCardFolderId(first || {});
+  browserExpandedMoveFolders = new Set((browserVirtualFolders || []).map(f => normaliseFolderId(f.id)).filter(Boolean));
+  renderBrowserMoveTree();
+  const modal = $('#browserMoveModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function closeBrowserMoveModal() {
+  const modal = $('#browserMoveModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+  browserPendingMovePaths = [];
+  browserMoveTargetFolderId = '';
+}
+
+function renderBrowserMoveTree() {
+  const holder = $('#browserMoveTree');
+  const summary = $('#browserMoveSummary');
+  if (summary) summary.textContent = `Moving ${browserPendingMovePaths.length} character${browserPendingMovePaths.length === 1 ? '' : 's'}. Choose a virtual folder destination.`;
+  if (!holder) return;
+  const sortedChildren = (parentId) => browserFolderChildren(parentId).slice().sort((a,b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
+  const renderRows = (parentId, depth=0) => sortedChildren(parentId).map(folder => {
+    const id = normaliseFolderId(folder.id);
+    const children = sortedChildren(id);
+    const expanded = browserExpandedMoveFolders.has(id);
+    const selected = normaliseFolderId(browserMoveTargetFolderId) === id;
+    const childHtml = expanded ? renderRows(id, depth + 1) : '';
+    return `<div class="folder-tree-row ${selected ? 'selected' : ''}" data-folder="${escapeAttr(id)}" style="--depth:${depth}">
+      <button type="button" class="folder-tree-expander" data-folder="${escapeAttr(id)}" ${children.length ? '' : 'disabled'}>${children.length ? (expanded ? '▾' : '▸') : '•'}</button>
+      <button type="button" class="folder-tree-name" data-folder="${escapeAttr(id)}">📁 ${escapeHtml(folder.name || 'Folder')}</button>
+    </div>${childHtml}`;
+  }).join('');
+  const rootSelected = !normaliseFolderId(browserMoveTargetFolderId);
+  holder.innerHTML = `<div class="folder-tree-row ${rootSelected ? 'selected' : ''}" data-folder="" style="--depth:0"><span class="folder-tree-expander ghost">•</span><button type="button" class="folder-tree-name" data-folder="">Root / Unfiled</button></div>${renderRows('', 0) || '<div class="empty small">No virtual folders yet. Create one from the browser toolbar first.</div>'}`;
+  $$('.folder-tree-expander', holder).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = normaliseFolderId(btn.dataset.folder);
+      if (!id) return;
+      if (browserExpandedMoveFolders.has(id)) browserExpandedMoveFolders.delete(id);
+      else browserExpandedMoveFolders.add(id);
+      renderBrowserMoveTree();
+    });
+  });
+  $$('.folder-tree-name, .folder-tree-row', holder).forEach(el => {
+    el.addEventListener('click', (e) => {
+      const row = e.currentTarget.closest('.folder-tree-row');
+      browserMoveTargetFolderId = normaliseFolderId((e.target?.dataset?.folder ?? row?.dataset?.folder) || '');
+      renderBrowserMoveTree();
+    });
+  });
+}
+
+async function applyBrowserMoveFromModal() {
+  const paths = browserPendingMovePaths.slice();
+  if (!paths.length) { closeBrowserMoveModal(); return; }
+  const folderId = normaliseFolderId(browserMoveTargetFolderId);
+  setBusy('MOVING SELECTED CHARACTERS…');
+  try {
+    const res = await window.pywebview.api.move_character_projects_to_folder(paths, folderId);
+    if (!res.ok) throw new Error(res.error || 'Move failed.');
+    closeBrowserMoveModal();
+    await refreshCharacterBrowser(false);
+    setStatus(`Moved ${res.updated || 0} character(s) to ${browserFolderLabel(folderId)}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function hideBrowserFolderContextMenu() {
+  const menu = $('#browserFolderContextMenu');
+  if (!menu) return;
+  menu.classList.add('hidden');
+  menu.setAttribute('aria-hidden', 'true');
+  browserFolderContextMenuId = '';
+}
+
+function showBrowserFolderContextMenu(event, folderId) {
+  const id = normaliseFolderId(folderId);
+  const folder = (browserVirtualFolders || []).find(f => normaliseFolderId(f.id) === id);
+  if (!id || !folder) return;
+  hideBrowserContextMenu();
+  browserFolderContextMenuId = id;
+  const menu = $('#browserFolderContextMenu');
+  const title = $('#browserFolderContextMenuTitle');
+  if (!menu) return;
+  if (title) title.textContent = `Folder: ${folder.name || 'Folder'}`;
+  menu.classList.remove('hidden');
+  menu.setAttribute('aria-hidden', 'false');
+  const pad = 8;
+  const rect = menu.getBoundingClientRect();
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x + rect.width + pad > window.innerWidth) x = Math.max(pad, window.innerWidth - rect.width - pad);
+  if (y + rect.height + pad > window.innerHeight) y = Math.max(pad, window.innerHeight - rect.height - pad);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+}
+
+async function runBrowserFolderContextAction(action) {
+  const folderId = normaliseFolderId(browserFolderContextMenuId);
+  hideBrowserFolderContextMenu();
+  if (!folderId) return;
+  if (action === 'open') {
+    setBrowserCurrentFolder(folderId, `Opened virtual folder: ${browserFolderPathLabel(folderId)}`);
+  } else if (action === 'rename') {
+    browserCurrentFolderId = folderId;
+    await renameCurrentBrowserFolder();
+  } else if (action === 'delete') {
+    browserCurrentFolderId = folderId;
+    await deleteCurrentBrowserFolder();
+  }
+}
+
+function browserCardsForCustomOrderScope() {
+  const current = normaliseFolderId(browserCurrentFolderId);
+  if (current === '__all__') return characterBrowserCards.slice();
+  return browserViewCards();
+}
+
+function browserDragPathsForProject(projectPath) {
+  const path = String(projectPath || '');
+  if (path && browserSelectedProjects.has(path) && browserSelectedProjects.size > 1) return [...browserSelectedProjects];
+  return path ? [path] : [];
+}
+
+function parseBrowserDraggedPaths(event) {
+  if (browserDraggedCardPaths.length) return browserDraggedCardPaths.slice();
+  try {
+    const raw = event?.dataTransfer?.getData('application/x-character-card-forge-paths') || event?.dataTransfer?.getData('text/plain') || '[]';
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch (_) {
+    const raw = event?.dataTransfer?.getData('text/plain') || '';
+    return raw ? [raw] : [];
+  }
+}
+
+function makeCurrentVisibleOrderWithDraggedCards(dragPaths, targetPath, insertAfter=false) {
+  const movingSet = new Set((dragPaths || []).filter(Boolean));
+  const visible = getVisibleBrowserCards().map(card => card.projectPath).filter(Boolean);
+  const moving = visible.filter(path => movingSet.has(path));
+  if (!moving.length || !targetPath || movingSet.has(targetPath)) return [];
+  const withoutMoving = visible.filter(path => !movingSet.has(path));
+  let insertAt = withoutMoving.indexOf(targetPath);
+  if (insertAt < 0) return [];
+  if (insertAfter) insertAt += 1;
+  return withoutMoving.slice(0, insertAt).concat(moving, withoutMoving.slice(insertAt));
+}
+
+async function applyBrowserCustomDragOrder(dragPaths, targetPath, insertAfter=false) {
+  const visibleOrder = makeCurrentVisibleOrderWithDraggedCards(dragPaths, targetPath, insertAfter);
+  if (!visibleOrder.length) return;
+  const visibleSet = new Set(visibleOrder);
+  const priorOrder = browserCustomOrderForFolder().filter(path => !visibleSet.has(path));
+  const scopePaths = browserCardsForCustomOrderScope().map(card => card.projectPath).filter(Boolean).filter(path => !visibleSet.has(path) && !priorOrder.includes(path));
+  setBrowserCustomOrderForFolder(visibleOrder.concat(priorOrder, scopePaths));
+  setBrowserFolderSortMode('custom', browserCurrentFolderId, false);
+  await saveBrowserSortSettings();
+  renderCharacterBrowser();
+  setStatus('Custom card order saved for this folder.', 'ok');
+}
+
+async function moveBrowserDraggedCardsToFolder(paths, folderId) {
+  const clean = (paths || []).filter(Boolean);
+  if (!clean.length) return;
+  const target = normaliseFolderId(folderId);
+  setBusy(`MOVING ${clean.length} CHARACTER${clean.length === 1 ? '' : 'S'} TO FOLDER…`);
+  try {
+    const res = await window.pywebview.api.move_character_projects_to_folder(clean, target);
+    if (!res.ok) throw new Error(res.error || 'Move failed.');
+    clean.forEach(path => browserSelectedProjects.delete(path));
+    await refreshCharacterBrowser(false);
+    setStatus(`Moved ${res.updated || 0} character(s) to ${browserFolderLabel(target)}.`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function clearBrowserDragClasses() {
+  $$('.character-card-tile.dragging, .character-card-tile.drag-over-card, .browser-folder-tile.drag-over-folder').forEach(el => {
+    el.classList.remove('dragging', 'drag-over-card', 'drag-over-folder');
+  });
+}
+
+async function runBrowserContextAction(action) {
+  const paths = browserContextMenuPaths.slice().filter(Boolean);
+  hideBrowserContextMenu();
+  if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
+  if (paths.length > 1 && ['load','export_png','export_json','emotion_zip','front_porch','move','delete'].includes(action)) {
+    setStatus(`Context action will affect ${paths.length} selected cards.`, 'warn');
+  }
+  if (action === 'load') {
+    await loadCharacterWorkspacesFromPaths(paths);
+  } else if (action === 'export_png') {
+    await exportBrowserPaths(paths, 'chara_v2_png');
+  } else if (action === 'export_json') {
+    await exportBrowserPaths(paths, 'chara_v2_json');
+  } else if (action === 'emotion_zip') {
+    await createEmotionZipForBrowserPaths(paths);
+  } else if (action === 'front_porch') {
+    await exportSelectedCharactersToFrontPorchBatch(paths);
+  } else if (action === 'move') {
+    openBrowserMoveModal(paths);
+  } else if (action === 'delete') {
+    await deleteBrowserPaths(paths);
+  }
+}
+
+function browserTokenIconSvg(extraClass = '') {
+  return `<svg class="browser-token-icon ${escapeAttr(extraClass)}" aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+    <path d="M6.6 5.2h10.8c.8 0 1.4.6 1.4 1.4v10.8c0 .8-.6 1.4-1.4 1.4H6.6c-.8 0-1.4-.6-1.4-1.4V6.6c0-.8.6-1.4 1.4-1.4Z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+    <path d="M9 3.5v3M12 3.5v3M15 3.5v3M9 17.5v3M12 17.5v3M15 17.5v3M3.5 9h3M3.5 12h3M3.5 15h3M17.5 9h3M17.5 12h3M17.5 15h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M9.2 10.4h5.6M9.2 13.6h4.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>`;
+}
+
+function browserTokenTotal(card) {
+  const direct = Number(card?.tokenTotal || 0);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
+  const counts = card?.tokenCounts && typeof card.tokenCounts === 'object' ? card.tokenCounts : {};
+  const fromCounts = Object.values(counts).reduce((sum, value) => {
+    const n = Number(value || 0);
+    return sum + (Number.isFinite(n) && n > 0 ? n : 0);
+  }, 0);
+  return Math.round(fromCounts || 0);
+}
+
+function formatBrowserTokenCount(value) {
+  const n = Math.max(0, Math.round(Number(value || 0)));
+  if (n >= 1000000) {
+    const m = (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '');
+    return `${m}m`;
+  }
+  if (n >= 1000) {
+    const k = (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, '');
+    return `${k}k`;
+  }
+  return String(n);
+}
+
+function browserTokenBadgeHtml(card) {
+  const total = browserTokenTotal(card);
+  if (!total) return '';
+  return `<div class="character-token-badge" title="Estimated token count">${browserTokenIconSvg()}<span>${escapeHtml(formatBrowserTokenCount(total))}</span></div>`;
+}
+
+function browserTokenBreakdownRows(card) {
+  const counts = card?.tokenCounts && typeof card.tokenCounts === 'object' ? card.tokenCounts : {};
+  return [
+    ['Description', counts.description],
+    ['Personality', counts.personality],
+    ['Sexual Traits', counts.sexualTraits],
+    ['Background', counts.background],
+    ['Scenario', counts.scenario],
+    ['Greetings', counts.greetings],
+    ['Example Messages', counts.exampleMessages],
+    ['Lorebook', counts.lorebook],
+    ['Tags', counts.tags],
+    ['State Tracking', counts.stateTracking],
+    ['Stable Diffusion', counts.stableDiffusion],
+    ['Other Sections', counts.other],
+  ].map(([label, value]) => ({ label, value: Math.max(0, Math.round(Number(value || 0))) }));
+}
+
+function renderBrowserTokenDetails(card) {
+  const wrap = $('#browserTokenDetails');
+  if (!wrap) return;
+  const total = browserTokenTotal(card);
+  wrap.open = false;
+  wrap.removeAttribute('open');
+  if (!card) {
+    wrap.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+  if (!total) {
+    wrap.classList.remove('hidden');
+    wrap.innerHTML = `<summary class="browser-token-details-summary"><div class="browser-token-details-head">${browserTokenIconSvg()}<div><strong>Token Estimate</strong><span>Unavailable until this card is refreshed in the browser cache.</span></div></div></summary>`;
+    return;
+  }
+  const rows = browserTokenBreakdownRows(card).filter(row => row.value > 0 || row.label !== 'Other Sections');
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = `
+    <summary class="browser-token-details-summary">
+      <div class="browser-token-details-head">
+        ${browserTokenIconSvg()}
+        <div><strong>Token Estimate</strong><span>Approximate card size from saved output text. Other only means unrecognised top-level sections.</span></div>
+        <b>${escapeHtml(formatBrowserTokenCount(total))}</b>
+      </div>
+    </summary>
+    <div class="browser-token-breakdown">
+      ${rows.map(row => {
+        const pct = total ? Math.max(2, Math.min(100, Math.round((row.value / total) * 100))) : 0;
+        return `<div class="browser-token-row"><span>${escapeHtml(row.label)}</span><strong>${escapeHtml(formatBrowserTokenCount(row.value))}</strong><div class="browser-token-meter" aria-hidden="true"><i style="width:${pct}%"></i></div></div>`;
+      }).join('')}
+    </div>`;
+}
+
 function renderCharacterBrowser() {
   const grid = $('#characterGrid');
   if (!grid) return;
@@ -7489,7 +8990,7 @@ function renderCharacterBrowser() {
       <div class="folder-tile-name">📁 ${escapeHtml(folder.name || 'Folder')}</div>
       <div class="folder-tile-path">${escapeHtml(browserFolderPathLabel(folder.id))}</div>
       <div class="folder-tile-count">${count} character${count === 1 ? '' : 's'}</div>
-      <div class="folder-tile-actions"><button type="button" class="folder-rename-btn" data-folder="${escapeAttr(folder.id)}">Rename</button><button type="button" class="folder-delete-btn danger-ghost" data-folder="${escapeAttr(folder.id)}">Delete</button></div>
+      <div class="folder-tile-hint">Right-click for folder actions</div>
     </div>`;
   }).join('');
   const cardHtml = visibleCards.map(card => {
@@ -7500,7 +9001,7 @@ function renderCharacterBrowser() {
     const isNsfw = browserCardIsNsfw(card);
     const privacyClass = isNsfw && browserPrivacyMode() === 'blur' ? 'nsfw-blurred' : '';
     return `
-    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}">
+    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}" draggable="true">
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
@@ -7509,27 +9010,35 @@ function renderCharacterBrowser() {
       <div class="character-tile-tags">${cardEffectiveTags(card).slice(0, 5).map(t => `<button type="button" class="character-tag-chip ${isMergedBrowserTag(t) ? 'merged-display' : ''}" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`).join('')}</div>
       <div class="character-tile-folder">${escapeHtml(browserFolderPathLabel(card.virtualFolderId || ''))}</div>
       <div class="character-tile-date">${escapeHtml(card.updated || '')}</div>
+      ${browserTokenBadgeHtml(card)}
     </div>
   `}).join('');
   grid.innerHTML = folderHtml + cardHtml;
-  $$('.folder-rename-btn', grid).forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      browserCurrentFolderId = btn.dataset.folder || '';
-      renameCurrentBrowserFolder();
-    });
-  });
-  $$('.folder-delete-btn', grid).forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      browserCurrentFolderId = btn.dataset.folder || '';
-      deleteCurrentBrowserFolder();
-    });
-  });
   $$('.browser-folder-tile', grid).forEach(tile => {
     tile.addEventListener('click', () => {
       const id = tile.dataset.folder || '';
       setBrowserCurrentFolder(id, `Opened virtual folder: ${browserFolderPathLabel(id)}`);
+    });
+    tile.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showBrowserFolderContextMenu(e, tile.dataset.folder || '');
+    });
+    tile.addEventListener('dragover', (e) => {
+      const paths = parseBrowserDraggedPaths(e);
+      if (!paths.length) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      tile.classList.add('drag-over-folder');
+    });
+    tile.addEventListener('dragleave', () => tile.classList.remove('drag-over-folder'));
+    tile.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const paths = parseBrowserDraggedPaths(e);
+      clearBrowserDragClasses();
+      await moveBrowserDraggedCardsToFolder(paths, tile.dataset.folder || '');
+      browserDraggedCardPaths = [];
     });
   });
   $$('.browser-card-checkbox', grid).forEach(box => {
@@ -7547,8 +9056,43 @@ function renderCharacterBrowser() {
     tile.addEventListener('dblclick', () => { selectCharacterBrowserCard(tile.dataset.project); loadSelectedCharacterWorkspace(); });
     tile.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      selectCharacterBrowserCard(tile.dataset.project);
-      setStatus('Selected. Use Export PNG / Export JSON / Emotion ZIP buttons at the top.', 'ok');
+      showBrowserContextMenu(e, tile.dataset.project);
+    });
+    tile.addEventListener('dragstart', (e) => {
+      const path = tile.dataset.project || '';
+      browserDraggedCardPaths = browserDragPathsForProject(path);
+      if (!browserDraggedCardPaths.length) return;
+      selectCharacterBrowserCard(path);
+      tile.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        const payload = JSON.stringify(browserDraggedCardPaths);
+        e.dataTransfer.setData('application/x-character-card-forge-paths', payload);
+        e.dataTransfer.setData('text/plain', payload);
+      }
+    });
+    tile.addEventListener('dragover', (e) => {
+      const paths = parseBrowserDraggedPaths(e);
+      if (!paths.length || paths.includes(tile.dataset.project)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      tile.classList.add('drag-over-card');
+    });
+    tile.addEventListener('dragleave', () => tile.classList.remove('drag-over-card'));
+    tile.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetPath = tile.dataset.project || '';
+      const rect = tile.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + (rect.height / 2);
+      const paths = parseBrowserDraggedPaths(e);
+      clearBrowserDragClasses();
+      await applyBrowserCustomDragOrder(paths, targetPath, insertAfter);
+      browserDraggedCardPaths = [];
+    });
+    tile.addEventListener('dragend', () => {
+      browserDraggedCardPaths = [];
+      clearBrowserDragClasses();
     });
   });
   $$('.character-tag-chip', grid).forEach(chip => {
@@ -7603,20 +9147,59 @@ function selectCharacterBrowserCard(projectPath) {
   }
   $('#browserPreview').value = card ? (card.browserDescription || card.outputPreview || '') : '';
   updateBrowserRatingPanel(card);
+  renderBrowserTokenDetails(card);
   renderSelectedCharacterTags(card);
 }
 
 async function loadSelectedCharacterWorkspace() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
-  setBusy('LOADING CHARACTER WORKSPACE…');
+  await loadCharacterWorkspacesFromPaths([selectedCharacterProjectPath]);
+}
+
+function browserCardLabelForProject(projectPath) {
+  const path = String(projectPath || '');
+  const card = characterBrowserCards.find(c => c.projectPath === path);
+  return card?.name || path.split(/[\\/]/).filter(Boolean).pop() || 'Unknown card';
+}
+
+async function loadCharacterWorkspacesFromPaths(paths) {
+  const clean = [];
+  (paths || []).forEach(path => {
+    const value = String(path || '').trim();
+    if (value && !clean.includes(value)) clean.push(value);
+  });
+  if (!clean.length) { setStatus('Select one or more characters first.', 'error'); return; }
+
+  if (clean.length === 1) selectedCharacterProjectPath = clean[0];
+  setBusy(clean.length > 1 ? `LOADING ${clean.length} CHARACTER WORKSPACES…` : 'LOADING CHARACTER WORKSPACE…');
+  const failures = [];
+  let loaded = 0;
   try {
-    const res = await window.pywebview.api.load_character_project(selectedCharacterProjectPath);
-    if (!res.ok) throw new Error(res.error || 'Could not load character project.');
-    applyLoadedState(res, { appendOutputTab: true, singleProject: true });
+    for (let i = 0; i < clean.length; i += 1) {
+      const projectPath = clean[i];
+      if (clean.length > 1) setBusy(`LOADING CHARACTER WORKSPACE ${i + 1}/${clean.length}…`);
+      try {
+        const res = await window.pywebview.api.load_character_project(projectPath);
+        if (!res.ok) throw new Error(res.error || 'Could not load character project.');
+        applyLoadedState(res, { appendOutputTab: true, singleProject: true });
+        loaded += 1;
+      } catch (err) {
+        failures.push({ path: projectPath, error: err.message || String(err) });
+      }
+    }
     updateAvailability();
-    setStatus(res.message || 'Character workspace loaded into a new Output / Editor tab.', 'ok');
-  } catch (err) {
-    setStatus(err.message || String(err), 'error');
+    if (clean.length === 1) {
+      if (loaded) setStatus('Character workspace loaded into a new Output / Editor tab.', 'ok');
+      else setStatus(failures[0]?.error || 'Could not load character project.', 'error');
+      return;
+    }
+    if (failures.length) {
+      const preview = failures.slice(0, 3).map(item => `${browserCardLabelForProject(item.path)}: ${item.error}`).join(' | ');
+      const extra = failures.length > 3 ? ` (+${failures.length - 3} more)` : '';
+      setStatus(`Loaded ${loaded}/${clean.length} workspaces. Failed ${failures.length}${extra}. ${preview}`, loaded ? 'warn' : 'error');
+    } else {
+      setStatus(`Loaded ${loaded} character workspaces into separate Output / Editor tabs.`, 'ok');
+    }
   } finally {
     setBusy('');
   }

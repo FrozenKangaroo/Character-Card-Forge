@@ -1,3 +1,121 @@
+## Version 1.0.8
+
+- Promoted the v1.0.8 beta line to the stable v1.0.8 release.
+- Fixed automatic update notifications so startup checks open the Update Available modal instead of only working from the Settings manual check.
+- Added startup retry checks at 2.5 seconds, 15 seconds, and 60 seconds so the update check is less likely to fail silently while the app/bridge/network is still settling.
+- Confirmed automatic update checks continue once every hour while the app is open.
+- Added frontend debug events for scheduled, started, completed, failed, and modal-shown update checks.
+- Updated version files and frontend cache-busting to `1.0.8`.
+
+## Version 1.0.8-beta14
+
+- Moved the Character Browser Token Estimate panel below the AI Browser Analysis and Load Workspace icon buttons.
+- Made the Token Estimate panel collapsible, with the default state collapsed whenever a card is selected.
+- Updated version files and frontend cache-busting to `1.0.8-beta14`.
+
+## Version 1.0.8-beta13
+
+### Fixes
+- Fixed Character Browser token estimate totals so the headline number now equals the sum of the displayed section rows.
+- Changed browser token cache version to 3 so refreshing the Character Browser recalculates older beta11/beta12 token rows.
+- Updated version files and frontend cache-busting to `1.0.8-beta13`.
+
+## Version 1.0.8-beta12
+
+### Fixed
+- Improved Character Browser token breakdown so `Other Sections` no longer absorbs normal top-level card sections such as Sexual Traits, Background, Tags, State Tracking, or Stable Diffusion Prompt.
+- Fixed leading separator lines being counted as a fake `Other` section.
+- Added token breakdown cache versioning so existing browser cache rows are recalculated with the new section map on refresh.
+- Updated version files and frontend cache-busting to `1.0.8-beta12`.
+
+## Version 1.0.8-beta11
+
+- Added estimated token counts to Character Browser card tiles with a compact inline SVG token icon.
+- Token badges use compact formatting above 1000 tokens, such as `1.2k`.
+- Selecting a browser card now shows a token breakdown for Description, Personality, Scenario, Greetings, Example Messages, Lorebook, and Other Sections.
+- Browser token counts are calculated and cached during the saved-card scan so the grid does not need to load full projects just to display counts.
+- Updated version files and frontend cache-busting to `1.0.8-beta11`.
+
+## Version 1.0.8-beta9
+
+- Hardened Relationship Matrix insertion after testing with the Stacy/Misa card output.
+- Relationship Matrix saves now build each updated card from its own tab data instead of re-capturing the active editor repeatedly, preventing one card name/output from bleeding into another tab.
+- Verified tab names are pulled back from each card's actual `Name` section after insertion.
+- Lorebook relationship insertion now preserves non-standard lorebook metadata fields that appear before `Content:` instead of rewriting every entry down to only Name/Key/Content.
+- Updated version files and frontend cache-busting to `1.0.8-beta9`.
+
+## Version 1.0.8-beta8
+
+- Fixed Relationship Matrix insertion so Personality notes no longer truncate the Overview text at a short preview length.
+- Expanded Personality relationship insertion to include bidirectional pair context, pair hooks, and relevant group roleplay seeds where available instead of only a single group-dynamic bullet.
+- Fixed Relationship Matrix insertion and workspace saving so each open tab keeps its own character identity, preferring the actual card `Name` field over stale/duplicated tab labels.
+- Made Relationship Matrix section parsing more tolerant of Markdown heading variations.
+- Updated version files and frontend cache-busting to `1.0.8-beta8`.
+
+## Version 1.0.8-beta7
+
+- Relationship Matrix: added an **Insert Into Open Cards** tool.
+- Matrix insertion can target **Personality → Relationships**, **Lorebook Entries**, or both.
+- Personality insertion adds/replaces a direct **Relationship Matrix Notes** subsection so relationships stay always-active in the card.
+- Lorebook insertion creates or updates entries for the other open characters, matching existing entries by full name, first name, or last name to avoid duplicate lorebook records.
+- Relationship matrix insertion is deterministic/direct and does not call the AI for rewrites.
+- Updated version files and frontend cache-busting to `1.0.8-beta7`.
+
+## Version 1.0.8-beta6
+
+- Character Browser: right-click **Load Workspace** now supports multiple selected cards.
+- Multi-selected cards load sequentially, with each selected workspace opening into its own Output / Editor tab.
+- Single-card loading still uses the same context menu action and existing tab restore behavior.
+- Updated version files and frontend cache-busting to `1.0.8-beta6`.
+
+## Version 1.0.8-beta4
+
+- Replaced the Character Browser create-folder emoji/glyph with an inline SVG folder-plus icon so it renders reliably even when the platform font only shows the plus sign.
+- Updated version files and frontend cache-busting to `1.0.8-beta4`.
+
+## Version 1.0.8-beta3
+
+- Removed the Character Browser's text buttons for New Virtual Folder, Rename Current Folder, and Delete Current Folder.
+- Replaced Character Browser Refresh, Create Folder, Select All Visible, and Unselect All with compact icon buttons.
+- Folder rename/delete now live in a folder right-click context menu, alongside Open Folder.
+- Removed inline Rename/Delete buttons from folder tiles to keep folder cards clean.
+- Character Browser no longer reloads every time the tab is clicked; it loads on first open, after normal create/import/save refreshes, or when the Refresh icon is clicked.
+- Updated version files and frontend cache-busting to `1.0.8-beta3`.
+
+## Version 1.0.8-beta2
+
+### Character Browser cleanup
+- Reworked the Character Browser header so Live Search now has a compact filter icon beside it.
+- Moved card sorting, search scope, tag filtering, Merge Tags, and AI Tag Cleanup into a dedicated Sort & Filter modal.
+- Added searchable tag filtering with a limited live dropdown and active include/exclude chips.
+- Kept the existing tag filter logic: tag chips can include, exclude, or clear filters, and the all-tags list can be sorted alphabetically or by most-used.
+- Removed the old folder dropdown so folder navigation is done through folder tiles and breadcrumbs.
+- Moved card export, Emotion ZIP, Front Porch export, move, and delete actions into a right-click card context menu that works for one card or all currently selected cards.
+- Replaced the old multi-select action toolbar with only Select All Visible and Unselect All helpers.
+- Added a file-manager-style virtual folder tree modal for Move actions.
+- Updated version files and frontend cache-busting to `1.0.8-beta2`.
+
+## Version 1.0.8-beta1
+
+### Highlights
+
+- Added an AI job queue so starting another AI feature while one is already running adds it to a visible waiting queue instead of launching a competing request.
+- Added cancellable queued jobs. Waiting AI jobs can be cancelled from the AI Queue modal before they start.
+- Kept the existing Stop button for the currently running job. Stop still requests cancellation of the active backend/network task, while queued jobs have their own Cancel buttons.
+- Updated AI controls so they stay clickable during active AI work and feed into the queue instead of being disabled.
+- Added queue coverage for card generation, split-card generation, Q&A generation, revision, Idea Generator, Vision analysis, Transfer to Builders, builder AI suggestions/randomization, Relationship Matrix, AI Browser Analysis, rating-detail repair, AI card improvement, Stable Diffusion prompt/image generation, Emotion Images, and Load Card to Builders.
+- Added a cancellation reset before each queued job starts so stopping one active job does not accidentally poison the next queued job.
+- Updated version files and frontend cache-busting to `1.0.8-beta1`.
+
+### AI Queue System
+
+- Only one AI backend task runs at a time.
+- When another AI action is triggered during an active AI task, Character Card Forge records the requested action as a queued job and exposes it through the red busy banner's View Queue button.
+- Queued jobs run in FIFO order after the current job finishes.
+- Queued jobs can be cancelled before they start without cancelling the active job.
+- The busy banner continues to show the currently running job, while the AI Queue modal shows the active job summary and pending jobs.
+- Non-AI controls remain usable while AI work is running.
+
 ## Version 1.0.7
 
 ### Highlights
@@ -907,6 +1025,9 @@ The release zip no longer includes `__pycache__` or `.pyc` files. Stale bytecode
 - Details modal now shows a safe fallback breakdown for existing rated cards with no saved detail rows instead of an empty message.
 - Backend logs when fallback details are created, making missing-model-breakdown cases visible in debug output.
 
+## v1.0.8-beta6
 
-
+- Character Browser: right-click **Load Workspace** now supports multiple selected cards.
+- Multi-selected cards load sequentially, with each selected workspace opening into its own Output / Editor tab.
+- Single-card loading still uses the same context menu action and existing tab restore behavior.
 

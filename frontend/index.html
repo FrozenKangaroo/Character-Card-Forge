@@ -22,7 +22,7 @@
     </aside>
 
     <main>
-      <div id="busyBanner" class="busy-banner hidden"><span id="busyText">Working…</span><button id="stopTaskBtn" type="button" class="stop-task">Stop</button></div>
+      <div id="busyBanner" class="busy-banner hidden"><span id="busyText">Working…</span><div class="busy-actions"><button id="viewAiQueueBtn" type="button" class="queue-task hidden">View Queue</button><button id="stopTaskBtn" type="button" class="stop-task">Stop</button></div></div>
       <div id="status" class="status"></div>
 
       <section id="concept" class="tab active">
@@ -406,91 +406,36 @@
       </section>
 
       <section id="browser" class="tab">
-        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Click a card to restore the full workspace. Multi-select can delete local saved directories, batch export, or move cards into virtual folders.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button">Refresh</button><button id="browserExportPngBtn" type="button" class="primary">Export PNG</button><button id="browserExportJsonBtn" type="button">Export JSON</button><button id="browserEmotionZipBtn" type="button">Emotion ZIP</button><button id="browserFrontPorchExportBtn" type="button" class="primary">Export to Front Porch AI</button></div></div>
+        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Use the filter icon beside Live Search for sorting and tag filters. Right-click a card or folder for actions.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button" class="browser-icon-btn" title="Refresh Character Browser" aria-label="Refresh Character Browser"><span aria-hidden="true">↻</span><span class="sr-only">Refresh</span></button></div></div>
         <div class="browser-command-card card">
-          <div class="browser-command-primary">
+          <div class="browser-command-primary browser-command-primary-clean">
             <label class="browser-search-field">Live Search
-              <input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." />
+              <span class="browser-search-with-filter"><input id="browserSearchInput" type="search" placeholder="Search names, summaries, tags..." /><button id="browserFilterBtn" type="button" class="browser-filter-icon-btn" title="Sort and filter cards" aria-label="Sort and filter cards">⚙</button></span>
             </label>
-            <label>Sort
-              <select id="browserSortMode">
-                <option value="date_desc">Newest first</option>
-                <option value="date_asc">Oldest first</option>
-                <option value="alpha_asc">Alphabetical A-Z</option>
-                <option value="alpha_desc">Alphabetical Z-A</option>
-              </select>
-            </label>
-            <label>Folder
-              <select id="browserFolderSelect"><option value="__all__">All folders</option></select>
-            </label>
-            <label class="inline-check browser-show-subfolders-top"><input id="browserShowSubfolders" type="checkbox" /> Show subfolders</label>
             <span id="browserResultCount" class="browser-result-count">0 characters</span>
           </div>
-          <details class="browser-advanced-options">
-            <summary>Browser options, filters, and folder tools</summary>
-            <div class="browser-toolbar browser-toolbar-compact">
-              <label>Search/Tag Scope
-                <select id="browserFolderScope">
-                  <option value="global">Global</option>
-                  <option value="current">Current folder only</option>
-                  <option value="current_subfolders">Current folder + subfolders</option>
-                </select>
-              </label>
-              <div class="browser-toolbar-actions">
-                <button id="browserFilterBtn" type="button">Filter Tags</button>
-                <button id="browserClearFiltersBtn" type="button">Clear Filters</button>
-                <button id="browserCreateFolderBtn" type="button">New Virtual Folder</button>
-                <button id="browserRenameFolderBtn" type="button">Rename Current Folder</button>
-                <button id="browserDeleteFolderBtn" type="button" class="danger-ghost">Delete Current Folder</button>
-              </div>
-            </div>
-          </details>
-        </div>
-        <div id="browserFilterPanel" class="browser-filter-panel card hidden">
-          <div class="browser-filter-header">
-            <div id="browserFilterSummary" class="browser-filter-summary">Click a tag once to include it, twice to exclude it, and a third time to clear it.</div>
-            <label class="browser-tag-sort">Tag Sort
-              <select id="browserTagSortMode">
-                <option value="alpha">Alphabetical</option>
-                <option value="usage">Most used</option>
-              </select>
-            </label>
+          <div class="browser-folder-tools">
+            <label class="inline-check browser-show-subfolders-top"><input id="browserShowSubfolders" type="checkbox" /> Show subfolders</label>
+            <button id="browserCreateFolderBtn" type="button" class="browser-icon-btn" title="Create folder" aria-label="Create folder">
+              <svg class="browser-svg-icon browser-folder-plus-icon" aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M3 6.75A2.75 2.75 0 0 1 5.75 4h4.34c.73 0 1.42.3 1.92.82l1.18 1.23c.22.23.52.36.84.36h4.22A2.75 2.75 0 0 1 21 9.16v8.09A2.75 2.75 0 0 1 18.25 20H5.75A2.75 2.75 0 0 1 3 17.25V6.75Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M12 11.25v5.5M9.25 14h5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+              <span class="sr-only">Create Folder</span>
+            </button>
           </div>
-          <div id="browserTagFilterList" class="tag-filter-list"></div>
-          <details class="tag-merge-panel">
-            <summary>Merge Tags (display only)</summary>
-            <p>Merge a noisy original tag into a cleaner display tag in the browser. This does not edit the real tags saved on characters.</p>
-            <div class="tag-merge-controls">
-              <select id="tagMergeOriginal"><option value="">Choose original tag…</option></select>
-              <input id="tagMergeAlias" type="text" placeholder="Display as tag…" />
-              <button id="tagMergeAddBtn" type="button">Add Merge</button>
-            </div>
-            <div id="tagMergeList" class="tag-merge-list"></div>
-          </details>
-          <details class="tag-merge-panel ai-tag-panel">
-            <summary>AI Tag Cleanup</summary>
-            <p>Scan the real tags with your AI model and suggest near-duplicate tags. Merge Only changes the browser display layer. Rename changes the real tags saved inside character projects/cards.</p>
-            <div class="tag-merge-controls">
-              <button id="aiTagCleanupBtn" type="button">Scan Tags with AI</button>
-              <button id="aiTagMergeAllBtn" type="button">Merge All Suggestions</button>
-              <button id="aiTagRenameAllBtn" type="button" class="danger">Rename All Suggestions</button>
-            </div>
-            <div id="aiTagSuggestionList" class="tag-merge-list"><div class="empty small">No AI suggestions yet.</div></div>
-          </details>
         </div>
-        <details class="browser-bulk-toolbar card">
-          <summary><span id="browserSelectedCount" class="browser-result-count">No multi-select</span> — Multi-select actions</summary>
-          <div class="browser-bulk-actions">
-            <select id="browserMoveFolderSelect"><option value="">Unfiled</option></select>
-            <button id="browserMoveToFolderBtn" type="button">Move Selected</button>
-            <button id="browserMultiExportPngBtn" type="button">Export Selected PNG</button><button id="browserMultiExportJsonBtn" type="button">Export Selected JSON</button>
-            <button id="browserMultiFrontPorchBtn" type="button" class="primary">Export Selected to Front Porch</button>
-            <button id="browserMultiDeleteBtn" type="button" class="danger" title="Deletes the physical saved/export folders from this app only. Virtual folders and Front Porch entries are not deleted.">Delete Physical Saved Card Folders</button>
+        <div class="browser-multiselect-row card">
+          <span id="browserSelectedCount" class="browser-result-count">No multi-select</span>
+          <div class="browser-multiselect-actions">
+            <button id="browserSelectAllVisibleBtn" type="button" class="browser-icon-btn" title="Select all visible cards" aria-label="Select all visible cards"><span aria-hidden="true">☑</span><span class="sr-only">Select All Visible</span></button>
+            <button id="browserUnselectAllBtn" type="button" class="browser-icon-btn" title="Unselect all cards" aria-label="Unselect all cards"><span aria-hidden="true">☐</span><span class="sr-only">Unselect All</span></button>
           </div>
-        </details>
+          <span class="small muted">Right-click a card to run actions on the selected cards.</span>
+        </div>
         <div id="browserLetterStrip" class="browser-letter-strip hidden"></div>
         <div class="browser-layout">
-          <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export. Virtual folders appear first in this grid.</p></div></div><div id="browserBreadcrumb" class="browser-breadcrumb"></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Saved Characters</h3><p>Characters are saved automatically after generation and updated when you generate emotion images or export. Virtual folders appear first in this grid. Drag cards onto folders to move them, or drag cards against other cards to save a custom order.</p></div></div><div id="browserBreadcrumb" class="browser-breadcrumb"></div><div id="characterGrid" class="character-grid"><div class="empty">No saved characters yet. Generate a card first.</div></div></div>
           <div class="card wide selected-character-card">
             <div class="card-title"><div><h3>Selected Character</h3><p id="selectedCharacterInfo">Select a character card.</p></div></div>
             <div id="browserDescriptionSource" class="description-source-badge hidden"></div>
@@ -503,11 +448,8 @@
                 <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 6.5a2 2 0 0 1 2-2h4.3l2 2H18.5a2 2 0 0 1 2 2v1"/><path d="M3.5 9.5h17l-1.6 8.2a2.2 2.2 0 0 1-2.15 1.8H6.25a2.2 2.2 0 0 1-2.15-1.8L3.5 9.5z"/><path d="M12 12.5v4"/><path d="M9.8 14.8L12 17l2.2-2.2"/></svg>
                 <span class="sr-only">Load Workspace</span>
               </button>
-              <button id="browserDeleteSelectedBtn" type="button" class="icon-action-btn danger-icon-action" title="Delete saved card from Character Card Forge only. Front Porch entries are not touched." aria-label="Delete saved card">
-                <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16"/><path d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M6.5 7l.85 12.1A2 2 0 0 0 9.35 21h5.3a2 2 0 0 0 2-1.9L17.5 7"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
-                <span class="sr-only">Delete Saved Card</span>
-              </button>
             </div>
+            <details id="browserTokenDetails" class="browser-token-details hidden"></details>
             <textarea id="browserPreview" class="debug-log" readonly placeholder="Preview appears here..."></textarea>
             <div id="browserRatingPanel" class="browser-rating-panel hidden">
               <div class="browser-rating-header">
@@ -523,6 +465,22 @@
             <div class="selected-tags-title">Tags</div>
             <div id="browserSelectedTags" class="selected-tags"><div class="empty small">Select a character to see tags.</div></div>
           </div>
+        </div>
+        <div id="browserCardContextMenu" class="browser-context-menu hidden" role="menu" aria-hidden="true">
+          <div id="browserContextMenuTitle" class="browser-context-title">Card Actions</div>
+          <button type="button" data-browser-context-action="load">Load Workspace</button>
+          <button type="button" data-browser-context-action="export_png">Export PNG</button>
+          <button type="button" data-browser-context-action="export_json">Export JSON</button>
+          <button type="button" data-browser-context-action="emotion_zip">Emotion ZIP</button>
+          <button type="button" data-browser-context-action="front_porch">Export to Front Porch AI</button>
+          <button type="button" data-browser-context-action="move">Move…</button>
+          <button type="button" data-browser-context-action="delete" class="danger-context">Delete Saved Folder(s)</button>
+        </div>
+        <div id="browserFolderContextMenu" class="browser-context-menu hidden" role="menu" aria-hidden="true">
+          <div id="browserFolderContextMenuTitle" class="browser-context-title">Folder Actions</div>
+          <button type="button" data-browser-folder-action="open">Open Folder</button>
+          <button type="button" data-browser-folder-action="rename">Rename Folder</button>
+          <button type="button" data-browser-folder-action="delete" class="danger-context">Delete Folder</button>
         </div>
       </section>
 
@@ -553,7 +511,7 @@
           <div class="card wide followup-card"><div class="card-title"><div><h3>Follow-up Revision</h3><p>Ask the model to change, add, remove, or rewrite something in the generated card.</p></div><button id="reviseBtn" class="primary">Send Follow-up</button></div><textarea id="followupText" class="followup" placeholder="Example: Add two more alternative first messages, make the First Message more flirty, and change Occupation into a Job section."></textarea></div>
         </div>
         <div id="output-qa" class="subtab-panel" data-subtab-panel="output"><div class="card wide"><div class="card-title"><div><h3>Q&A Answers</h3><p>Private pre-generation interview answers used as context for the card. These are not exported into the card itself.</p></div><button id="clearQaAnswersBtn" type="button" class="danger-ghost">Clear Answers</button></div><textarea id="qaAnswersText" class="debug-log" readonly placeholder="Q&A answers will appear here after generation if Q&A is enabled..."></textarea></div></div>
-        <div id="output-relationships" class="subtab-panel" data-subtab-panel="output"><div class="card wide relationship-matrix-card"><div class="card-title"><div><h3>Relationship Matrix</h3><p>Generate a multi-character relationship matrix from the characters currently open in workspace tabs. Useful for group roleplay planning, shared scenarios, rivalries, alliances, jealousy, secrets, and scene hooks.</p></div><div class="actions"><button id="refreshRelationshipMatrixCharactersBtn" type="button">Refresh List</button><button id="generateRelationshipMatrixBtn" type="button" class="primary">Generate Matrix</button><button id="copyRelationshipMatrixBtn" type="button">Copy</button></div></div><div class="relationship-matrix-open-list"><span class="small muted">Open characters:</span><div id="relationshipMatrixOpenCharacters" class="tag-list compact"><div class="empty small">No generated characters are open yet.</div></div></div><textarea id="relationshipMatrixText" class="debug-log relationship-matrix-output" placeholder="Generated relationship matrix will appear here..."></textarea></div></div>
+        <div id="output-relationships" class="subtab-panel" data-subtab-panel="output"><div class="card wide relationship-matrix-card"><div class="card-title"><div><h3>Relationship Matrix</h3><p>Generate a multi-character relationship matrix from the characters currently open in workspace tabs. Useful for group roleplay planning, shared scenarios, rivalries, alliances, jealousy, secrets, and scene hooks.</p></div><div class="actions"><button id="refreshRelationshipMatrixCharactersBtn" type="button">Refresh List</button><button id="generateRelationshipMatrixBtn" type="button" class="primary">Generate Matrix</button><button id="copyRelationshipMatrixBtn" type="button">Copy</button></div></div><div class="relationship-matrix-open-list"><span class="small muted">Open characters:</span><div id="relationshipMatrixOpenCharacters" class="tag-list compact"><div class="empty small">No generated characters are open yet.</div></div></div><textarea id="relationshipMatrixText" class="debug-log relationship-matrix-output" placeholder="Generated relationship matrix will appear here..."></textarea><div class="relationship-matrix-insert-panel"><div><strong>Insert into cards</strong><p class="small muted">Directly merge the matrix into open character cards. Personality is best for always-active behavior; Lorebook is best for triggerable side-character/context entries.</p></div><div class="actions"><label class="compact-select-label">Destination<select id="relationshipMatrixInsertMode"><option value="personality" selected>Personality → Relationships</option><option value="lorebook">Lorebook Entries</option><option value="both">Personality + Lorebook</option></select></label><button id="insertRelationshipMatrixBtn" type="button">Insert Into Open Cards</button></div></div></div></div>
         <div id="output-debug" class="subtab-panel" data-subtab-panel="output">
           <div class="card wide debug-log-card"><div class="card-title"><div><h3>Debug Log</h3><p>Automatically shows the latest log entries and scrolls to the bottom.</p></div><button id="clearLogBtn" type="button" class="danger-ghost">Clear Log</button></div><textarea id="debugLogText" class="debug-log" readonly placeholder="Debug log will appear here automatically..."></textarea></div>
         </div>
@@ -562,6 +520,20 @@
   </div>
   <template id="sectionTemplate"><div class="section-card card" data-section-id=""><div class="section-top"><input class="section-enabled" type="checkbox" /><input class="section-title" /><button class="move-up">↑</button><button class="move-down">↓</button><button class="add-field">Add Field</button><button class="delete-section danger-ghost">Delete</button></div><textarea class="section-desc" placeholder="Section instructions / description"></textarea><div class="fields"></div></div></template>
   <template id="fieldTemplate"><div class="field-row" data-field-id=""><input class="field-enabled" type="checkbox" /><input class="field-label" placeholder="Field label" /><input class="field-hint" placeholder="Hint / rule" /><button class="field-up">↑</button><button class="field-down">↓</button><button class="delete-field danger-ghost">×</button></div></template>
+  <div id="aiQueueModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card ai-queue-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>AI Queue</h3>
+          <p id="aiQueueCount">No queued jobs</p>
+        </div>
+        <button id="closeAiQueueModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div id="aiQueueActive" class="ai-queue-active hidden"></div>
+      <div id="aiQueueList" class="ai-queue-list"><div class="ai-queue-empty">No waiting AI jobs.</div></div>
+      <p class="small muted ai-queue-help">The running job uses the red banner's Stop button. Waiting jobs can be cancelled here before they start.</p>
+    </div>
+  </div>
   <div id="generationOptionsModal" class="modal-backdrop hidden" aria-hidden="true">
     <div class="modal-card generation-options-modal-card">
       <div class="modal-head">
@@ -627,6 +599,99 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
       </div>
       <p class="small muted">A timestamped database backup is created for each target. Close Front Porch before exporting if possible.</p>
       <div class="actions modal-actions"><button id="cancelFrontPorchExportTargetBtn" type="button" class="danger-ghost">Cancel</button></div>
+    </div>
+  </div>
+
+
+  <div id="browserFilterModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card browser-filter-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Sort & Filter Character Browser</h3>
+          <p>Choose card order, search tag filters, and clean up tags without cluttering the browser grid.</p>
+        </div>
+        <button id="closeBrowserFilterModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div id="browserFilterPanel" class="browser-filter-panel">
+        <div class="browser-filter-controls-grid">
+          <label>Sort Cards
+            <select id="browserSortMode">
+              <option value="date_desc">Newest first</option>
+              <option value="date_asc">Oldest first</option>
+              <option value="alpha_asc">Alphabetical A-Z</option>
+              <option value="alpha_desc">Alphabetical Z-A</option>
+              <option value="custom">Custom drag order</option>
+            </select>
+          </label>
+          <label>Search / Tag Scope
+            <select id="browserFolderScope">
+              <option value="global">Global</option>
+              <option value="current">Current folder only</option>
+              <option value="current_subfolders">Current folder + subfolders</option>
+            </select>
+          </label>
+          <label class="toggle-inline modal-toggle"><input id="browserShowSubfoldersModal" type="checkbox" /> Show subfolders in browser</label>
+          <button id="browserClearFiltersBtn" type="button" class="danger-ghost">Clear Tag Filters</button>
+        </div>
+        <div class="browser-filter-summary-row">
+          <div id="browserFilterSummary" class="browser-filter-summary">No tag filters active.</div>
+        </div>
+        <div class="tag-search-picker">
+          <label>Filter by Tags
+            <input id="browserTagSearchInput" type="search" placeholder="Type a tag to search..." autocomplete="off" />
+          </label>
+          <div id="browserTagSearchDropdown" class="tag-search-dropdown hidden"></div>
+        </div>
+        <div id="browserActiveTagChips" class="active-tag-chip-list"><div class="empty small">No tag filters selected yet.</div></div>
+        <details id="browserAllTagsDetails" class="tag-merge-panel" open>
+          <summary>All Tags</summary>
+          <div class="browser-filter-header">
+            <p>Click a tag once to include it, twice to exclude it, and a third time to clear it.</p>
+            <label class="browser-tag-sort">Tag Sort
+              <select id="browserTagSortMode">
+                <option value="alpha">Alphabetical</option>
+                <option value="usage">Most used</option>
+              </select>
+            </label>
+          </div>
+          <div id="browserTagFilterList" class="tag-filter-list"></div>
+        </details>
+        <details class="tag-merge-panel">
+          <summary>Merge Tags (display only)</summary>
+          <p>Merge a noisy original tag into a cleaner display tag in the browser. This does not edit the real tags saved on characters.</p>
+          <div class="tag-merge-controls">
+            <select id="tagMergeOriginal"><option value="">Choose original tag…</option></select>
+            <input id="tagMergeAlias" type="text" placeholder="Display as tag…" />
+            <button id="tagMergeAddBtn" type="button">Add Merge</button>
+          </div>
+          <div id="tagMergeList" class="tag-merge-list"></div>
+        </details>
+        <details class="tag-merge-panel ai-tag-panel">
+          <summary>AI Tag Cleanup</summary>
+          <p>Scan the real tags with your AI model and suggest near-duplicate tags. Merge Only changes the browser display layer. Rename changes the real tags saved inside character projects/cards.</p>
+          <div class="tag-merge-controls">
+            <button id="aiTagCleanupBtn" type="button">Scan Tags with AI</button>
+            <button id="aiTagMergeAllBtn" type="button">Merge All Suggestions</button>
+            <button id="aiTagRenameAllBtn" type="button" class="danger">Rename All Suggestions</button>
+          </div>
+          <div id="aiTagSuggestionList" class="tag-merge-list"><div class="empty small">No AI suggestions yet.</div></div>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div id="browserMoveModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card browser-move-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Move Character Cards</h3>
+          <p id="browserMoveSummary">Choose a virtual folder destination.</p>
+        </div>
+        <button id="closeBrowserMoveModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div id="browserMoveTree" class="browser-folder-tree"></div>
+      <p class="small muted">This moves cards inside the Character Browser virtual folder system. It does not move physical folders on disk.</p>
+      <div class="actions modal-actions"><button id="cancelBrowserMoveBtn" type="button" class="danger-ghost">Cancel</button><button id="applyBrowserMoveBtn" type="button" class="primary">Move Here</button></div>
     </div>
   </div>
 
@@ -829,6 +894,6 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.7"></script>
+  <script src="app.js?v=1.0.8"></script>
 </body>
 </html>

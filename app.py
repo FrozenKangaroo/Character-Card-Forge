@@ -1252,6 +1252,15 @@ class Api:
                 extra = {}
         except Exception:
             extra = {}
+        token_counts = extra.get("tokenCounts") if isinstance(extra.get("tokenCounts"), dict) else {}
+        try:
+            token_total = int(extra.get("tokenTotal") or token_counts.get("total") or 0)
+        except Exception:
+            token_total = 0
+        try:
+            token_breakdown_version = int(extra.get("tokenBreakdownVersion") or 0)
+        except Exception:
+            token_breakdown_version = 0
         updated_ts = float(row.get("updated_ts") or 0)
         return {
             "name": row.get("name") or Path(row.get("folder_path") or "").name,
@@ -1265,6 +1274,9 @@ class Api:
             "cardRatingReasoning": extra.get("cardRatingReasoning") or "",
             "cardRatingDetails": extra.get("cardRatingDetails") if isinstance(extra.get("cardRatingDetails"), list) else [],
             "cardRatingSourceHash": extra.get("cardRatingSourceHash") or "",
+            "tokenTotal": token_total,
+            "tokenCounts": token_counts,
+            "tokenBreakdownVersion": token_breakdown_version,
             "tags": tags,
             "virtualFolderId": str(row.get("virtual_folder_id") or ""),
             "outputPreview": row.get("output_preview") or "",
@@ -1289,7 +1301,18 @@ class Api:
             image_path = str(row.get("image_path") or "")
             card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
             image_hash_ok = (not image_path) or self._hash_file(image_path) == str(row.get("image_hash") or "")
-            if card_hash_ok and image_hash_ok:
+            needs_token_counts = True
+            try:
+                extra_for_tokens = json.loads(row.get("metadata_json") or "{}")
+                needs_token_counts = not (
+                    isinstance(extra_for_tokens, dict)
+                    and isinstance(extra_for_tokens.get("tokenCounts"), dict)
+                    and int(extra_for_tokens.get("tokenTotal") or 0) > 0
+                    and int(extra_for_tokens.get("tokenBreakdownVersion") or 0) >= 3
+                )
+            except Exception:
+                needs_token_counts = True
+            if card_hash_ok and image_hash_ok and not needs_token_counts:
                 return self._browser_card_from_db_row(row)
 
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1317,6 +1340,7 @@ class Api:
         tags = project.get("tags") if isinstance(project.get("tags"), list) else []
         if not tags:
             tags = self._extract_tags_from_output(output, project.get("template") or self.template)
+        token_counts = self._card_browser_token_counts(output)
         old_assignment = self._get_virtual_folder_assignment(path, folder, name, project.get("virtualFolderId") or "")
         if row:
             virtual_folder_id = self._library_upsert_card(path, folder, name, None, path.stat().st_mtime, {
@@ -1338,6 +1362,9 @@ class Api:
                     "cardRatingReasoning": card_rating_reasoning,
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
+                    "tokenTotal": int(token_counts.get("total") or 0),
+                    "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
                 },
             })
         else:
@@ -1360,6 +1387,9 @@ class Api:
                     "cardRatingReasoning": card_rating_reasoning,
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
+                    "tokenTotal": int(token_counts.get("total") or 0),
+                    "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
                 },
             })
         if virtual_folder_id != str(project.get("virtualFolderId") or ""):
@@ -1388,6 +1418,9 @@ class Api:
                     "cardRatingReasoning": card_rating_reasoning,
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
+                    "tokenTotal": int(token_counts.get("total") or 0),
+                    "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
                 },
                 })
             except Exception:
@@ -1638,6 +1671,13 @@ class Api:
 
     def _reset_cancel(self):
         self.cancel_event.clear()
+
+    def reset_cancel_request(self):
+        self._reset_cancel()
+        return {"ok": True}
+
+    def resetCancelRequest(self):
+        return self.reset_cancel_request()
 
     def _raise_if_cancelled(self):
         if self.cancel_event.is_set():
@@ -3726,6 +3766,110 @@ class Api:
         if not text:
             return 0
         return max(1, int(len(text) / 4) + 128)
+
+    def _estimate_card_browser_tokens(self, text):
+        """Fast browser-card token estimate without chat-wrapper overhead."""
+        text = str(text or "")
+        if not text.strip():
+            return 0
+        return max(1, int(len(text) / 4))
+
+    def _split_card_output_sections_for_tokens(self, output):
+        """Split a generated card into rough titled sections for browser token stats.
+
+        Cards commonly start with a separator line. The beta11 splitter only
+        matched separators that had a newline before them, so a leading
+        separator could become a fake "Other" section. This splitter treats
+        separator lines at the beginning, middle, or end the same way.
+        """
+        text = str(output or "")
+        if not text.strip():
+            return []
+        chunks = re.split(r"(?:^|\n)\s*-{3,}\s*(?:\n|$)", text)
+        sections = []
+        for chunk in chunks:
+            chunk = str(chunk or "").strip()
+            if not chunk:
+                continue
+            lines = [line.rstrip() for line in chunk.splitlines()]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            if not lines:
+                continue
+            embedded_heading_re = re.compile(
+                r"^(?:Name|Description|Personality|Sexual Traits|Sexual Profile|Background|Backstory|Scenario|"
+                r"First Message|Alternative First Messages|Alternate First Messages|Example Dialogues?|Example Messages?|"
+                r"Lorebook Entries?|Lore Book Entries?|Tags|State Tracking|Stable Diffusion Prompt|SD Prompt|Image Prompt)\s*:?\s*$",
+                re.IGNORECASE,
+            )
+            starts = [0]
+            for idx in range(1, len(lines)):
+                if embedded_heading_re.match(lines[idx].strip()):
+                    starts.append(idx)
+            starts.append(len(lines))
+            for pos in range(len(starts) - 1):
+                start = starts[pos]
+                end = starts[pos + 1]
+                if start >= end:
+                    continue
+                title = lines[start].strip().strip(":") or "Other"
+                body = "\n".join(lines[start + 1:end]).strip()
+                section_text = (title + ("\n" + body if body else "")).strip()
+                if section_text:
+                    sections.append((title, section_text))
+        return sections
+
+    def _card_browser_token_counts(self, output):
+        """Return total and section-level token estimates for Character Browser cards."""
+        text = str(output or "")
+        counts = {
+            "description": 0,
+            "personality": 0,
+            "sexualTraits": 0,
+            "background": 0,
+            "scenario": 0,
+            "greetings": 0,
+            "exampleMessages": 0,
+            "lorebook": 0,
+            "tags": 0,
+            "stateTracking": 0,
+            "stableDiffusion": 0,
+            "other": 0,
+        }
+        for title, section_text in self._split_card_output_sections_for_tokens(text):
+            key = "other"
+            norm = re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+            if norm in {"name", "description"} or norm.startswith("description"):
+                key = "description"
+            elif norm.startswith("personality"):
+                key = "personality"
+            elif norm.startswith("sexual trait") or norm.startswith("sexuality") or norm in {"sexual traits", "sexual profile"}:
+                key = "sexualTraits"
+            elif norm.startswith("background") or norm.startswith("backstory"):
+                key = "background"
+            elif norm.startswith("scenario"):
+                key = "scenario"
+            elif norm.startswith("first message") or norm.startswith("alternative first messages") or norm.startswith("alternate first messages") or norm in {"greeting", "greetings"}:
+                key = "greetings"
+            elif norm.startswith("example dialogue") or norm.startswith("example message") or norm.startswith("example dialogues") or norm.startswith("example messages"):
+                key = "exampleMessages"
+            elif norm.startswith("lorebook") or norm.startswith("lore book"):
+                key = "lorebook"
+            elif norm == "tags" or norm.startswith("tag"):
+                key = "tags"
+            elif norm.startswith("state tracking") or norm in {"state", "stats", "tracking"}:
+                key = "stateTracking"
+            elif norm.startswith("stable diffusion") or norm.startswith("sd prompt") or norm.startswith("image prompt"):
+                key = "stableDiffusion"
+            counts[key] += self._estimate_card_browser_tokens(section_text)
+        # Keep the headline total mathematically consistent with the rows
+        # displayed in the Character Browser token details panel. Earlier builds
+        # estimated the full raw card text separately, so separators/blank lines
+        # could make the headline total look larger than the visible section
+        # rows. For the browser UI, a sum-of-sections total is clearer and
+        # debuggable: every token shown belongs to a displayed bucket.
+        total = sum(int(v or 0) for v in counts.values())
+        return {"total": total, "sections": counts, "version": 3}
 
     def _context_check(self, prompt, settings, mode_label="Full Prompt"):
         estimated = self._estimate_tokens(prompt)
