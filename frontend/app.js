@@ -404,8 +404,10 @@ function captureActiveOutputTab() {
   tab.output = outputText;
   tab.qaAnswers = cleanQaAnswersForStorage(qaText, outputText);
   tab.emotionImages = emotionImageState.map(img => ({...img}));
-  const nextImage = $('#cardImagePath')?.value || '';
+  tab.generatedImages = Array.isArray(tab.generatedImages) ? tab.generatedImages.map(img => ({...img})) : [];
+  const nextImage = ($('#cardImagePath')?.value || '').trim();
   tab.cardImagePath = nextImage || (tab.isGroupCard ? (tab.groupCardPath || tab.cardImagePath || '') : '');
+  tab.imagePath = tab.cardImagePath || (tab.isGroupCard ? (tab.groupCardPath || tab.imagePath || '') : '');
   if (tab.isGroupCard && !tab.imagePath) tab.imagePath = tab.cardImagePath || tab.groupCardPath || '';
 }
 
@@ -6382,6 +6384,39 @@ async function importCurrentOutputToBrowser(showStatus = true) {
   return res;
 }
 
+async function persistSelectedCardImageForActiveWorkspace(imagePath) {
+  const selectedPath = String(imagePath || $('#cardImagePath')?.value || '').trim();
+  if (!selectedPath || !hasOutput()) return null;
+  let savedWorkspace = await saveCurrentWorkspace('silent');
+  let projectPath = canonicalWorkspaceProjectPath(
+    savedWorkspace?.projectPath
+    || workspaceTabProjectPath(activeOutputTabIndex)
+    || characterOutputTabs[activeOutputTabIndex]?.projectPath
+    || characterOutputTabs[activeOutputTabIndex]?.workspaceProjectPath
+    || ''
+  );
+  if (!projectPath) return savedWorkspace;
+  if (!window.pywebview?.api?.update_project_card_image) return savedWorkspace;
+
+  const forced = await window.pywebview.api.update_project_card_image(projectPath, selectedPath);
+  if (!forced?.ok) throw new Error(forced?.error || 'Saved workspace, but could not update the saved project card image.');
+  const resolvedPath = String(forced.cardImagePath || forced.imagePath || selectedPath).trim();
+  if (resolvedPath) {
+    if ($('#cardImagePath')) $('#cardImagePath').value = resolvedPath;
+    if ($('#cardImageModalPath')) $('#cardImageModalPath').value = resolvedPath;
+    if (settings) settings.cardImagePath = resolvedPath;
+    if (characterOutputTabs[activeOutputTabIndex]) {
+      characterOutputTabs[activeOutputTabIndex].cardImagePath = resolvedPath;
+      characterOutputTabs[activeOutputTabIndex].imagePath = resolvedPath;
+      characterOutputTabs[activeOutputTabIndex].projectPath = forced.projectPath || projectPath;
+      characterOutputTabs[activeOutputTabIndex].workspaceProjectPath = forced.projectPath || projectPath;
+    }
+    try { await window.pywebview.api.save_settings(settings); } catch (_) {}
+  }
+  await refreshCharacterBrowser(false);
+  return forced;
+}
+
 async function generateSdPromptFromLoadedOutput() {
   if (isInterfaceLocked()) return;
   if (!hasOutput()) { setStatus('Load or generate a card first.', 'error'); return; }
@@ -7092,6 +7127,10 @@ async function saveCurrentWorkspace(reason='autosave') {
     const payload = collectWorkspacePayload();
     const res = await window.pywebview.api.save_character_workspace(payload);
     if (!res.ok) throw new Error(res.error || 'Workspace save failed.');
+    if (characterOutputTabs[activeOutputTabIndex]) {
+      characterOutputTabs[activeOutputTabIndex].projectPath = res.projectPath || characterOutputTabs[activeOutputTabIndex].projectPath || '';
+      characterOutputTabs[activeOutputTabIndex].workspaceProjectPath = res.projectPath || characterOutputTabs[activeOutputTabIndex].workspaceProjectPath || '';
+    }
     if (reason !== 'silent') setStatus(`Workspace saved to ${res.folder}`, 'ok');
     await refreshCharacterBrowser(false);
     return res;
@@ -11680,10 +11719,10 @@ async function selectCardImage() {
     $('#cardImagePath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    if (hasOutput()) await saveCurrentWorkspace('silent');
-    updateCardImagePreview();
+    if (hasOutput()) await persistSelectedCardImageForActiveWorkspace(res.path);
+    await updateCardImagePreview();
     updateImportedCardToolsHint();
-    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+    setStatus('Selected card image: ' + ($('#cardImagePath')?.value || res.path) + (hasOutput() ? ' and updated the saved workspace/browser image.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -11702,10 +11741,10 @@ async function importCardImageFiles(files) {
     $('#cardImagePath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    if (hasOutput()) await saveCurrentWorkspace('silent');
-    updateCardImagePreview();
+    if (hasOutput()) await persistSelectedCardImageForActiveWorkspace(res.path);
+    await updateCardImagePreview();
     updateImportedCardToolsHint();
-    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+    setStatus('Selected card image: ' + ($('#cardImagePath')?.value || res.path) + (hasOutput() ? ' and updated the saved workspace/browser image.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -11729,10 +11768,10 @@ async function importCardImagePaths(paths) {
     if ($('#cardImageModalPath')) $('#cardImageModalPath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    if (hasOutput()) await saveCurrentWorkspace('silent');
-    updateCardImagePreview();
+    if (hasOutput()) await persistSelectedCardImageForActiveWorkspace(res.path);
+    await updateCardImagePreview();
     updateImportedCardToolsHint();
-    setStatus('Selected card image: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+    setStatus('Selected card image: ' + ($('#cardImagePath')?.value || res.path) + (hasOutput() ? ' and updated the saved workspace/browser image.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -11752,10 +11791,10 @@ async function importCardImageUrl() {
     $('#cardImagePath').value = res.path;
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    if (hasOutput()) await saveCurrentWorkspace('silent');
-    updateCardImagePreview();
+    if (hasOutput()) await persistSelectedCardImageForActiveWorkspace(res.path);
+    await updateCardImagePreview();
     updateImportedCardToolsHint();
-    setStatus('Selected card image from URL: ' + res.path + (hasOutput() ? ' and updated the saved workspace.' : ''), 'ok');
+    setStatus('Selected card image from URL: ' + ($('#cardImagePath')?.value || res.path) + (hasOutput() ? ' and updated the saved workspace/browser image.' : ''), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -11806,13 +11845,38 @@ function renderGeneratedImages(images) {
       <small>${escapeAttr(img.path)}</small>
     `;
     $('.select-generated', card).addEventListener('click', async () => {
-      $('#cardImagePath').value = img.path;
+      let selectedPath = img.path;
+      // Promote the generated candidate into the managed Card Image folder before
+      // saving. Generated-image temp files can be cleaned or go stale; the selected
+      // card portrait must live in the durable card_images area used by preview,
+      // browser thumbnails, and export.
+      if (img.dataUrl && window.pywebview?.api?.save_uploaded_image) {
+        try {
+          const sourceName = shortImageLabel(img.path || `generated_${index + 1}.png`) || `generated_${index + 1}.png`;
+          const promoted = await window.pywebview.api.save_uploaded_image(sourceName, img.dataUrl, 'card');
+          if (promoted?.ok && promoted.path) selectedPath = promoted.path;
+        } catch (_) {}
+      }
+      $('#cardImagePath').value = selectedPath;
+      if ($('#cardImageModalPath')) $('#cardImageModalPath').value = selectedPath;
       settings = collectSettings();
       await window.pywebview.api.save_settings(settings);
-      if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = img.path;
-      if (hasOutput()) await saveCurrentWorkspace('silent');
-      updateCardImagePreview();
-      setStatus('Selected generated image for Character Card V2 PNG export' + (hasOutput() ? ' and updated the saved workspace.' : '.'), 'ok');
+      if (characterOutputTabs[activeOutputTabIndex]) {
+        characterOutputTabs[activeOutputTabIndex].cardImagePath = selectedPath;
+        characterOutputTabs[activeOutputTabIndex].imagePath = selectedPath;
+        characterOutputTabs[activeOutputTabIndex].generatedImages = Array.isArray(characterOutputTabs[activeOutputTabIndex].generatedImages)
+          ? characterOutputTabs[activeOutputTabIndex].generatedImages
+          : (images || []);
+      }
+      let forcedWorkspace = null;
+      if (hasOutput()) forcedWorkspace = await persistSelectedCardImageForActiveWorkspace(selectedPath);
+      const resolvedPath = String(forcedWorkspace?.cardImagePath || forcedWorkspace?.imagePath || selectedPath).trim();
+      if (resolvedPath) {
+        if ($('#cardImagePath')) $('#cardImagePath').value = resolvedPath;
+        if ($('#cardImageModalPath')) $('#cardImageModalPath').value = resolvedPath;
+      }
+      await updateCardImagePreview();
+      setStatus('Selected generated image for Character Card V2 PNG export' + (hasOutput() ? ' and updated the saved workspace/browser image.' : '.'), 'ok');
     });
     $('.delete-generated', card).addEventListener('click', async () => {
       const res = await window.pywebview.api.delete_generated_image(img.path);
@@ -12253,8 +12317,11 @@ async function applyCardImageModalPath() {
     closeCardImageModal();
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value;
-    if (hasOutput()) await saveCurrentWorkspace('silent');
+    if (characterOutputTabs[activeOutputTabIndex]) {
+      characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value;
+      characterOutputTabs[activeOutputTabIndex].imagePath = $('#cardImagePath').value;
+    }
+    if (hasOutput()) await persistSelectedCardImageForActiveWorkspace($('#cardImagePath').value);
     await updateCardImagePreview();
     updateImportedCardToolsHint();
     setStatus('Card image updated.', 'ok');
@@ -12319,8 +12386,19 @@ async function updateCardImagePreview() {
         const res = await window.pywebview.api.image_preview_data_url(path);
         if (token !== cardImagePreviewToken) return;
         if (res?.ok && res.dataUrl) {
+          const resolvedPath = String(res.path || '').trim();
+          if (resolvedPath && resolvedPath !== path) {
+            if (input) input.value = resolvedPath;
+            if ($('#cardImageModalPath') && !$('#cardImageModal')?.classList.contains('hidden')) $('#cardImageModalPath').value = resolvedPath;
+            if (settings) settings.cardImagePath = resolvedPath;
+            if (characterOutputTabs[activeOutputTabIndex]) {
+              characterOutputTabs[activeOutputTabIndex].cardImagePath = resolvedPath;
+              characterOutputTabs[activeOutputTabIndex].imagePath = resolvedPath;
+            }
+          }
           img.classList.remove('hidden');
           img.src = res.dataUrl;
+          if (hint) hint.textContent = `Current image set: ${shortImageLabel(resolvedPath || path)}`;
         } else {
           img.classList.remove('hidden');
           img.onerror = () => {

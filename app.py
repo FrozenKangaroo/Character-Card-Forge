@@ -1185,8 +1185,21 @@ class Api:
             data_url = self._blob_to_data_url(r.get("mime_type"), r.get("data_blob"))
             if atype == "image" and key == "selected_card_image" and data_url:
                 loaded["imageDataUrl"] = data_url
-                # Keep the original source path if present; old project fallback still works.
-                loaded["imagePath"] = loaded.get("imagePath") or r.get("source_path") or ""
+                # Prefer a real readable path. Older saves can keep only a generated-image
+                # path/filename that was later cleaned, while the actual selected image
+                # bytes are safely stored in SQLite workspace_assets.
+                source_path = str(r.get("source_path") or "").strip()
+                local_image = self._ensure_local_card_image_path(source_path, "card", "hydrate_selected_card_source") if source_path else ""
+                if not local_image:
+                    local_image = self._ensure_local_card_image_path(data_url, "card", "hydrate_selected_card_asset")
+                if local_image:
+                    loaded["imagePath"] = local_image
+                    loaded["cardImagePath"] = local_image
+                    if isinstance(loaded.get("settings"), dict):
+                        loaded["settings"]["cardImagePath"] = local_image
+                else:
+                    # Keep the original source path if present; old project fallback still works.
+                    loaded["imagePath"] = loaded.get("imagePath") or source_path or ""
             elif atype == "generated_image" and data_url:
                 item = dict(meta or {})
                 item["dataUrl"] = data_url
@@ -1227,6 +1240,52 @@ class Api:
             loaded["conceptAttachments"] = [attachments_by_idx[i] for i in sorted(attachments_by_idx)]
         if tabs:
             loaded["characterTabs"] = tabs
+        return loaded
+
+    def _materialize_loaded_project_card_image(self, loaded, project_path="", reason="load_project"):
+        """Ensure a loaded project points at a real local image file.
+
+        A saved project can contain a stale generated-image path while the real
+        selected image bytes live in workspace_assets. The UI preview and exporters
+        both need an actual file path, so recover from selected-card assets,
+        imageDataUrl, or saved project image candidates and mirror the resolved path
+        through settings/workspace/tabs.
+        """
+        if not isinstance(loaded, dict):
+            return loaded
+        selected = str(loaded.get("imagePath") or loaded.get("cardImagePath") or "").strip()
+        local_image = self._ensure_local_card_image_path(selected, "card", f"{reason}_selected_path") if selected else ""
+        if not local_image and loaded.get("imageDataUrl"):
+            local_image = self._ensure_local_card_image_path(loaded.get("imageDataUrl"), "card", f"{reason}_image_data_url")
+        if not local_image and project_path:
+            local_image = self._front_porch_project_image_from_assets(project_path, selected, f"{reason}_workspace_assets")
+        if not local_image and project_path:
+            local_image = self._front_porch_project_image_from_json(project_path, selected, f"{reason}_project_json")
+        if local_image:
+            loaded["imagePath"] = local_image
+            loaded["cardImagePath"] = local_image
+            settings_obj = loaded.get("settings") if isinstance(loaded.get("settings"), dict) else {}
+            settings_obj["cardImagePath"] = local_image
+            loaded["settings"] = settings_obj
+            workspace = loaded.get("workspace") if isinstance(loaded.get("workspace"), dict) else {}
+            workspace["imagePath"] = local_image
+            workspace["cardImagePath"] = local_image
+            loaded["workspace"] = workspace
+            selected_name = Path(selected).name if selected and not selected.lower().startswith(("data:", "http://", "https://")) else ""
+            tabs = loaded.get("characterTabs") if isinstance(loaded.get("characterTabs"), list) else []
+            for tab in tabs:
+                if not isinstance(tab, dict):
+                    continue
+                tab_path = str(tab.get("cardImagePath") or tab.get("imagePath") or "").strip()
+                tab_name = Path(tab_path).name if tab_path and not tab_path.lower().startswith(("data:", "http://", "https://")) else ""
+                if not tab_path or tab_path == selected or (selected_name and tab_name == selected_name):
+                    tab["cardImagePath"] = local_image
+                    tab["imagePath"] = local_image
+            if tabs:
+                loaded["characterTabs"] = tabs
+            self._log_event("loaded_project_card_image_materialized", {"reason": reason, "project": str(project_path or ""), "selected": selected[:240], "path": local_image})
+        elif selected:
+            self._log_event("loaded_project_card_image_unresolved", {"reason": reason, "project": str(project_path or ""), "selected": selected[:240], "hasImageDataUrl": bool(loaded.get("imageDataUrl"))})
         return loaded
 
     def _cleanup_temp_workspace_dirs(self, keep_paths=None):
@@ -1352,8 +1411,19 @@ class Api:
         output = project.get("output") or ""
         concept = project.get("concept") or ""
         image_path = project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or ""
+        resolved_image_path = self._ensure_local_card_image_path(image_path, "card", "browser_cache_project_image") if image_path else ""
+        if not resolved_image_path:
+            try:
+                resolved_image_path = self._front_porch_project_image_from_assets(path, image_path, "browser_cache_asset_image")
+            except Exception:
+                resolved_image_path = ""
+        if resolved_image_path:
+            image_path = resolved_image_path
         card_png = self._latest_card_png_for_folder(folder, name)
-        thumb_source = str(card_png) if card_png else image_path
+        # Prefer the selected card image for the Browser thumbnail. If an older
+        # autosaved card PNG was created with a blank fallback, the selected image
+        # from the workspace asset DB is still the source of truth.
+        thumb_source = image_path or (str(card_png) if card_png else "")
         browser_description = str(project.get("browserDescription") or "").strip()
         browser_description_source = str(project.get("browserDescriptionSource") or "").strip().lower()
         if browser_description:
@@ -5987,6 +6057,126 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def update_project_card_image(self, project_path, image_source):
+        """Force-update the selected card image for an existing saved project.
+
+        This is intentionally separate from the normal workspace autosave path.
+        Older projects can carry stale/blank exportedPath/latest_cardv2 image
+        state even after the editor's Card Image field changes.  This method
+        treats the supplied image as authoritative, rewrites the project JSON,
+        rewrites the latest Chara V2 PNG with that image, stores the image in
+        workspace_assets, and refreshes the Character Browser cache.
+        """
+        try:
+            path = Path(str(project_path or "")).expanduser()
+            if not path.exists() or not path.is_file():
+                return {"ok": False, "error": "Character project not found."}
+            source = str(image_source or "").strip()
+            if not source:
+                return {"ok": False, "error": "No card image was supplied."}
+
+            local_image_path = self._ensure_local_card_image_path(source, "card", "update_project_card_image")
+            if not local_image_path:
+                return {"ok": False, "error": f"Could not resolve the selected card image: {source[:200]}"}
+
+            # Make the selected image durable.  Even if the source currently exists
+            # in generated_images or elsewhere, old-card updates should not depend
+            # on a temp/generated path remaining alive after cleanup/reload.
+            try:
+                resolved = Path(local_image_path).expanduser().resolve()
+                card_root = CARD_IMAGES_DIR.resolve()
+                if not (resolved == card_root or card_root in resolved.parents):
+                    promoted = self._copy_image_from_path(resolved, "card")
+                    if promoted.get("ok") and promoted.get("path"):
+                        self._log_event("project_card_image_promoted", {"project": str(path), "from": str(resolved), "to": promoted.get("path")})
+                        local_image_path = str(promoted.get("path"))
+            except Exception as e:
+                self._log_event("project_card_image_promote_failed", {"project": str(path), "image": str(local_image_path), "error": str(e)})
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid character project."}
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            settings = self._normalise_settings(project.get("settings") if isinstance(project.get("settings"), dict) else {})
+
+            output = str(project.get("output") or workspace.get("output") or "").strip()
+            if not output:
+                # Try the sidecar used by older saved workspaces.
+                try:
+                    sidecar = path.parent / "latest_output.md"
+                    if sidecar.exists():
+                        output = sidecar.read_text(encoding="utf-8").strip()
+                except Exception:
+                    output = ""
+            name = self._clean_character_name_value(project.get("name") or self._extract_name(output) or path.parent.name) or "Character Card"
+            template = project.get("template") or workspace.get("template") or self.template
+
+            settings["cardImagePath"] = local_image_path
+            for target in (project, workspace):
+                target["imagePath"] = local_image_path
+                target["cardImagePath"] = local_image_path
+            project["settings"] = settings
+
+            def update_tabs(tabs):
+                if not isinstance(tabs, list):
+                    return
+                for tab in tabs:
+                    if isinstance(tab, dict):
+                        tab["imagePath"] = local_image_path
+                        tab["cardImagePath"] = local_image_path
+            update_tabs(project.get("characterTabs"))
+            update_tabs(workspace.get("characterTabs"))
+
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            project["saved_at"] = stamp
+            project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            workspace["settings"] = settings
+            workspace["saved_at"] = stamp
+            workspace["updated_at"] = project["updated_at"]
+            project["workspace"] = workspace
+
+            latest_card = Path("")
+            if output:
+                try:
+                    latest_card = path.parent / f"{self._safe_slug(name)}_latest_cardv2.png"
+                    card_payload = self._to_chara_card_v2(output, name)
+                    self._write_chara_png(latest_card, card_payload, local_image_path, require_image=True)
+                    project["exportedPath"] = str(latest_card)
+                    try:
+                        (path.parent / "latest_output.md").write_text(output, encoding="utf-8")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self._log_event("update_project_card_image_latest_png_failed", {"project": str(path), "error": str(e), "image": str(local_image_path)})
+                    return {"ok": False, "error": f"Could not rewrite latest card PNG with selected image: {e}"}
+
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                asset_workspace = dict(workspace)
+                asset_workspace["output"] = output or asset_workspace.get("output") or project.get("output") or ""
+                asset_workspace["settings"] = settings
+                asset_workspace["cardImagePath"] = local_image_path
+                asset_workspace["imagePath"] = local_image_path
+                self._save_workspace_assets_to_db(path, asset_workspace, image_path=local_image_path)
+            except Exception as e:
+                self._log_event("update_project_card_image_asset_save_failed", {"project": str(path), "error": str(e)})
+            try:
+                self._refresh_library_cache_for_project(path, force=True)
+            except Exception as e:
+                self._log_event("update_project_card_image_cache_refresh_failed", {"project": str(path), "error": str(e)})
+            self._log_event("project_card_image_updated", {"project": str(path), "image": str(local_image_path), "latestCard": str(latest_card or "")})
+            return {
+                "ok": True,
+                "projectPath": str(path),
+                "imagePath": local_image_path,
+                "cardImagePath": local_image_path,
+                "cardPath": str(latest_card) if str(latest_card) else "",
+                "name": name,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Could not update saved card image: {e}"}
+
     def pick_saved_file(self):
         try:
             paths = self._run_modern_file_dialog("Load Saved Character Card / Project", "saved", False)
@@ -6899,19 +7089,10 @@ class Api:
         embedded_project_path = project.get("projectPath") or ""
         if project_path:
             loaded = self._hydrate_workspace_from_db_assets(project_path, loaded)
-        if (not loaded.get("imageDataUrl")) and embedded_project_path and embedded_project_path != project_path:
+            loaded = self._materialize_loaded_project_card_image(loaded, project_path, "load_project_payload")
+        if embedded_project_path and embedded_project_path != project_path:
             loaded = self._hydrate_workspace_from_db_assets(embedded_project_path, loaded)
-            raw_image_path = str(loaded.get("imagePath") or "").strip()
-            local_image_path = ""
-            if raw_image_path:
-                local_image_path = self._ensure_local_card_image_path(raw_image_path, "card", "hydrate_project_payload")
-            if not local_image_path and loaded.get("imageDataUrl"):
-                local_image_path = self._ensure_local_card_image_path(loaded.get("imageDataUrl"), "card", "hydrate_project_image_data")
-            if local_image_path:
-                loaded["imagePath"] = local_image_path
-                loaded["cardImagePath"] = local_image_path
-                if isinstance(loaded.get("settings"), dict):
-                    loaded["settings"]["cardImagePath"] = local_image_path
+            loaded = self._materialize_loaded_project_card_image(loaded, embedded_project_path, "load_project_embedded_payload")
         return loaded
 
     def _maybe_load_companion_project(self, path):
@@ -7326,10 +7507,16 @@ class Api:
 
     def image_preview_data_url(self, path):
         try:
-            data_url = self._image_data_url(path, max_size=(420, 560))
+            # Resolve the same sources export uses: file:// URLs, managed card-image
+            # paths, generated-image filenames, data URLs, and raw/base64 image blobs.
+            # This keeps the Quick Save / Image preview from breaking after reload
+            # when the saved project only has a generated image in the asset DB or
+            # stores the generated image by filename.
+            local_path = self._ensure_local_card_image_path(path, "card", "image_preview_data_url") if path else ""
+            data_url = self._image_data_url(local_path or path, max_size=(420, 560))
             if not data_url:
                 return {"ok": False, "error": "Image preview could not be loaded."}
-            return {"ok": True, "dataUrl": data_url}
+            return {"ok": True, "dataUrl": data_url, "path": local_path or str(path or "")}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -9563,6 +9750,20 @@ class Api:
             stripped_workspace["settings"] = stripped_settings
             local_image_path = self._resolve_workspace_card_image_path(stripped_workspace, original_image_path, "save_character_workspace_preserve_image")
         if local_image_path:
+            # Generated-image candidates are temporary. Once the user chooses one
+            # as the card image, promote it into the durable card_images folder so
+            # reload, browser thumbnail refresh, and export never depend on a stale
+            # generated_images path.
+            try:
+                resolved_local = Path(local_image_path).expanduser().resolve()
+                generated_root = GENERATED_IMAGES_DIR.resolve()
+                if resolved_local == generated_root or generated_root in resolved_local.parents:
+                    promoted = self._copy_image_from_path(resolved_local, "card")
+                    if promoted.get("ok") and promoted.get("path"):
+                        self._log_event("selected_generated_image_promoted_on_save", {"from": str(resolved_local), "to": promoted.get("path")})
+                        local_image_path = str(promoted.get("path"))
+            except Exception as e:
+                self._log_event("selected_generated_image_promote_failed", {"path": str(local_image_path), "error": str(e)})
             image_path = local_image_path
             settings["cardImagePath"] = local_image_path
             workspace["cardImagePath"] = local_image_path
@@ -9572,6 +9773,7 @@ class Api:
                 for tab in tabs:
                     if isinstance(tab, dict) and (not tab.get("cardImagePath") or str(tab.get("cardImagePath") or "").strip() == original_image_path):
                         tab["cardImagePath"] = local_image_path
+                        tab["imagePath"] = local_image_path
         template = workspace.get("template") or self.template
         concept = workspace.get("concept") or ""
         latest_project = folder / "latest_ccf_project.json"
@@ -9886,6 +10088,29 @@ class Api:
             # Older projects can contain a stale embedded projectPath, which meant
             # text loaded but card image / generated images / emotion images stayed empty.
             res = self._hydrate_workspace_from_db_assets(path, res)
+            # After hydration the selected image may exist only as imageDataUrl in
+            # workspace_assets, while the old cardImagePath points at a cleaned temp
+            # file or a generated-image basename. Materialize it now so preview,
+            # browser thumbnail refresh, and exports all use the same real file.
+            resolved_image_path = ""
+            raw_image_path = str(res.get("cardImagePath") or res.get("imagePath") or "").strip()
+            if raw_image_path:
+                resolved_image_path = self._ensure_local_card_image_path(raw_image_path, "card", "load_character_project_selected_image")
+            if not resolved_image_path and res.get("imageDataUrl"):
+                resolved_image_path = self._ensure_local_card_image_path(res.get("imageDataUrl"), "card", "load_character_project_image_data_url")
+            if resolved_image_path:
+                res["imagePath"] = resolved_image_path
+                res["cardImagePath"] = resolved_image_path
+                if isinstance(res.get("settings"), dict):
+                    res["settings"]["cardImagePath"] = resolved_image_path
+                workspace = res.get("workspace") if isinstance(res.get("workspace", {}), dict) else {}
+                workspace["imagePath"] = resolved_image_path
+                workspace["cardImagePath"] = resolved_image_path
+                res["workspace"] = workspace
+            # Final repair pass for projects saved while the image workflow was
+            # broken. It can recover from workspace_assets, image data URLs,
+            # generated-image basenames, or non-blank saved card PNGs.
+            res = self._materialize_loaded_project_card_image(res, str(path), "load_character_project")
             res["projectPath"] = str(path)
 
             # Always provide a single, fully hydrated tab for Character Browser loading.
@@ -14776,10 +15001,11 @@ class Api:
 
     def _front_porch_project_image_from_assets(self, project_path, selected_path="", reason="front_porch_asset_image"):
         """Restore the selected/main card image from the workspace asset DB using the real project path."""
+        canonical_project_path = str(project_path or "")
         try:
             rows = self._load_workspace_assets_from_db(project_path)
         except Exception as e:
-            self._log_event("front_porch_image_asset_lookup_failed", {"project": str(canonical_project_path), "error": str(e)})
+            self._log_event("front_porch_image_asset_lookup_failed", {"project": canonical_project_path, "error": str(e)})
             rows = []
         if not rows:
             return ""
@@ -14848,10 +15074,11 @@ class Api:
 
     def _front_porch_project_image_from_json(self, project_path, selected_path="", reason="front_porch_project_json"):
         """Restore a card image by directly scanning a saved project JSON for image paths/base64."""
+        canonical_project_path = str(project_path or "")
         try:
             payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
         except Exception as e:
-            self._log_event("front_porch_image_project_json_read_failed", {"project": str(canonical_project_path), "error": str(e)})
+            self._log_event("front_porch_image_project_json_read_failed", {"project": canonical_project_path, "error": str(e)})
             return ""
         project = payload.get("project", payload) if isinstance(payload, dict) else {}
         if not isinstance(project, dict):
@@ -14992,7 +15219,7 @@ class Api:
                 payload = json.loads(project_path.read_text(encoding="utf-8"))
                 project = payload.get("project", payload) if isinstance(payload, dict) else {}
             except Exception as e:
-                self._log_event("front_porch_existing_card_png_json_read_failed", {"project": str(canonical_project_path), "error": str(e)})
+                self._log_event("front_porch_existing_card_png_json_read_failed", {"project": str(project_path), "error": str(e)})
                 project = {}
             if isinstance(project, dict):
                 workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
@@ -15245,13 +15472,32 @@ class Api:
             self._log_event("card_image_url_materialize_exception", {"reason": reason, "kind": kind, "sourceUrl": source, "error": str(e)})
             return ""
         # Try a path relative to the app/user data folders as a final fallback.
-        for base in (DATA_DIR, EXPORT_DIR, APP_DIR):
+        # Generated images may be restored from JSON/SQLite metadata by filename
+        # only, so also search the managed card-image folders recursively by name.
+        fallback_bases = (GENERATED_IMAGES_DIR, CARD_IMAGES_DIR, DATA_DIR, EXPORT_DIR, APP_DIR)
+        for base in fallback_bases:
             try:
                 candidate = (Path(base) / source).expanduser()
                 if candidate.exists() and candidate.is_file():
                     return str(candidate)
             except Exception:
                 pass
+        try:
+            source_name = Path(source).name
+        except Exception:
+            source_name = ""
+        if source_name:
+            for base in (CARD_IMAGES_DIR, GENERATED_IMAGES_DIR, DATA_DIR):
+                try:
+                    base_path = Path(base)
+                    if not base_path.exists():
+                        continue
+                    matches = sorted(base_path.rglob(source_name), key=lambda p: p.stat().st_mtime, reverse=True)
+                    for candidate in matches[:20]:
+                        if candidate.exists() and candidate.is_file():
+                            return str(candidate)
+                except Exception:
+                    pass
         return ""
 
     def _write_chara_png(self, path, payload, image_path=None, require_image=False):
