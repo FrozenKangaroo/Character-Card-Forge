@@ -40,7 +40,11 @@ let outputEditorSaveTimer = null;
 let browserShowSubfolders = false;
 let browserTagSearchTerm = "";
 let browserContextMenuPaths = [];
+let browserContextMenuProjectPath = "";
+let browserCardGroups = [];
+let browserExpandedCardGroups = new Set();
 let browserPendingMovePaths = [];
+let browserPendingGroupCardPaths = [];
 let browserMoveTargetFolderId = "";
 let browserExpandedMoveFolders = new Set();
 let sdModelCatalog = [];
@@ -73,6 +77,10 @@ let ratingImproveLostDetails = [];
 let ratingImproveLostSummary = '';
 let manualGuidePageIndex = 0;
 let manualGuideState = {};
+let manualGroupCardSettings = {};
+const FRONT_PORCH_GROUP_CARDS_ENABLED = true;
+const FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE = 'Front Porch Group Cards are enabled.';
+
 let conceptWorkspaceTabs = [];
 let activeConceptTabIndex = 0;
 let manualGuideTabs = [];
@@ -217,6 +225,9 @@ async function checkForAppUpdates(manual = false, options = {}) {
         currentVersion: res?.currentVersion || appVersion || 'unknown',
         latestVersion: res?.latestVersion || res?.latestTag || '',
         updateKind: res?.updateKind || '',
+        source: res?.source || '',
+        candidateCount: Number(res?.candidateCount || 0),
+        candidateVersions: Array.isArray(res?.candidateVersions) ? res.candidateVersions.slice(0, 8) : [],
         error: res?.error || ''
       });
     } catch (_) {}
@@ -226,8 +237,8 @@ async function checkForAppUpdates(manual = false, options = {}) {
       // Manual checks should always show the modal. Startup checks should also
       // show it even if a previous auto check already found the same version.
       // Hourly checks respect Remind Me Later for the current session unless
-      // forceModal is passed.
-      if (manual || forceModal || !dismissedThisSession || !isUpdateAvailableModalOpen()) {
+      // forceModal is passed. Startup/manual checks always show the modal.
+      if (manual || forceModal || !dismissedThisSession) {
         showUpdateAvailableModal(res);
         try { await writeClientDebugEvent('update_check_frontend_modal_shown', { manual, source, latestVersion: latest }); } catch (_) {}
       }
@@ -235,7 +246,10 @@ async function checkForAppUpdates(manual = false, options = {}) {
     }
     if (manual) {
       const latest = res?.latestVersion || res?.latestTag || 'unknown';
-      if (res?.ok) setStatus(`No newer release found. Latest GitHub release is ${latest}.`, 'ok');
+      const source = res?.source ? ` via ${res.source}` : '';
+      const count = Number(res?.candidateCount || 0);
+      if (res?.ok && count > 0) setStatus(`No newer release found. Latest GitHub version is ${latest}${source}. Checked ${count} candidate(s).`, 'ok');
+      else if (res?.ok) setStatus(`No GitHub release/tag versions were found${source}. Check the Debug Log for update_check_* entries.`, 'error');
       else setStatus(res?.error || 'Could not check for updates.', 'error');
     }
     return res || null;
@@ -390,7 +404,9 @@ function captureActiveOutputTab() {
   tab.output = outputText;
   tab.qaAnswers = cleanQaAnswersForStorage(qaText, outputText);
   tab.emotionImages = emotionImageState.map(img => ({...img}));
-  tab.cardImagePath = $('#cardImagePath')?.value || '';
+  const nextImage = $('#cardImagePath')?.value || '';
+  tab.cardImagePath = nextImage || (tab.isGroupCard ? (tab.groupCardPath || tab.cardImagePath || '') : '');
+  if (tab.isGroupCard && !tab.imagePath) tab.imagePath = tab.cardImagePath || tab.groupCardPath || '';
 }
 
 function applyActiveOutputTab() {
@@ -832,15 +848,22 @@ function setCharacterOutputTabs(cards) {
     const extractedName = extractOutputNameForTab(cardOutput || '');
     const originalName = card.name || card.focusName || `Character ${idx + 1}`;
     const finalName = isGenericOutputName(originalName) && extractedName ? extractedName : cleanOutputTabName(originalName) || extractedName || `Character ${idx + 1}`;
+    const groupMeta = groupCardWorkspaceMetaFromState(card || {});
     return {
+      ...groupMeta,
       name: finalName,
       focusName: card.focusName || finalName,
       output: cardOutput || '',
+      fullTextOutput: cardOutput || '',
       qaAnswers: loadedQaTextFromTab(card),
+      qnaAnswers: loadedQaTextFromTab(card),
       emotionImages: Array.isArray(card.emotionImages) ? card.emotionImages : [],
       generatedImages: Array.isArray(card.generatedImages) ? card.generatedImages : [],
-      cardImagePath: card.cardImagePath || card.imagePath || '',
-      splitMode: card.splitMode || card.splitCard || (String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase() === 'split_cards' ? 'split_cards' : ''),
+      cardImagePath: groupMeta.groupCardPath || card.cardImagePath || card.imagePath || '',
+      imagePath: groupMeta.groupCardPath || card.imagePath || card.cardImagePath || '',
+      projectPath: canonicalWorkspaceProjectPath(card.projectPath || card.workspaceProjectPath || ''),
+      workspaceProjectPath: canonicalWorkspaceProjectPath(card.workspaceProjectPath || card.projectPath || ''),
+      splitMode: card.splitMode || card.splitCard || (['split_cards','group_cards'].includes(String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase()) ? String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase() : ''),
     };
   });
   if (!characterOutputTabs.length) characterOutputTabs = [makeBlankOutputTab('Character')];
@@ -858,6 +881,29 @@ function setCharacterOutputTabs(cards) {
 
 function makeBlankOutputTab(name = 'Character') {
   return { name, focusName: name, output: '', qaAnswers: '', emotionImages: [], generatedImages: [], cardImagePath: '' };
+}
+
+function groupCardWorkspaceMetaFromState(state = {}) {
+  const workspace = (state && typeof state.workspace === 'object') ? state.workspace : {};
+  const payload = (state.groupPayload && typeof state.groupPayload === 'object') ? state.groupPayload : ((workspace.groupPayload && typeof workspace.groupPayload === 'object') ? workspace.groupPayload : null);
+  const isGroupCard = !!(state.isGroupCard || workspace.isGroupCard || state.frontend === 'front_porch_group' || workspace.frontend === 'front_porch_group' || state.exportFormat === 'fpa_group_png' || workspace.exportFormat === 'fpa_group_png' || state.groupCardPath || workspace.groupCardPath || payload?.spec === 'front_porch_group_card');
+  if (!isGroupCard) return {};
+  return {
+    isGroupCard: true,
+    groupCardMode: state.groupCardMode || workspace.groupCardMode || '',
+    groupCardPath: state.groupCardPath || workspace.groupCardPath || state.exportedPath || workspace.exportedPath || state.imagePath || state.cardImagePath || workspace.imagePath || workspace.cardImagePath || '',
+    groupJsonPath: state.groupJsonPath || workspace.groupJsonPath || '',
+    groupPayload: payload || {},
+    memberProjectPaths: Array.isArray(state.memberProjectPaths) ? state.memberProjectPaths : (Array.isArray(workspace.memberProjectPaths) ? workspace.memberProjectPaths : []),
+    frontend: 'front_porch_group',
+    exportFormat: 'fpa_group_png',
+  };
+}
+
+function activeOutputTabIsGroupCard() {
+  captureActiveOutputTab();
+  const tab = characterOutputTabs[activeOutputTabIndex] || {};
+  return !!(tab.isGroupCard || tab.groupCardPath || tab.groupPayload?.spec === 'front_porch_group_card' || tab.frontend === 'front_porch_group' || tab.exportFormat === 'fpa_group_png');
 }
 
 function refreshWorkspaceTabScrollButtons(targetId = '') {
@@ -1022,6 +1068,168 @@ function makeBlankManualTab(name = '') {
   return { name: name || `Manual ${idx}`, state: {}, pageIndex: 0 };
 }
 
+function defaultManualGroupCardSettings() {
+  return {
+    mode: 'single',
+    memberCount: 2,
+    name: '',
+    scenario: '',
+    firstMessage: '',
+    systemPrompt: '',
+    aiInstructions: '',
+    turnOrder: 'roundRobin',
+    autoAdvance: false,
+    directorMode: false,
+    includeRealismState: true,
+  };
+}
+
+function clampManualGroupMemberCount(value) {
+  return Math.max(2, Math.min(4, Number(value || 2)));
+}
+
+function frontPorchGroupCardsComingSoon(messageTarget = 'status') {
+  const msg = FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE + ' The code is still in place, but creation controls are marked Coming Soon for now.';
+  if (messageTarget === 'alert') alert(msg);
+  else setStatus(msg, 'warn');
+  return msg;
+}
+
+function disableFrontPorchGroupCardCreationUi() {
+  const conceptOption = $('#cardMode option[value="group_cards"]');
+  if (conceptOption) {
+    conceptOption.disabled = !FRONT_PORCH_GROUP_CARDS_ENABLED;
+    conceptOption.textContent = FRONT_PORCH_GROUP_CARDS_ENABLED ? 'Multi-Card Group Card' : 'Multi-Card Group Card (Coming Soon)';
+  }
+  const cardMode = $('#cardMode');
+  if (!FRONT_PORCH_GROUP_CARDS_ENABLED && cardMode?.value === 'group_cards') {
+    cardMode.value = 'split_cards';
+    if (settings) settings.cardMode = 'split_cards';
+  }
+
+  const manualOption = $('#manualCardMode option[value="group_card"]');
+  if (manualOption) {
+    manualOption.disabled = !FRONT_PORCH_GROUP_CARDS_ENABLED;
+    manualOption.textContent = FRONT_PORCH_GROUP_CARDS_ENABLED ? 'Front Porch Group Card' : 'Front Porch Group Card (Coming Soon)';
+  }
+  const manualMode = $('#manualCardMode');
+  if (!FRONT_PORCH_GROUP_CARDS_ENABLED) {
+    if (manualMode) manualMode.value = 'single';
+    manualGroupCardSettings = { ...(manualGroupCardSettings || {}), mode: 'single' };
+    ['manualGroupMemberCountWrap','manualGroupMemberActions','manualGroupSettings'].forEach(id => $('#' + id)?.classList.add('hidden'));
+    const build1 = $('#manualBuildOutputBtn');
+    const build2 = $('#manualBuildOutputTopBtn');
+    if (build1) build1.textContent = 'Build Output';
+    if (build2) build2.textContent = 'Build Output';
+  }
+
+  const createBtn = $('#createBrowserGroupCardBtn');
+  if (createBtn && !FRONT_PORCH_GROUP_CARDS_ENABLED) {
+    createBtn.disabled = true;
+    createBtn.textContent = 'Coming Soon';
+    createBtn.title = FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE;
+  }
+}
+
+function isManualGroupCardMode() {
+  return FRONT_PORCH_GROUP_CARDS_ENABLED && (($('#manualCardMode')?.value || manualGroupCardSettings.mode || 'single') === 'group_card');
+}
+
+function collectManualGroupCardSettings() {
+  manualGroupCardSettings = {
+    ...defaultManualGroupCardSettings(),
+    ...(manualGroupCardSettings || {}),
+    mode: (FRONT_PORCH_GROUP_CARDS_ENABLED ? ($('#manualCardMode')?.value || manualGroupCardSettings.mode || 'single') : 'single'),
+    memberCount: clampManualGroupMemberCount($('#manualGroupMemberCount')?.value || manualGroupCardSettings.memberCount || 2),
+    name: ($('#manualGroupCardName')?.value || '').trim(),
+    scenario: ($('#manualGroupScenario')?.value || '').trim(),
+    firstMessage: ($('#manualGroupFirstMessage')?.value || '').trim(),
+    systemPrompt: ($('#manualGroupSystemPrompt')?.value || '').trim(),
+    aiInstructions: ($('#manualGroupInstructions')?.value || '').trim(),
+    turnOrder: $('#manualGroupTurnOrder')?.value || 'roundRobin',
+    autoAdvance: !!$('#manualGroupAutoAdvance')?.checked,
+    directorMode: !!$('#manualGroupDirectorMode')?.checked,
+    includeRealismState: !!$('#manualGroupRealismState')?.checked,
+  };
+  return manualGroupCardSettings;
+}
+
+function applyManualGroupCardSettingsToUi() {
+  manualGroupCardSettings = { ...defaultManualGroupCardSettings(), ...(manualGroupCardSettings || {}) };
+  const mode = $('#manualCardMode');
+  if (mode) mode.value = FRONT_PORCH_GROUP_CARDS_ENABLED ? (manualGroupCardSettings.mode || 'single') : 'single';
+  const count = $('#manualGroupMemberCount');
+  if (count) count.value = String(clampManualGroupMemberCount(manualGroupCardSettings.memberCount || 2));
+  const name = $('#manualGroupCardName');
+  if (name) name.value = manualGroupCardSettings.name || '';
+  const scenario = $('#manualGroupScenario');
+  if (scenario) scenario.value = manualGroupCardSettings.scenario || '';
+  const firstMessage = $('#manualGroupFirstMessage');
+  if (firstMessage) firstMessage.value = manualGroupCardSettings.firstMessage || '';
+  const systemPrompt = $('#manualGroupSystemPrompt');
+  if (systemPrompt) systemPrompt.value = manualGroupCardSettings.systemPrompt || '';
+  const instructions = $('#manualGroupInstructions');
+  if (instructions) instructions.value = manualGroupCardSettings.aiInstructions || '';
+  const turn = $('#manualGroupTurnOrder');
+  if (turn) turn.value = manualGroupCardSettings.turnOrder || 'roundRobin';
+  const auto = $('#manualGroupAutoAdvance');
+  if (auto) auto.checked = !!manualGroupCardSettings.autoAdvance;
+  const director = $('#manualGroupDirectorMode');
+  if (director) director.checked = !!manualGroupCardSettings.directorMode;
+  const realism = $('#manualGroupRealismState');
+  if (realism) realism.checked = manualGroupCardSettings.includeRealismState !== false;
+}
+
+function updateManualGroupModeUi() {
+  const opts = collectManualGroupCardSettings();
+  const groupMode = FRONT_PORCH_GROUP_CARDS_ENABLED && opts.mode === 'group_card';
+  ['manualGroupMemberCountWrap','manualGroupMemberActions','manualGroupSettings'].forEach(id => $('#' + id)?.classList.toggle('hidden', !groupMode));
+  const status = $('#manualGroupMemberStatus');
+  if (status) status.textContent = `${opts.memberCount} member${opts.memberCount === 1 ? '' : 's'}`;
+  const build1 = $('#manualBuildOutputBtn');
+  const build2 = $('#manualBuildOutputTopBtn');
+  if (build1) build1.textContent = groupMode ? 'Build Group Card' : 'Build Output';
+  if (build2) build2.textContent = groupMode ? 'Build Group Card' : 'Build Output';
+  renderManualWorkspaceTabs();
+}
+
+function ensureManualGroupMemberTabs(count = 2) {
+  count = clampManualGroupMemberCount(count);
+  captureActiveManualTab({ lightweight: false });
+  ensureLinkedWorkspaceTabs();
+  while (manualGuideTabs.length < count) {
+    const idx = manualGuideTabs.length;
+    addLinkedWorkspaceTab({
+      outputTab: makeBlankOutputTab(`Group Member ${idx + 1}`),
+      conceptTab: makeBlankConceptTab(`Group Member ${idx + 1}`),
+      manualTab: makeBlankManualTab(`Group Member ${idx + 1}`),
+      activate: false,
+    });
+  }
+  for (let idx = 0; idx < count; idx += 1) {
+    const fallback = `Group Member ${idx + 1}`;
+    if (manualGuideTabs[idx] && /^Manual\s+\d+$/i.test(manualGuideTabs[idx].name || '')) manualGuideTabs[idx].name = fallback;
+    if (characterOutputTabs[idx] && /^Character\s+\d+$/i.test(characterOutputTabs[idx].name || '')) {
+      characterOutputTabs[idx].name = fallback;
+      characterOutputTabs[idx].focusName = fallback;
+    }
+    if (conceptWorkspaceTabs[idx] && /^Concept\s+\d+$/i.test(conceptWorkspaceTabs[idx].name || '')) conceptWorkspaceTabs[idx].name = fallback;
+  }
+  activeManualGuideTabIndex = Math.max(0, Math.min(activeManualGuideTabIndex, count - 1));
+  activeOutputTabIndex = Math.max(0, Math.min(activeOutputTabIndex, characterOutputTabs.length - 1));
+  activeConceptTabIndex = Math.max(0, Math.min(activeConceptTabIndex, conceptWorkspaceTabs.length - 1));
+  renderAllWorkspaceTabRails();
+  applyActiveManualTab({ skipPreview: true });
+  setTimeout(() => updateManualPreview(), 0);
+}
+
+function syncManualGroupMembersFromUi(showStatus = true) {
+  const opts = collectManualGroupCardSettings();
+  ensureManualGroupMemberTabs(opts.memberCount);
+  updateManualGroupModeUi();
+  if (showStatus) setStatus(`Guided Manual group mode prepared for ${opts.memberCount} member card${opts.memberCount === 1 ? '' : 's'}. Use the Manual tabs to fill each character.`, 'ok');
+}
+
 function captureActiveManualTab(options = {}) {
   if (!manualGuideTabs.length) manualGuideTabs = [makeBlankManualTab('Manual 1')];
   const tab = manualGuideTabs[activeManualGuideTabIndex];
@@ -1108,6 +1316,7 @@ function clearCurrentManualGuideDraft() {
 
 function buildLinkedWorkspaceTabsFromLoadedState(state = {}, options = {}) {
   const projectPath = canonicalWorkspaceProjectPath(state?.projectPath || state?.sourcePath || '');
+  const groupMeta = groupCardWorkspaceMetaFromState(state || {});
   const forceSingleProject = !!options.singleProject;
   const savedTabs = (!forceSingleProject && Array.isArray(state?.characterTabs))
     ? state.characterTabs.filter(tab => tab && typeof tab === 'object' && loadedOutputTextFromTab(tab))
@@ -1118,6 +1327,7 @@ function buildLinkedWorkspaceTabsFromLoadedState(state = {}, options = {}) {
       const name = tab.name || tab.focusName || extractOutputNameForTab(loadedOutputTextFromTab(tab) || '') || `Loaded ${idx + 1}`;
       const outputTab = {
         ...tab,
+        ...groupMeta,
         name,
         focusName: tab.focusName || name,
         projectPath: canonicalWorkspaceProjectPath(tab.projectPath || tab.workspaceProjectPath || projectPath),
@@ -1147,6 +1357,7 @@ function buildLinkedWorkspaceTabsFromLoadedState(state = {}, options = {}) {
     const name = state.name || fallbackTab.name || fallbackTab.focusName || extractOutputNameForTab(outputText) || 'Loaded Character';
     const outputTab = {
       ...fallbackTab,
+      ...groupMeta,
       name,
       focusName: fallbackTab.focusName || name,
       projectPath,
@@ -1412,6 +1623,7 @@ const AI_QUEUE_METHODS = new Set([
   'regenerate_browser_description_for_project', 'ensure_card_rating_details_for_project',
   'generate_card_improvement_from_rating', 'generateCardImprovementFromRating', 'improveCardFromRating',
   'generate_split_cards', 'generate_qa_context', 'generate_with_qa_answers', 'generate', 'revise_card',
+  'create_card_variation_from_workspace', 'create_card_variation_from_project',
   'generate_sd_images', 'generate_emotion_images', 'regenerate_emotion_image',
   'card_upload_to_builders', 'card_url_to_builders', 'pick_card_to_builders'
 ]);
@@ -1428,6 +1640,8 @@ function humanizeAiMethodName(name) {
     generate_qa_context: 'Generate Q&A Context',
     generate_with_qa_answers: 'Generate Card from Q&A',
     revise_card: 'Revise Card',
+    create_card_variation_from_workspace: 'Create Card Variation',
+    create_card_variation_from_project: 'Create Card Variation',
     generate_idea: 'Idea Generator',
     generateIdea: 'Idea Generator',
     generateIdeaFromOptions: 'Idea Generator',
@@ -1654,7 +1868,7 @@ function isAiActionElement(el) {
   if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
   if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
   const aiIds = new Set([
-    'generateBtn','generateIdeaBtn','reviseBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
+    'generateBtn','generateIdeaBtn','reviseBtn','makeVariationBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
     'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
@@ -1918,7 +2132,7 @@ function updateAvailability() {
 
   if (!hardLocked) {
     ['copyBtn','exportBtn','zipEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
-    ['reviseBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
+    ['reviseBtn','makeVariationBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
     const genCard = $('#generateBtn');
     if (genCard) genCard.disabled = false;
     const genImg = $('#generateImagesBtn');
@@ -2065,6 +2279,7 @@ async function init() {
   promptTemplates = state.templates || ["Default"];
   activeTemplateName = state.activeTemplateName || settings.activeTemplateName || "Default";
   hydrateSettings();
+  disableFrontPorchGroupCardCreationUi();
   updateCardModeHint();
   renderStyles();
   renderEmotionOptions();
@@ -2076,10 +2291,13 @@ async function init() {
   renderConceptWorkspaceTabs();
   applyActiveConceptTab();
   renderManualWorkspaceTabs();
+  applyManualGroupCardSettingsToUi();
+  updateManualGroupModeUi();
   renderManualGuide();
   renderConceptAttachments();
   showRandomTip();
   bindActions();
+  disableFrontPorchGroupCardCreationUi();
   setTimeout(() => { populateBuilderPresets(); populateAiRandomThemes(); ensureBuilderPresetDropdowns(); updateAiRandomThemeCustom(); }, 0);
   setTimeout(ensureBuilderPresetDropdowns, 250);
   setTimeout(ensureBuilderPresetDropdowns, 1000);
@@ -2131,7 +2349,7 @@ function hydrateSettings() {
   $('#sdCfgScale').value = settings.sdCfgScale ?? 7;
   $('#sdSampler').value = settings.sdSampler || 'Euler a';
   $('#modeSelect').value = settings.mode || 'full';
-  $('#cardMode').value = settings.cardMode || 'single';
+  $('#cardMode').value = (!FRONT_PORCH_GROUP_CARDS_ENABLED && settings.cardMode === 'group_cards') ? 'split_cards' : (settings.cardMode || 'single');
   $('#multiCharacterCount').value = settings.multiCharacterCount ?? 2;
   if ($('#sharedScenePolicy')) $('#sharedScenePolicy').value = settings.sharedScenePolicy || 'ai_reconcile';
   const exportFormat = ['chara_v2_png','chara_v2_json','markdown'].includes(settings.exportFormat) ? settings.exportFormat : 'chara_v2_png';
@@ -2147,6 +2365,8 @@ function hydrateSettings() {
   browserVirtualFolders = Array.isArray(settings.browserVirtualFolders) ? settings.browserVirtualFolders : [];
   browserSortModesByFolder = (settings.browserSortModesByFolder && typeof settings.browserSortModesByFolder === 'object') ? settings.browserSortModesByFolder : {};
   browserCustomOrdersByFolder = (settings.browserCustomOrdersByFolder && typeof settings.browserCustomOrdersByFolder === 'object') ? settings.browserCustomOrdersByFolder : {};
+  browserCardGroups = normaliseBrowserCardGroups(settings.browserCardGroups || []);
+  browserExpandedCardGroups = new Set(Array.isArray(settings.browserExpandedCardGroups) ? settings.browserExpandedCardGroups.map(String).filter(Boolean) : []);
   browserSortMode = getBrowserFolderSortMode(browserCurrentFolderId);
   browserShowSubfolders = !!settings.browserShowSubfolders;
   const showSubfolders = $('#browserShowSubfolders'); if (showSubfolders) showSubfolders.checked = browserShowSubfolders;
@@ -2657,11 +2877,11 @@ function collectSettings() {
   // cardMode back to split even after the user changed Card Mode to Single.
   // That caused normal single-card generations to split into multiple cards.
   const rawCardMode = ($('#cardMode') ? $('#cardMode').value : 'single');
-  let selectedCardMode = ['single', 'multi', 'split_cards'].includes(rawCardMode) ? rawCardMode : 'single';
+  let selectedCardMode = ['single', 'multi', 'split_cards', ...(FRONT_PORCH_GROUP_CARDS_ENABLED ? ['group_cards'] : [])].includes(rawCardMode) ? rawCardMode : (rawCardMode === 'group_cards' ? 'split_cards' : 'single');
   let selectedSharedScenePolicy = ($('#sharedScenePolicy') ? $('#sharedScenePolicy').value : 'ai_reconcile');
   if (selectedCardMode === 'single') {
     selectedSharedScenePolicy = 'ai_reconcile';
-  } else if (selectedCardMode === 'split_cards') {
+  } else if (selectedCardMode === 'split_cards' || selectedCardMode === 'group_cards') {
     selectedSharedScenePolicy = 'split_cards';
   } else if (selectedSharedScenePolicy === 'split_cards') {
     // Split is now represented by Card Mode itself. If the user changes back
@@ -2722,6 +2942,8 @@ function collectSettings() {
     browserVirtualFolders: browserVirtualFolders || [],
     browserSortModesByFolder: browserSortModesByFolder || {},
     browserCustomOrdersByFolder: browserCustomOrdersByFolder || {},
+    browserCardGroups: browserCardGroups || [],
+    browserExpandedCardGroups: [...browserExpandedCardGroups],
     browserShowSubfolders: !!browserShowSubfolders,
     mobileServerEnabled: !!($('#mobileServerEnabled') && $('#mobileServerEnabled').checked),
     mobileServerHost: ($('#mobileServerHost') ? $('#mobileServerHost').value.trim() : '0.0.0.0') || '0.0.0.0',
@@ -3406,13 +3628,33 @@ function manualGuideFormatSection(section, state) {
   return lines.join('\n').trim();
 }
 
-function buildManualGuideOutput() {
-  captureManualGuideInputs();
+function ensureManualGuideSectionStateForMap(section, stateMap = {}) {
+  const key = manualGuideSectionKey(section);
+  const existing = stateMap[key] && typeof stateMap[key] === 'object' ? stateMap[key] : {};
+  const state = {
+    include: existing.include !== undefined ? !!existing.include : section?.enabled !== false,
+    body: existing.body || '',
+    fields: existing.fields && typeof existing.fields === 'object' ? { ...existing.fields } : {},
+  };
+  if (Array.isArray(existing.alternates)) state.alternates = existing.alternates.map(value => String(value || ''));
+  (section?.fields || []).forEach(field => {
+    const fid = String(field?.id || field?.label || uid());
+    if (state.fields[fid] === undefined) state.fields[fid] = '';
+  });
+  if (isManualAlternateFirstMessagesSection(section) && !Array.isArray(state.alternates)) {
+    state.alternates = [];
+    const oldBody = String(state.body || '').trim();
+    if (oldBody) state.alternates.push(oldBody);
+  }
+  return state;
+}
+
+function buildManualGuideOutputFromState(stateMap = {}) {
   if (!template || !Array.isArray(template.sections)) return '';
   const out = [];
   (template.sections || []).forEach(section => {
     const key = manualGuideSectionKey(section);
-    const state = ensureManualGuideSectionState(section);
+    const state = ensureManualGuideSectionStateForMap(section, stateMap || {});
     const body = manualGuideFormatSection(section, state);
     const hasContent = !!body.trim();
     if (!hasContent) return;
@@ -3426,6 +3668,12 @@ function buildManualGuideOutput() {
   });
   return out.join('\n').trim();
 }
+
+function buildManualGuideOutput() {
+  captureManualGuideInputs();
+  return buildManualGuideOutputFromState(manualGuideState || {});
+}
+
 
 function updateManualPreview() {
   const preview = $('#manualPreviewText');
@@ -3454,6 +3702,7 @@ function clearManualGuideDraft() {
 
 
 async function buildManualGuideIntoOutput() {
+  if (isManualGroupCardMode()) return buildManualGroupCardIntoOutput();
   if (isInterfaceLocked()) return;
   const output = buildManualGuideOutput();
   if (!output.trim()) {
@@ -3495,6 +3744,143 @@ async function buildManualGuideIntoOutput() {
   updateAvailability();
   await saveCurrentWorkspace('silent');
   setStatus('Guided Manual output built, Q&A skipped, and workspace autosaved.', 'ok');
+}
+
+function collectManualGroupCardExportOptions() {
+  const opts = collectManualGroupCardSettings();
+  return {
+    mode: 'insert',
+    name: opts.name || '',
+    aiInstructions: opts.aiInstructions || '',
+    scenario: opts.scenario || '',
+    firstMessage: opts.firstMessage || '',
+    systemPrompt: opts.systemPrompt || '',
+    turnOrder: opts.turnOrder || 'roundRobin',
+    autoAdvance: !!opts.autoAdvance,
+    directorMode: !!opts.directorMode,
+    includeRealismState: opts.includeRealismState !== false,
+  };
+}
+
+async function saveManualGroupMemberWorkspaces(memberCount) {
+  const saved = [];
+  const failures = [];
+  settings = collectSettings();
+  for (let idx = 0; idx < memberCount; idx += 1) {
+    try {
+      const payload = collectWorkspacePayloadForTab(idx, settings);
+      if (!String(payload.output || '').trim()) throw new Error('empty output');
+      const res = await window.pywebview.api.save_character_workspace(payload);
+      if (!res?.ok) throw new Error(res?.error || 'Workspace save failed.');
+      saved.push(res);
+      const path = canonicalWorkspaceProjectPath(res.projectPath || '');
+      if (characterOutputTabs[idx]) {
+        characterOutputTabs[idx].projectPath = path;
+        characterOutputTabs[idx].workspaceProjectPath = path;
+      }
+      if (conceptWorkspaceTabs[idx]) {
+        conceptWorkspaceTabs[idx].projectPath = path;
+        conceptWorkspaceTabs[idx].workspaceProjectPath = path;
+      }
+      if (manualGuideTabs[idx]) {
+        manualGuideTabs[idx].projectPath = path;
+        manualGuideTabs[idx].workspaceProjectPath = path;
+      }
+    } catch (err) {
+      failures.push(`${workspaceTabNameForIndex(idx) || `Member ${idx + 1}`}: ${err.message || String(err)}`);
+    }
+  }
+  if (failures.length) throw new Error(`Could not save ${failures.length} group member card${failures.length === 1 ? '' : 's'}: ${failures.join('; ')}`);
+  await refreshCharacterBrowser(false);
+  return saved;
+}
+
+async function buildManualGroupCardIntoOutput() {
+  if (isInterfaceLocked()) return;
+  const opts = collectManualGroupCardSettings();
+  const memberCount = clampManualGroupMemberCount(opts.memberCount || 2);
+  const countInput = $('#manualGroupMemberCount');
+  if (countInput) countInput.value = String(memberCount);
+  ensureManualGroupMemberTabs(memberCount);
+  captureActiveManualTab({ lightweight: false });
+
+  const builtMembers = [];
+  for (let idx = 0; idx < memberCount; idx += 1) {
+    const tab = manualGuideTabs[idx] || makeBlankManualTab(`Group Member ${idx + 1}`);
+    const output = buildManualGuideOutputFromState(tab.state || {});
+    if (!String(output || '').trim()) {
+      setStatus(`Fill Guided Manual fields for group member ${idx + 1} before building the group card.`, 'error');
+      activeManualGuideTabIndex = idx;
+      activeOutputTabIndex = Math.min(idx, characterOutputTabs.length - 1);
+      activeConceptTabIndex = Math.min(idx, conceptWorkspaceTabs.length - 1);
+      renderAllWorkspaceTabRails();
+      applyActiveManualTab();
+      return;
+    }
+    const name = cleanOutputTabName(extractOutputNameForTab(output) || tab.name || `Group Member ${idx + 1}`) || `Group Member ${idx + 1}`;
+    builtMembers.push({ idx, name, output });
+  }
+
+  lastQnaAnswers = 'Guided Manual Group Card Mode was used. Q&A was skipped and no AI generation was run.';
+  currentBrowserDescription = '';
+  currentCardRating = '';
+  currentCardRatingReasoning = '';
+  currentCardRatingDetails = [];
+  currentCardRatingSourceHash = '';
+
+  ensureLinkedWorkspaceTabs();
+  builtMembers.forEach(({ idx, name, output }) => {
+    if (!characterOutputTabs[idx]) characterOutputTabs[idx] = makeBlankOutputTab(name);
+    characterOutputTabs[idx] = {
+      ...characterOutputTabs[idx],
+      name,
+      focusName: name,
+      output,
+      fullTextOutput: output,
+      qaAnswers: lastQnaAnswers,
+      qnaAnswers: lastQnaAnswers,
+      emotionImages: Array.isArray(characterOutputTabs[idx]?.emotionImages) ? characterOutputTabs[idx].emotionImages : [],
+      generatedImages: Array.isArray(characterOutputTabs[idx]?.generatedImages) ? characterOutputTabs[idx].generatedImages : [],
+      cardImagePath: characterOutputTabs[idx]?.cardImagePath || '',
+      splitMode: 'group_cards',
+      splitCard: 'group_cards',
+    };
+    if (manualGuideTabs[idx]) manualGuideTabs[idx].name = name;
+    if (conceptWorkspaceTabs[idx]) conceptWorkspaceTabs[idx].name = name;
+  });
+
+  activeOutputTabIndex = 0;
+  activeConceptTabIndex = 0;
+  activeManualGuideTabIndex = 0;
+  renderAllWorkspaceTabRails();
+  applyActiveOutputTab();
+  applyActiveManualTab({ skipPreview: true });
+  setTextareaValue('qaAnswersText', lastQnaAnswers);
+
+  setBusy(`BUILDING GUIDED MANUAL GROUP CARD — saving ${memberCount} member cards…`);
+  try {
+    const saved = await saveManualGroupMemberWorkspaces(memberCount);
+    const paths = saved.map(item => canonicalWorkspaceProjectPath(item?.projectPath || '')).filter(Boolean);
+    if (paths.length < 2) throw new Error('Saved member cards, but not enough project paths were returned to create a group card.');
+    setBusy('BUILDING GUIDED MANUAL GROUP CARD — exporting .group.png…');
+    const exportOptions = collectManualGroupCardExportOptions();
+    if (!exportOptions.name) exportOptions.name = paths.map(browserCardLabelForProject).filter(Boolean).join(' & ');
+    const res = await window.pywebview.api.export_group_card_from_projects(paths, exportOptions, settings);
+    if (!res?.ok) throw new Error(res?.error || 'Group card export failed.');
+    try { await createBrowserCardGroup(paths, paths[0]); } catch (_) {}
+    if (res.projectPath) selectedCharacterProjectPath = canonicalWorkspaceProjectPath(res.projectPath);
+    await refreshCharacterBrowser(false);
+    $$('.nav').forEach(b => b.classList.remove('active'));
+    $$('.tab').forEach(t => t.classList.remove('active'));
+    $('[data-tab="output"]')?.classList.add('active');
+    $('#output')?.classList.add('active');
+    switchSubTab('output', 'output-fulltext');
+    setStatus(`Guided Manual group card created: ${res.name || exportOptions.name || 'Group Card'} (${res.memberCount || paths.length} members) → ${res.path}`, 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
 }
 
 function renderRules() {
@@ -3732,11 +4118,24 @@ let multiBuilderStates = [];
 let suppressMultiBuilderCapture = false;
 
 function isMultiBuilderMode() {
-  return ['multi','split_cards'].includes($('#cardMode')?.value);
+  return ['multi','split_cards','group_cards'].includes($('#cardMode')?.value);
 }
 
 function multiBuilderCount() {
-  return Math.max(2, Math.min(12, Number($('#multiCharacterCount')?.value || 2)));
+  const mode = $('#cardMode')?.value || 'single';
+  const max = mode === 'group_cards' ? 4 : 12;
+  return Math.max(2, Math.min(max, Number($('#multiCharacterCount')?.value || 2)));
+}
+
+function updateMultiCharacterCountLimitForMode() {
+  const input = $('#multiCharacterCount');
+  if (!input) return;
+  const mode = $('#cardMode')?.value || 'single';
+  const max = mode === 'group_cards' ? 4 : 12;
+  input.max = String(max);
+  if (Number(input.value || 2) > max) input.value = String(max);
+  const label = input.closest('label');
+  if (label && label.firstChild) label.firstChild.textContent = mode === 'group_cards' ? 'Group Members' : 'Primary Characters';
 }
 
 function getMultiBuilderCharacterName(index) {
@@ -3789,6 +4188,7 @@ function captureCurrentMultiBuilderState() {
 }
 
 function updateMultiBuilderSelectors(syncValue=true) {
+  updateMultiCharacterCountLimitForMode();
   const isMulti = isMultiBuilderMode();
   $$('#multiCountCard, [data-multi-builder-switch]').forEach(el => {
     if (el && el.hasAttribute('data-multi-builder-switch')) el.classList.toggle('hidden', !isMulti);
@@ -3796,7 +4196,7 @@ function updateMultiBuilderSelectors(syncValue=true) {
   const multiCard = $('#multiCountCard');
   if (multiCard) multiCard.style.display = isMulti ? '' : 'none';
   const scenePolicyCard = $('#sharedScenePolicyCard');
-  if (scenePolicyCard) scenePolicyCard.style.display = isMulti ? '' : 'none';
+  if (scenePolicyCard) scenePolicyCard.style.display = isMulti && $('#cardMode')?.value !== 'group_cards' ? '' : 'none';
   if (!isMulti) return;
   ensureMultiBuilderStates();
   $$('.multi-builder-character-select').forEach(select => {
@@ -3852,6 +4252,24 @@ function bindActions() {
   $('#manualBuildOutputTopBtn')?.addEventListener('click', buildManualGuideIntoOutput);
   $('#manualNewTabBtn')?.addEventListener('click', addManualWorkspaceTab);
   $('#manualResetBtn')?.addEventListener('click', clearCurrentManualGuideDraft);
+  $('#manualCardMode')?.addEventListener('change', () => {
+    if ($('#manualCardMode')?.value === 'group_card' && !FRONT_PORCH_GROUP_CARDS_ENABLED) {
+      $('#manualCardMode').value = 'single';
+      frontPorchGroupCardsComingSoon();
+    }
+    collectManualGroupCardSettings();
+    updateManualGroupModeUi();
+    if (isManualGroupCardMode()) syncManualGroupMembersFromUi(false);
+  });
+  $('#manualGroupMemberCount')?.addEventListener('input', () => {
+    collectManualGroupCardSettings();
+    updateManualGroupModeUi();
+  });
+  $('#manualSyncGroupMembersBtn')?.addEventListener('click', () => syncManualGroupMembersFromUi(true));
+  ['manualGroupCardName','manualGroupScenario','manualGroupFirstMessage','manualGroupSystemPrompt','manualGroupInstructions','manualGroupTurnOrder','manualGroupAutoAdvance','manualGroupDirectorMode','manualGroupRealismState'].forEach(id => {
+    $('#' + id)?.addEventListener('input', collectManualGroupCardSettings);
+    $('#' + id)?.addEventListener('change', collectManualGroupCardSettings);
+  });
   $('#loadTemplateBtn').addEventListener('click', loadSelectedTemplate);
   $('#saveTemplateAsBtn').addEventListener('click', saveTemplateAs);
   $('#deleteTemplateBtn').addEventListener('click', deleteSelectedTemplate);
@@ -3922,7 +4340,12 @@ function bindActions() {
   $('#altStyleRows')?.addEventListener('change', () => { settings = collectSettings(); updateAvailability(); });
   $('#altCount').addEventListener('input', () => { settings = collectSettings(); renderAltStyleRows(); updateAvailability(); });
   $('#cardMode').addEventListener('change', () => {
-    const mode = $('#cardMode')?.value || 'single';
+    let mode = $('#cardMode')?.value || 'single';
+    if (mode === 'group_cards' && !FRONT_PORCH_GROUP_CARDS_ENABLED) {
+      $('#cardMode').value = 'split_cards';
+      mode = 'split_cards';
+      frontPorchGroupCardsComingSoon();
+    }
     if ($('#sharedScenePolicy')) {
       if (mode === 'single') $('#sharedScenePolicy').value = 'ai_reconcile';
       else if (mode === 'split_cards') $('#sharedScenePolicy').value = 'split_cards';
@@ -4030,6 +4453,10 @@ function bindActions() {
   $('#cancelBrowserMoveBtn')?.addEventListener('click', closeBrowserMoveModal);
   $('#applyBrowserMoveBtn')?.addEventListener('click', applyBrowserMoveFromModal);
   $('#browserMoveModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserMoveModal') closeBrowserMoveModal(); });
+  $('#closeBrowserGroupCardModalBtn')?.addEventListener('click', closeBrowserGroupCardModal);
+  $('#cancelBrowserGroupCardBtn')?.addEventListener('click', closeBrowserGroupCardModal);
+  $('#createBrowserGroupCardBtn')?.addEventListener('click', createBrowserGroupCardFromModal);
+  $('#browserGroupCardModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserGroupCardModal') closeBrowserGroupCardModal(); });
   $('#browserCardContextMenu')?.addEventListener('click', (e) => {
     const btn = e.target?.closest?.('[data-browser-context-action]');
     if (!btn || btn.disabled) return;
@@ -4041,7 +4468,7 @@ function bindActions() {
     runBrowserFolderContextAction(btn.dataset.browserFolderAction || '');
   });
   document.addEventListener('click', (e) => { if (!e.target?.closest?.('#browserCardContextMenu') && !e.target?.closest?.('#browserFolderContextMenu')) { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); } });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); closeBrowserGroupCardModal(); } });
   window.addEventListener('scroll', () => { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); }, true);
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserImproveFromRatingBtn')?.addEventListener('click', generateRatingImprovementPreview);
@@ -4074,6 +4501,7 @@ function bindActions() {
   $('#loadCardToConceptUrlMainBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#loadCardToConceptUrlModeBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#reviseBtn').addEventListener('click', reviseCard);
+  $('#makeVariationBtn')?.addEventListener('click', makeVariationFromFollowup);
   $('#loadSavedBtn')?.addEventListener('click', loadSavedCardOrProject);
   $('#loadSavedUrlBtn')?.addEventListener('click', loadSavedCardOrProjectFromUrl);
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
@@ -5864,8 +6292,10 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
   const payloadSettings = { ...(baseSettings || settings || {}) };
   payloadSettings.cardImagePath = tabImage;
   payloadSettings.visionImagePath = isActiveConcept ? ($('#visionImagePath')?.value || '') : (conceptTab?.visionImagePath || '');
+  const tabGroupMeta = groupCardWorkspaceMetaFromState(tab || {});
   const outputTabForProject = {
     ...(tab || {}),
+    ...tabGroupMeta,
     name: tabName || `Character ${tabIndex + 1}`,
     focusName: tabName || `Character ${tabIndex + 1}`,
     output: tabOutput,
@@ -5917,6 +6347,7 @@ function collectWorkspacePayloadForTab(tabIndex = activeOutputTabIndex, baseSett
     activeManualGuideTabIndex: 0,
     splitTabIndex: tabIndex,
     splitTabCount: tabs.length,
+    ...tabGroupMeta,
   };
 }
 
@@ -5929,8 +6360,8 @@ function shouldSaveAllSplitOutputTabs(reason = '') {
   const tabs = Array.isArray(characterOutputTabs) ? characterOutputTabs : [];
   if (tabs.length <= 1) return false;
   const mode = String(settings?.cardMode || $('#cardMode')?.value || '').toLowerCase();
-  if (mode === 'split_cards') return true;
-  return tabs.some(tab => String(tab?.splitCard || tab?.splitMode || '').toLowerCase() === 'split_cards');
+  if (mode === 'split_cards' || mode === 'group_cards') return true;
+  return tabs.some(tab => ['split_cards','group_cards'].includes(String(tab?.splitCard || tab?.splitMode || '').toLowerCase()));
 }
 
 function scheduleOutputEditorAutosave() {
@@ -6636,7 +7067,13 @@ async function saveCurrentWorkspace(reason='autosave') {
         const payload = collectWorkspacePayloadForTab(idx, settings);
         if (!String(payload.output || '').trim()) continue;
         const res = await window.pywebview.api.save_character_workspace(payload);
-        if (res && res.ok) saved.push(res);
+        if (res && res.ok) {
+          saved.push(res);
+          if (tabs[idx]) {
+            tabs[idx].projectPath = res.projectPath || tabs[idx].projectPath || '';
+            tabs[idx].workspaceProjectPath = res.projectPath || tabs[idx].workspaceProjectPath || '';
+          }
+        }
         else failed.push({ index: idx, name: payload.name || `Character ${idx + 1}`, error: res?.error || 'Workspace save failed.' });
       }
       if (failed.length) {
@@ -6648,6 +7085,7 @@ async function saveCurrentWorkspace(reason='autosave') {
         setStatus(`Saved ${saved.length} split character workspace${saved.length === 1 ? '' : 's'} to the Character Browser${activeSaved?.folder ? `, including ${activeSaved.folder}` : ''}.`, 'ok');
       }
       await refreshCharacterBrowser(false);
+      if (String(reason || '').includes('group_card')) return saved;
       return saved[activeOutputTabIndex] || saved[0] || null;
     }
 
@@ -6673,6 +7111,10 @@ async function refreshCharacterBrowser(showStatus=true, options={}) {
     const res = await window.pywebview.api.list_character_library();
     if (!res.ok) throw new Error(res.error || 'Could not load character browser.');
     characterBrowserCards = res.cards || [];
+    const browserValidProjectPaths = new Set(characterBrowserCards.map(card => card.projectPath).filter(Boolean));
+    browserCardGroups = normaliseBrowserCardGroups(browserCardGroups || [], browserValidProjectPaths);
+    browserExpandedCardGroups = new Set([...browserExpandedCardGroups].filter(id => browserCardGroups.some(group => group.id === id)));
+    if (settings) { settings.browserCardGroups = browserCardGroups; settings.browserExpandedCardGroups = browserExpandedGroupIdsArray(); }
     if (Array.isArray(res.folders)) {
       browserVirtualFolders = res.folders;
       if (settings) settings.browserVirtualFolders = res.folders;
@@ -6727,7 +7169,7 @@ function setBrowserFolderSortMode(mode, folderId = browserCurrentFolderId, save 
 }
 
 async function saveBrowserSortSettings() {
-  settings = { ...(settings || {}), browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserVirtualFolders: browserVirtualFolders || [], browserShowSubfolders: !!browserShowSubfolders };
+  settings = { ...(settings || {}), browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserVirtualFolders: browserVirtualFolders || [], browserCardGroups: browserCardGroups || [], browserExpandedCardGroups: [...browserExpandedCardGroups], browserShowSubfolders: !!browserShowSubfolders };
   try { await window.pywebview.api.save_settings(settings); }
   catch (err) { setStatus(`Could not save browser sort settings: ${err.message || err}`, 'error'); }
 }
@@ -6749,6 +7191,214 @@ function setBrowserCustomOrderForFolder(order, folderId = browserCurrentFolderId
   });
   browserCustomOrdersByFolder = { ...(browserCustomOrdersByFolder || {}), [key]: clean };
   if (settings) settings.browserCustomOrdersByFolder = browserCustomOrdersByFolder;
+}
+
+
+
+function normaliseBrowserCardGroups(groups = [], validPaths = null) {
+  const validSet = validPaths instanceof Set ? validPaths : null;
+  const used = new Set();
+  const cleanGroups = [];
+  (Array.isArray(groups) ? groups : []).forEach((group, index) => {
+    const rawMembers = Array.isArray(group?.memberPaths) ? group.memberPaths : [];
+    const members = [];
+    rawMembers.forEach(path => {
+      const value = String(path || '').trim();
+      if (!value) return;
+      if (validSet && !validSet.has(value)) return;
+      if (used.has(value) || members.includes(value)) return;
+      members.push(value);
+    });
+    if (members.length < 2) return;
+    let primary = String(group?.primaryPath || '').trim();
+    if (!members.includes(primary)) primary = members[0];
+    const ordered = [primary].concat(members.filter(path => path !== primary));
+    ordered.forEach(path => used.add(path));
+    const id = String(group?.id || '').trim() || `cg_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 7)}`;
+    cleanGroups.push({
+      id,
+      primaryPath: primary,
+      memberPaths: ordered,
+      name: String(group?.name || '').trim(),
+      createdAt: group?.createdAt || new Date().toISOString()
+    });
+  });
+  return cleanGroups;
+}
+
+async function saveBrowserCardGroups() {
+  browserCardGroups = normaliseBrowserCardGroups(browserCardGroups || [], new Set((characterBrowserCards || []).map(card => card.projectPath).filter(Boolean)));
+  const validGroupIds = new Set(browserCardGroups.map(group => group.id));
+  browserExpandedCardGroups = new Set([...browserExpandedCardGroups].filter(id => validGroupIds.has(id)));
+  settings = { ...(settings || {}), browserCardGroups: browserCardGroups || [], browserExpandedCardGroups: [...browserExpandedCardGroups], browserVirtualFolders: browserVirtualFolders || [], browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserShowSubfolders: !!browserShowSubfolders };
+  try { await window.pywebview.api.save_settings(settings); }
+  catch (err) { setStatus(`Could not save browser card groups: ${err.message || err}`, 'error'); }
+}
+
+function browserCardByPath(projectPath) {
+  const path = String(projectPath || '');
+  return (characterBrowserCards || []).find(card => String(card.projectPath || '') === path) || null;
+}
+
+function browserGroupForPath(projectPath) {
+  const path = String(projectPath || '').trim();
+  if (!path) return null;
+  return (browserCardGroups || []).find(group => Array.isArray(group.memberPaths) && group.memberPaths.includes(path)) || null;
+}
+
+function browserGroupById(groupId) {
+  const id = String(groupId || '').trim();
+  return (browserCardGroups || []).find(group => String(group.id || '') === id) || null;
+}
+
+function browserGroupPrimaryPath(group) {
+  if (!group) return '';
+  const primary = String(group.primaryPath || '').trim();
+  if (primary && Array.isArray(group.memberPaths) && group.memberPaths.includes(primary)) return primary;
+  return String((group.memberPaths || [])[0] || '').trim();
+}
+
+function browserGroupPrimaryCard(group) {
+  return browserCardByPath(browserGroupPrimaryPath(group));
+}
+
+function browserGroupDisplayName(group) {
+  if (!group) return 'Card group';
+  const explicit = String(group.name || '').trim();
+  if (explicit) return explicit;
+  const primary = browserGroupPrimaryCard(group);
+  if (primary?.name) return `${primary.name} group`;
+  return 'Card group';
+}
+
+function browserPathIsGroupPrimary(projectPath) {
+  const group = browserGroupForPath(projectPath);
+  return !!group && browserGroupPrimaryPath(group) === String(projectPath || '').trim();
+}
+
+function browserPathIsGroupedChild(projectPath) {
+  const group = browserGroupForPath(projectPath);
+  return !!group && browserGroupPrimaryPath(group) !== String(projectPath || '').trim();
+}
+
+function browserGroupMembersAsCards(group, includePrimary = true) {
+  if (!group) return [];
+  const primaryPath = browserGroupPrimaryPath(group);
+  return (group.memberPaths || [])
+    .filter(path => includePrimary || path !== primaryPath)
+    .map(path => browserCardByPath(path))
+    .filter(Boolean);
+}
+
+function browserGroupMemberCount(group) {
+  return browserGroupMembersAsCards(group, true).length || (Array.isArray(group?.memberPaths) ? group.memberPaths.length : 0);
+}
+
+function browserExpandedGroupIdsArray() {
+  return [...browserExpandedCardGroups].filter(Boolean);
+}
+
+async function setBrowserGroupExpanded(groupId, expanded) {
+  const id = String(groupId || '').trim();
+  if (!id) return;
+  if (expanded) browserExpandedCardGroups.add(id);
+  else browserExpandedCardGroups.delete(id);
+  await saveBrowserCardGroups();
+  renderCharacterBrowser();
+}
+
+function displayBrowserCardsWithGroups(sortedCards) {
+  const cards = Array.isArray(sortedCards) ? sortedCards : [];
+  const out = [];
+  const cardMap = new Map((characterBrowserCards || []).map(card => [String(card.projectPath || ''), card]));
+  const visibleSet = new Set(cards.map(card => String(card.projectPath || '')));
+  const renderedGroups = new Set();
+  cards.forEach(card => {
+    const path = String(card.projectPath || '');
+    const group = browserGroupForPath(path);
+    if (!group) { out.push(card); return; }
+    const primaryPath = browserGroupPrimaryPath(group);
+    if (renderedGroups.has(group.id)) return;
+    if (path !== primaryPath) {
+      // If search/filter/folder scope finds only a secondary member, show it as a normal card
+      // instead of hiding the result behind a non-matching primary card.
+      if (!visibleSet.has(primaryPath)) out.push(card);
+      return;
+    }
+    renderedGroups.add(group.id);
+    out.push(card);
+    if (browserExpandedCardGroups.has(group.id)) {
+      (group.memberPaths || []).forEach(memberPath => {
+        if (memberPath === primaryPath) return;
+        const memberCard = cardMap.get(String(memberPath || ''));
+        if (memberCard) out.push(memberCard);
+      });
+    }
+  });
+  return out;
+}
+
+async function createBrowserCardGroup(paths, preferredPrimaryPath = '') {
+  const clean = [];
+  (paths || []).forEach(path => {
+    const value = String(path || '').trim();
+    if (value && !clean.includes(value)) clean.push(value);
+  });
+  if (clean.length < 2) { setStatus('Select at least two cards to create a group.', 'error'); return; }
+  const groupedAlready = clean.filter(path => browserGroupForPath(path));
+  if (groupedAlready.length) {
+    const names = groupedAlready.slice(0, 3).map(browserCardLabelForProject).join(', ');
+    const ok = confirm(`${groupedAlready.length} selected card${groupedAlready.length === 1 ? ' is' : 's are'} already in a group (${names}${groupedAlready.length > 3 ? ', ...' : ''}).\n\nRemove them from their old groups and create the new group?`);
+    if (!ok) return;
+    const removeSet = new Set(clean);
+    browserCardGroups = (browserCardGroups || []).map(group => ({ ...group, memberPaths: (group.memberPaths || []).filter(path => !removeSet.has(path)) })).filter(group => (group.memberPaths || []).length >= 2);
+  }
+  const clicked = String(preferredPrimaryPath || browserContextMenuProjectPath || '').trim();
+  const primary = clean.includes(clicked) ? clicked : clean[0];
+  const group = {
+    id: `cg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    primaryPath: primary,
+    memberPaths: [primary].concat(clean.filter(path => path !== primary)),
+    name: browserCardLabelForProject(primary),
+    createdAt: new Date().toISOString()
+  };
+  browserCardGroups.push(group);
+  browserExpandedCardGroups.add(group.id);
+  await saveBrowserCardGroups();
+  browserSelectedProjects.clear();
+  selectedCharacterProjectPath = primary;
+  renderCharacterBrowser();
+  selectCharacterBrowserCard(primary);
+  setStatus(`Created group with ${group.memberPaths.length} card${group.memberPaths.length === 1 ? '' : 's'}. ${browserCardLabelForProject(primary)} is primary.`, 'ok');
+}
+
+async function setBrowserCardAsGroupPrimary(projectPath) {
+  const path = String(projectPath || '').trim();
+  const group = browserGroupForPath(path);
+  if (!path || !group) { setStatus('Right-click a grouped card first.', 'error'); return; }
+  group.primaryPath = path;
+  group.memberPaths = [path].concat((group.memberPaths || []).filter(member => member !== path));
+  group.name = browserCardLabelForProject(path);
+  browserExpandedCardGroups.add(group.id);
+  await saveBrowserCardGroups();
+  selectedCharacterProjectPath = path;
+  renderCharacterBrowser();
+  selectCharacterBrowserCard(path);
+  setStatus(`Set ${browserCardLabelForProject(path)} as the primary card for this group.`, 'ok');
+}
+
+async function ungroupBrowserCards(paths) {
+  const clean = (paths || []).map(path => String(path || '').trim()).filter(Boolean);
+  if (!clean.length) { setStatus('Select a grouped card first.', 'error'); return; }
+  const targetGroupIds = new Set(clean.map(path => browserGroupForPath(path)?.id).filter(Boolean));
+  if (!targetGroupIds.size) { setStatus('Selected card is not in a group.', 'warn'); return; }
+  const ok = confirm(`Remove grouping for ${targetGroupIds.size} card group${targetGroupIds.size === 1 ? '' : 's'}?\n\nThis only changes Character Browser grouping. It does not delete cards or folders.`);
+  if (!ok) return;
+  browserCardGroups = (browserCardGroups || []).filter(group => !targetGroupIds.has(group.id));
+  targetGroupIds.forEach(id => browserExpandedCardGroups.delete(id));
+  await saveBrowserCardGroups();
+  renderCharacterBrowser();
+  setStatus(`Removed ${targetGroupIds.size} browser card group${targetGroupIds.size === 1 ? '' : 's'}.`, 'ok');
 }
 
 function browserFolderChildren(parentId) {
@@ -6916,7 +7566,7 @@ function updateBrowserMultiActionState() {
 }
 
 async function saveBrowserVirtualFolders() {
-  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [], browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserShowSubfolders: !!browserShowSubfolders };
+  settings = { ...(settings || {}), browserVirtualFolders: browserVirtualFolders || [], browserSortModesByFolder: browserSortModesByFolder || {}, browserCustomOrdersByFolder: browserCustomOrdersByFolder || {}, browserCardGroups: browserCardGroups || [], browserExpandedCardGroups: [...browserExpandedCardGroups], browserShowSubfolders: !!browserShowSubfolders };
   try {
     await window.pywebview.api.save_settings(settings);
     if (window.pywebview.api.save_browser_virtual_folders) await window.pywebview.api.save_browser_virtual_folders(browserVirtualFolders || []);
@@ -7058,14 +7708,19 @@ async function exportSelectedCharactersToFrontPorchBatch(pathsOverride=null) {
   const paths = Array.isArray(pathsOverride) && pathsOverride.length ? pathsOverride.slice() : selectedBrowserProjectPaths();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
   settings = collectSettings();
-  const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: 'batch' });
+  let containsGroupCard = false;
+  for (const path of paths) {
+    const card = characterBrowserCards.find(c => c.projectPath === path) || {};
+    if (await projectLooksLikeFrontPorchGroupCard(path, card)) { containsGroupCard = true; break; }
+  }
+  const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: containsGroupCard ? 'group-batch' : 'batch', forceBeta: containsGroupCard });
   if (!targets || !targets.length) return;
 
   if (!frontPorchBothFoldersConfigured(settings)) {
     const label = frontPorchTargetInfo(targets[0], settings).label;
     const okConfirm = confirm(`Export ${paths.length} selected character(s) to ${label}?
 
-A database backup is created by the exporter. Close Front Porch before exporting if possible.`);
+A capped CCF database backup is saved in KoboldManager/backups, with only the latest 10 CCF backups kept. Close Front Porch before exporting if possible.`);
     if (!okConfirm) return;
   }
 
@@ -7084,8 +7739,16 @@ A database backup is created by the exporter. Close Front Porch before exporting
         try {
           const res = await exportFrontPorchProjectToTarget(path, target, originalSettings);
           if (res.ok) { ok += 1; targetOk += 1; }
-          else { failed += 1; targetFailed += 1; }
-        } catch (_) { failed += 1; targetFailed += 1; }
+          else {
+            failed += 1; targetFailed += 1;
+            console.warn('Front Porch export failed', path, res?.error || res);
+            setStatus(`Front Porch export failed for ${path.split(/[\/]/).slice(-2).join('/')}: ${res?.error || 'unknown error'}`, 'error');
+          }
+        } catch (err) {
+          failed += 1; targetFailed += 1;
+          console.warn('Front Porch export exception', path, err);
+          setStatus(`Front Porch export failed for ${path.split(/[\/]/).slice(-2).join('/')}: ${err?.message || String(err)}`, 'error');
+        }
       }
       targetTotals.push(`${info.label}: ${targetOk} succeeded${targetFailed ? `, ${targetFailed} failed` : ''}`);
     }
@@ -8537,7 +9200,7 @@ function updateBrowserRatingPanel(card) {
 
 
 function selectAllVisibleBrowserCards() {
-  getVisibleBrowserCards().forEach(card => { if (card?.projectPath) browserSelectedProjects.add(card.projectPath); });
+  displayBrowserCardsWithGroups(getVisibleBrowserCards()).forEach(card => { if (card?.projectPath) browserSelectedProjects.add(card.projectPath); });
   renderCharacterBrowser();
   const count = browserSelectedProjects.size;
   setStatus(count ? `Selected ${count} visible character${count === 1 ? '' : 's'}. Right-click a card to run actions.` : 'No visible cards to select.', count ? 'ok' : '');
@@ -8554,6 +9217,7 @@ function hideBrowserContextMenu() {
   if (!menu) return;
   menu.classList.add('hidden');
   menu.setAttribute('aria-hidden', 'true');
+  browserContextMenuProjectPath = '';
 }
 
 function contextMenuPathsForProject(projectPath) {
@@ -8573,6 +9237,7 @@ function showBrowserContextMenu(event, projectPath) {
     $$('.browser-card-checkbox').forEach(box => { box.checked = false; });
     $$('.character-card-tile').forEach(el => el.classList.remove('multi-selected'));
   }
+  browserContextMenuProjectPath = clickedPath;
   browserContextMenuPaths = contextMenuPathsForProject(clickedPath).filter(Boolean);
   selectCharacterBrowserCard(clickedPath);
   updateBrowserMultiActionState();
@@ -8581,11 +9246,49 @@ function showBrowserContextMenu(event, projectPath) {
   const title = $('#browserContextMenuTitle');
   const count = browserContextMenuPaths.length;
   const firstCard = characterBrowserCards.find(c => c.projectPath === browserContextMenuPaths[0]);
+  const clickedGroup = browserGroupForPath(clickedPath);
   if (title) title.textContent = count > 1 ? `${count} selected cards` : (firstCard?.name || 'Card Actions');
   $$('[data-browser-context-action="load"]', menu).forEach(btn => {
     btn.disabled = false;
     btn.title = count > 1 ? `Load ${count} selected workspaces into separate tabs.` : 'Load workspace';
     btn.textContent = count > 1 ? `Load ${count} Workspaces` : 'Load Workspace';
+  });
+  $$('[data-browser-context-action="group"]', menu).forEach(btn => {
+    btn.disabled = count < 2;
+    btn.title = count < 2 ? 'Multi-select at least two cards to create a browser group.' : `Create a browser group from ${count} selected cards.`;
+    btn.textContent = count > 1 ? `Create Group from ${count} Cards` : 'Create Group';
+  });
+  $$('[data-browser-context-action="set_primary"]', menu).forEach(btn => {
+    btn.disabled = !clickedGroup || browserGroupPrimaryPath(clickedGroup) === clickedPath;
+    btn.textContent = clickedGroup ? 'Set as Group Primary' : 'Set as Group Primary';
+    btn.title = clickedGroup ? 'Make the right-clicked card the visible parent for this group.' : 'This card is not grouped yet.';
+  });
+  $$('[data-browser-context-action="ungroup"]', menu).forEach(btn => {
+    btn.disabled = !clickedGroup;
+    btn.title = clickedGroup ? 'Remove this browser grouping. Cards are not deleted.' : 'This card is not grouped yet.';
+  });
+  $$('[data-browser-context-action="duplicate"]', menu).forEach(btn => {
+    btn.disabled = false;
+    btn.textContent = count > 1 ? `Duplicate ${count} Cards` : 'Duplicate Card';
+    btn.title = count > 1 ? `Duplicate ${count} selected cards and group each copy with its original.` : 'Create an editable copy grouped with the original card.';
+  });
+  $$('[data-browser-context-action="make_variation"]', menu).forEach(btn => {
+    btn.disabled = false;
+    btn.textContent = count > 1 ? `Make ${count} AI Variations…` : 'Make AI Variation…';
+    btn.title = count > 1 ? `Use one instruction prompt to make a new grouped variation for each selected card.` : 'Use AI instructions to make a new grouped variation from this card.';
+  });
+  $$('[data-browser-context-action="make_group_card"]', menu).forEach(btn => {
+    const groupCardPaths = browserGroupCardPathsFromContext(browserContextMenuPaths, clickedPath);
+    const groupCount = groupCardPaths.length;
+    if (!FRONT_PORCH_GROUP_CARDS_ENABLED) {
+      btn.disabled = true;
+      btn.textContent = groupCount > 1 ? `Make Group Card (${groupCount})… Coming Soon` : 'Make Group Card… Coming Soon';
+      btn.title = FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE;
+      return;
+    }
+    btn.disabled = groupCount < 2 || groupCount > 4;
+    btn.textContent = groupCount > 1 ? `Make Group Card (${groupCount})…` : 'Make Group Card…';
+    btn.title = groupCount < 2 ? 'Select 2–4 cards or right-click an existing browser group.' : (groupCount > 4 ? 'Front Porch group cards currently support a maximum of 4 cards.' : 'Create a Front Porch .group.png from these cards.');
   });
   menu.classList.remove('hidden');
   menu.setAttribute('aria-hidden', 'false');
@@ -8847,14 +9550,319 @@ function clearBrowserDragClasses() {
   });
 }
 
+
+async function addBrowserCardToOriginalGroup(originalPath, newPath) {
+  const original = String(originalPath || '').trim();
+  const created = String(newPath || '').trim();
+  if (!original || !created || original === created) return null;
+  // Remove the new card from any accidental existing group before linking it to the original.
+  browserCardGroups = (browserCardGroups || []).map(group => ({
+    ...group,
+    memberPaths: (group.memberPaths || []).filter(path => path !== created)
+  })).filter(group => (group.memberPaths || []).length >= 2);
+  let group = browserGroupForPath(original);
+  if (group) {
+    if (!(group.memberPaths || []).includes(created)) {
+      const originalIndex = Math.max(0, (group.memberPaths || []).indexOf(original));
+      const members = (group.memberPaths || []).filter(path => path !== created);
+      members.splice(originalIndex + 1, 0, created);
+      group.memberPaths = members;
+    }
+  } else {
+    group = {
+      id: `cg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      primaryPath: original,
+      memberPaths: [original, created],
+      name: browserCardLabelForProject(original),
+      createdAt: new Date().toISOString()
+    };
+    browserCardGroups.push(group);
+  }
+  browserExpandedCardGroups.add(group.id);
+  return group;
+}
+
+async function saveAndRenderBrowserGroupsAfterVariation(originalPath, newPath) {
+  await addBrowserCardToOriginalGroup(originalPath, newPath);
+  await saveBrowserCardGroups();
+  renderCharacterBrowser();
+}
+
+async function duplicateBrowserCards(paths) {
+  const clean = (paths || []).map(path => String(path || '').trim()).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more cards to duplicate.', 'error'); return; }
+  setBusy(clean.length > 1 ? `DUPLICATING ${clean.length} CARDS…` : 'DUPLICATING CARD…');
+  const results = [];
+  const failures = [];
+  try {
+    for (let i = 0; i < clean.length; i += 1) {
+      const projectPath = clean[i];
+      if (clean.length > 1) setBusy(`DUPLICATING CARD ${i + 1}/${clean.length}…`);
+      try {
+        const res = await window.pywebview.api.duplicate_character_project(projectPath);
+        if (!res?.ok) throw new Error(res?.error || 'Duplicate failed.');
+        results.push({ originalPath: projectPath, projectPath: res.projectPath, name: res.name || browserCardLabelForProject(projectPath) });
+      } catch (err) {
+        failures.push({ path: projectPath, error: err.message || String(err) });
+      }
+    }
+    await refreshCharacterBrowser(false);
+    for (const item of results) await addBrowserCardToOriginalGroup(item.originalPath, item.projectPath);
+    await saveBrowserCardGroups();
+    renderCharacterBrowser();
+    if (results[0]?.projectPath) selectCharacterBrowserCard(results[0].projectPath);
+    const okText = `${results.length} duplicate${results.length === 1 ? '' : 's'} created and grouped with original card${results.length === 1 ? '' : 's'}.`;
+    if (failures.length) {
+      const preview = failures.slice(0, 3).map(f => `${browserCardLabelForProject(f.path)}: ${f.error}`).join(' | ');
+      setStatus(`${okText} ${failures.length} failed. ${preview}`, results.length ? 'warn' : 'error');
+    } else {
+      setStatus(okText, 'ok');
+    }
+  } finally {
+    setBusy('');
+  }
+}
+
+function browserVariationInstructionsFromPrompt(defaultText = '') {
+  const text = prompt('Describe the new card variation to create from the selected card(s):', defaultText || 'Make this card set 2 years later, after she is married to {{user}}.');
+  return String(text || '').trim();
+}
+
+async function makeVariationsFromBrowserPaths(paths) {
+  const clean = (paths || []).map(path => String(path || '').trim()).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more cards first.', 'error'); return; }
+  const instructions = browserVariationInstructionsFromPrompt();
+  if (!instructions) return;
+  settings = collectSettings();
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  setBusy(clean.length > 1 ? `CREATING ${clean.length} CARD VARIATIONS — waiting for AI…` : 'CREATING CARD VARIATION — waiting for AI…');
+  const results = [];
+  const failures = [];
+  try {
+    for (let i = 0; i < clean.length; i += 1) {
+      const projectPath = clean[i];
+      pendingAiQueueLabel = clean.length > 1 ? `Create Variation ${i + 1}/${clean.length}: ${browserCardLabelForProject(projectPath)}` : `Create Variation: ${browserCardLabelForProject(projectPath)}`;
+      try {
+        const res = await window.pywebview.api.create_card_variation_from_project(projectPath, instructions, settings);
+        if (!res?.ok) throw new Error(res?.error || 'Variation failed.');
+        results.push({ originalPath: projectPath, projectPath: res.projectPath, name: res.name || browserCardLabelForProject(projectPath) });
+      } catch (err) {
+        failures.push({ path: projectPath, error: err.cancelled ? 'Cancelled' : (err.message || String(err)) });
+      }
+    }
+    await refreshCharacterBrowser(false);
+    for (const item of results) await addBrowserCardToOriginalGroup(item.originalPath, item.projectPath);
+    await saveBrowserCardGroups();
+    renderCharacterBrowser();
+    if (results[0]?.projectPath) {
+      await loadCharacterWorkspacesFromPaths(results.map(item => item.projectPath));
+      selectCharacterBrowserCard(results[0].projectPath);
+    }
+    const okText = `${results.length} AI variation${results.length === 1 ? '' : 's'} created, opened, and grouped with original card${results.length === 1 ? '' : 's'}.`;
+    if (failures.length) {
+      const preview = failures.slice(0, 3).map(f => `${browserCardLabelForProject(f.path)}: ${f.error}`).join(' | ');
+      setStatus(`${okText} ${failures.length} failed. ${preview}`, results.length ? 'warn' : 'error');
+    } else {
+      setStatus(okText, 'ok');
+    }
+  } finally {
+    setBusy('');
+  }
+}
+
+async function makeVariationFromFollowup() {
+  settings = collectSettings();
+  const instructions = ($('#followupText')?.value || '').trim();
+  if (!hasOutput()) { setStatus('Generate or load a card first.', 'error'); return; }
+  if (!instructions) { setStatus('Enter variation instructions in the Follow-up box first.', 'error'); return; }
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  captureActiveOutputTab();
+  let originalPath = canonicalWorkspaceProjectPath(characterOutputTabs[activeOutputTabIndex]?.projectPath || characterOutputTabs[activeOutputTabIndex]?.workspaceProjectPath || selectedCharacterProjectPath || '');
+  if (!originalPath) {
+    setStatus('Saving the current card first so the new variation can be grouped with it…', '');
+    const saved = await saveCurrentWorkspace('silent');
+    originalPath = canonicalWorkspaceProjectPath(saved?.projectPath || '');
+    if (originalPath && characterOutputTabs[activeOutputTabIndex]) {
+      characterOutputTabs[activeOutputTabIndex].projectPath = originalPath;
+      characterOutputTabs[activeOutputTabIndex].workspaceProjectPath = originalPath;
+    }
+  }
+  const payload = collectWorkspacePayloadForTab(activeOutputTabIndex, settings);
+  setBusy('CREATING CARD VARIATION — waiting for AI response…');
+  setStatus('Creating a new grouped variation from the Follow-up instructions…', '');
+  try {
+    pendingAiQueueLabel = 'Create Card Variation';
+    const res = await window.pywebview.api.create_card_variation_from_workspace(payload, instructions, settings);
+    if (!res?.ok) throw new Error(res?.error || 'Variation failed.');
+    await refreshCharacterBrowser(false);
+    if (originalPath && res.projectPath) await addBrowserCardToOriginalGroup(originalPath, res.projectPath);
+    await saveBrowserCardGroups();
+    renderCharacterBrowser();
+    if (res.projectPath) {
+      await loadCharacterWorkspacesFromPaths([res.projectPath]);
+      selectCharacterBrowserCard(res.projectPath);
+    }
+    $('#followupText').value = '';
+    const backupMsg = describeBackupInfo(res.backupInfo, 'followup_revision');
+    setStatus((backupMsg ? backupMsg + ' ' : '') + 'New card variation created, opened in a new tab, and grouped with the original.', 'ok');
+  } catch (err) {
+    setStatus(err.cancelled ? 'Variation creation cancelled.' : (err.message || String(err)), err.cancelled ? 'warn' : 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+
+function browserGroupCardPathsFromContext(paths, clickedPath = '') {
+  const clean = [];
+  (paths || []).forEach(path => {
+    const value = String(path || '').trim();
+    if (value && !clean.includes(value)) clean.push(value);
+  });
+  const clicked = String(clickedPath || '').trim();
+  const clickedGroup = browserGroupForPath(clicked);
+  // Right-clicking a grouped card without an active multi-selection should mean
+  // "make a group card from this browser group", not only from the primary card.
+  if (clickedGroup && clean.length === 1 && clean[0] === clicked) {
+    return (clickedGroup.memberPaths || []).map(path => String(path || '').trim()).filter(Boolean);
+  }
+  return clean;
+}
+
+function browserGroupCardDefaultName(paths) {
+  return (paths || []).map(browserCardLabelForProject).filter(Boolean).join(' & ');
+}
+
+function openBrowserGroupCardModal(paths) {
+  if (!FRONT_PORCH_GROUP_CARDS_ENABLED) { frontPorchGroupCardsComingSoon(); return; }
+  const clean = [];
+  (paths || []).forEach(path => {
+    const value = String(path || '').trim();
+    if (value && !clean.includes(value)) clean.push(value);
+  });
+  if (clean.length < 2) { setStatus('Select 2–4 cards or right-click an existing browser group first.', 'error'); return; }
+  if (clean.length > 4) { setStatus('Front Porch group cards currently support a maximum of 4 cards.', 'error'); return; }
+  browserPendingGroupCardPaths = clean;
+  const summary = $('#browserGroupCardSummary');
+  const names = clean.map(browserCardLabelForProject).join(', ');
+  if (summary) summary.textContent = `Combining ${clean.length} card${clean.length === 1 ? '' : 's'}: ${names}`;
+  const nameInput = $('#browserGroupCardName');
+  if (nameInput) nameInput.value = browserGroupCardDefaultName(clean);
+  const mode = $('#browserGroupCardMode');
+  if (mode) mode.value = 'insert';
+  ['browserGroupCardInstructions','browserGroupCardScenario','browserGroupCardFirstMessage','browserGroupCardSystemPrompt'].forEach(id => {
+    const el = $('#' + id);
+    if (el) el.value = '';
+  });
+  const turn = $('#browserGroupCardTurnOrder');
+  if (turn) turn.value = 'roundRobin';
+  const auto = $('#browserGroupCardAutoAdvance');
+  if (auto) auto.checked = false;
+  const director = $('#browserGroupCardDirectorMode');
+  if (director) director.checked = false;
+  const realism = $('#browserGroupCardRealismState');
+  if (realism) realism.checked = true;
+  const modal = $('#browserGroupCardModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function closeBrowserGroupCardModal() {
+  const modal = $('#browserGroupCardModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+  browserPendingGroupCardPaths = [];
+}
+
+function collectBrowserGroupCardOptions() {
+  return {
+    mode: ($('#browserGroupCardMode')?.value || 'insert').toLowerCase(),
+    name: ($('#browserGroupCardName')?.value || '').trim(),
+    aiInstructions: ($('#browserGroupCardInstructions')?.value || '').trim(),
+    scenario: ($('#browserGroupCardScenario')?.value || '').trim(),
+    firstMessage: ($('#browserGroupCardFirstMessage')?.value || '').trim(),
+    systemPrompt: ($('#browserGroupCardSystemPrompt')?.value || '').trim(),
+    turnOrder: ($('#browserGroupCardTurnOrder')?.value || 'roundRobin'),
+    autoAdvance: !!$('#browserGroupCardAutoAdvance')?.checked,
+    directorMode: !!$('#browserGroupCardDirectorMode')?.checked,
+    includeRealismState: !!$('#browserGroupCardRealismState')?.checked,
+  };
+}
+
+async function createBrowserGroupCardFromModal() {
+  if (!FRONT_PORCH_GROUP_CARDS_ENABLED) { frontPorchGroupCardsComingSoon(); return; }
+  const paths = browserPendingGroupCardPaths.slice().filter(Boolean);
+  if (paths.length < 2) { setStatus('Select at least two cards first.', 'error'); return; }
+  if (paths.length > 4) { setStatus('Front Porch group cards currently support a maximum of 4 cards.', 'error'); return; }
+  const options = collectBrowserGroupCardOptions();
+  settings = collectSettings();
+  if (options.mode === 'ai') {
+    const settingsError = validateTextApiSettings(settings);
+    if (settingsError) {
+      await window.pywebview.api.save_settings(settings);
+      setStatus(settingsError, 'error');
+      switchToSettingsTab();
+      updateAvailability();
+      return;
+    }
+  }
+  setBusy(options.mode === 'ai' ? 'CREATING GROUP CARD — AI combining group setup…' : 'CREATING GROUP CARD — combining existing cards…');
+  try {
+    pendingAiQueueLabel = options.mode === 'ai' ? 'Create AI Group Card' : 'Create Group Card';
+    const res = await window.pywebview.api.export_group_card_from_projects(paths, options, settings);
+    if (!res?.ok) throw new Error(res?.error || 'Group card export failed.');
+    closeBrowserGroupCardModal();
+    if (res.projectPath) selectedCharacterProjectPath = canonicalWorkspaceProjectPath(res.projectPath);
+    await refreshCharacterBrowser(false);
+    setStatus(`Created Front Porch group card: ${res.name || 'Group Card'} (${res.memberCount || paths.length} members) → ${res.projectPath || res.path}`, 'ok');
+  } catch (err) {
+    setStatus(err.cancelled ? 'Group card creation cancelled.' : (err.message || String(err)), err.cancelled ? 'warn' : 'error');
+  } finally {
+    setBusy('');
+    pendingAiQueueLabel = '';
+  }
+}
+
 async function runBrowserContextAction(action) {
   const paths = browserContextMenuPaths.slice().filter(Boolean);
+  const clickedPath = String(browserContextMenuProjectPath || '').trim();
   hideBrowserContextMenu();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
-  if (paths.length > 1 && ['load','export_png','export_json','emotion_zip','front_porch','move','delete'].includes(action)) {
+  if (paths.length > 1 && ['load','export_png','export_json','emotion_zip','front_porch','move','delete','group','duplicate','make_variation','make_group_card'].includes(action)) {
     setStatus(`Context action will affect ${paths.length} selected cards.`, 'warn');
   }
-  if (action === 'load') {
+  if (action === 'duplicate') {
+    await duplicateBrowserCards(paths);
+  } else if (action === 'make_variation') {
+    await makeVariationsFromBrowserPaths(paths);
+  } else if (action === 'make_group_card') {
+    if (!FRONT_PORCH_GROUP_CARDS_ENABLED) { frontPorchGroupCardsComingSoon(); return; }
+    openBrowserGroupCardModal(browserGroupCardPathsFromContext(paths, clickedPath));
+  } else if (action === 'group') {
+    await createBrowserCardGroup(paths, clickedPath);
+  } else if (action === 'set_primary') {
+    await setBrowserCardAsGroupPrimary(clickedPath || paths[0]);
+  } else if (action === 'ungroup') {
+    await ungroupBrowserCards(paths);
+  } else if (action === 'load') {
     await loadCharacterWorkspacesFromPaths(paths);
   } else if (action === 'export_png') {
     await exportBrowserPaths(paths, 'chara_v2_png');
@@ -8869,6 +9877,27 @@ async function runBrowserContextAction(action) {
   } else if (action === 'delete') {
     await deleteBrowserPaths(paths);
   }
+}
+
+
+function browserGroupArrowSvg(expanded = false) {
+  if (expanded) {
+    return `<svg class="browser-group-arrow-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15.5 5.5 9 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  return `<svg class="browser-group-arrow-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m8.5 5.5 6.5 6.5-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function browserGroupBadgeHtml(card) {
+  const group = browserGroupForPath(card?.projectPath);
+  if (!group) return '';
+  const primary = browserGroupPrimaryPath(group) === String(card?.projectPath || '');
+  const count = browserGroupMemberCount(group);
+  if (primary) {
+    const expanded = browserExpandedCardGroups.has(group.id);
+    const label = expanded ? 'Collapse group' : 'Expand group';
+    return `<button type="button" class="browser-group-toggle ${expanded ? 'expanded' : ''}" data-group-id="${escapeAttr(group.id)}" title="${escapeAttr(label)}" aria-label="${escapeAttr(label)}">${browserGroupArrowSvg(expanded)}<span>${escapeHtml(String(count))}</span></button>`;
+  }
+  return `<div class="browser-group-child-badge" title="Grouped variant">Variant</div>`;
 }
 
 function browserTokenIconSvg(extraClass = '') {
@@ -8968,16 +9997,17 @@ function renderCharacterBrowser() {
   renderBrowserBreadcrumb();
   renderBrowserFilterPanel();
   const visibleCards = getVisibleBrowserCards();
-  renderBrowserLetterStrip(visibleCards);
+  const displayCards = displayBrowserCardsWithGroups(visibleCards);
+  renderBrowserLetterStrip(displayCards);
   const countEl = $('#browserResultCount');
   const scopedTotal = browserScopeCards().length;
-  if (countEl) countEl.textContent = `${visibleCards.length} / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
+  if (countEl) countEl.textContent = `${displayCards.length} shown / ${visibleCards.length} matched / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
   const visibleFolders = getVisibleBrowserFolders(visibleCards);
   if (!characterBrowserCards.length && !visibleFolders.length) {
     grid.innerHTML = '<div class="empty">No saved characters yet. Generate a card first.</div>';
     return;
   }
-  if (!visibleCards.length && !visibleFolders.length) {
+  if (!displayCards.length && !visibleFolders.length) {
     grid.innerHTML = '<div class="empty">No characters or folders match the current search/filter.</div>';
     return;
   }
@@ -8993,15 +10023,18 @@ function renderCharacterBrowser() {
       <div class="folder-tile-hint">Right-click for folder actions</div>
     </div>`;
   }).join('');
-  const cardHtml = visibleCards.map(card => {
+  const cardHtml = displayCards.map(card => {
     const name = card.name || 'Unnamed';
     const ch = String(name).trim().charAt(0).toUpperCase();
     const letter = /^[A-Z]$/.test(ch) ? ch : '#';
     const multiSelected = browserSelectedProjects.has(card.projectPath);
     const isNsfw = browserCardIsNsfw(card);
     const privacyClass = isNsfw && browserPrivacyMode() === 'blur' ? 'nsfw-blurred' : '';
+    const group = browserGroupForPath(card.projectPath);
+    const groupClass = group ? (browserGroupPrimaryPath(group) === card.projectPath ? 'group-primary-card' : 'group-child-card') : '';
     return `
-    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}" draggable="true">
+    <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass} ${groupClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}" data-group-id="${escapeAttr(group?.id || '')}" draggable="true">
+      ${browserGroupBadgeHtml(card)}
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
@@ -9014,6 +10047,14 @@ function renderCharacterBrowser() {
     </div>
   `}).join('');
   grid.innerHTML = folderHtml + cardHtml;
+  $$('.browser-group-toggle', grid).forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const groupId = btn.dataset.groupId || '';
+      await setBrowserGroupExpanded(groupId, !browserExpandedCardGroups.has(groupId));
+    });
+  });
   $$('.browser-folder-tile', grid).forEach(tile => {
     tile.addEventListener('click', () => {
       const id = tile.dataset.folder || '';
@@ -9137,7 +10178,9 @@ function selectCharacterBrowserCard(projectPath) {
   selectedCharacterProjectPath = projectPath || '';
   const card = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath);
   $$('.character-card-tile').forEach(el => el.classList.toggle('selected', el.dataset.project === selectedCharacterProjectPath));
-  $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${browserFolderPathLabel(card.virtualFolderId || '')} — ${card.folder}` : 'Select a character card.';
+  const group = card ? browserGroupForPath(card.projectPath) : null;
+  const groupInfo = group ? ` — ${browserGroupPrimaryPath(group) === card.projectPath ? 'Group Primary' : 'Grouped Variant'} (${browserGroupMemberCount(group)} cards)` : '';
+  $('#selectedCharacterInfo').textContent = card ? `${card.name} — ${browserFolderPathLabel(card.virtualFolderId || '')} — ${card.folder}${groupInfo}` : 'Select a character card.';
   const sourceBadge = $('#browserDescriptionSource');
   if (sourceBadge) {
     sourceBadge.textContent = card ? descriptionSourceLabel(card.browserDescriptionSource) : '';
@@ -9293,7 +10336,16 @@ async function scanFrontPorchFolder(targetOverride = null) {
     // positional target argument is supplied, so the target rides inside settings.
     const res = await window.pywebview.api.scan_front_porch_folder(scanSettings);
     if (!res.ok) throw new Error(res.error || 'Could not find Front Porch database.');
-    setStatus(`${res.targetLabel || label} found: ${res.databaseName} — Characters folder: ${res.charactersDir}`, 'ok');
+    const v30 = res.frontPorchV30 || {};
+    let v30Note = '';
+    if (v30.compatible) {
+      v30Note = ' — Front Porch v30 group realism fields detected';
+    } else if (v30.partial) {
+      v30Note = ' — partial v30 group realism schema detected';
+    } else if (res.schemaReadError) {
+      v30Note = ' — schema details could not be read';
+    }
+    setStatus(`${res.targetLabel || label} found: ${res.databaseName} — Characters folder: ${res.charactersDir}${v30Note}`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -9316,6 +10368,12 @@ function formatFrontPorchAuditReport(res) {
   if (res?.insertRollbackTest) {
     const test = res.insertRollbackTest;
     lines.push(`Rollback insert test: ${test.ok ? 'PASSED' : 'FAILED'}${test.cleaned ? ' / temporary rows verified deleted' : ''}`);
+  }
+  if (res?.frontPorchV30) {
+    const v30 = res.frontPorchV30;
+    lines.push(`Front Porch v30 group realism: ${v30.compatible ? 'detected' : (v30.partial ? 'partial schema' : 'not detected / older schema')}`);
+    lines.push(`- groups.default_member_realism_state: ${v30.groupsDefaultMemberRealismState ? 'yes' : 'no'}`);
+    lines.push(`- sessions.group_realism_state: ${v30.sessionsGroupRealismState ? 'yes' : 'no'}`);
   }
 
   const addItems = (title, items) => {
@@ -9398,13 +10456,21 @@ function frontPorchSettingsForTarget(target, baseSettings = null) {
   return current;
 }
 
-function openFrontPorchExportTargetModal({ count = 1, mode = 'single' } = {}) {
+function openFrontPorchExportTargetModal({ count = 1, mode = 'single', forceBeta = false } = {}) {
   const modal = $('#frontPorchExportTargetModal');
   if (!modal) return Promise.resolve(null);
   const summary = $('#frontPorchExportTargetSummary');
+  const stableBtn = $('#frontPorchExportStableBtn');
+  const betaBtn = $('#frontPorchExportBetaBtn');
+  const bothBtn = $('#frontPorchExportBothBtn');
+  if (stableBtn) stableBtn.classList.toggle('hidden', !!forceBeta);
+  if (bothBtn) bothBtn.classList.toggle('hidden', !!forceBeta);
+  if (betaBtn) betaBtn.textContent = forceBeta ? 'Export to Front Porch AI Beta' : 'Export to Front Porch AI Beta';
   if (summary) {
-    const itemLabel = count === 1 ? 'this character' : `${count} selected characters`;
-    summary.textContent = `Both Stable and Beta Front Porch data folders are configured. Choose where to export ${itemLabel}.`;
+    const itemLabel = count === 1 ? (forceBeta ? 'this group card' : 'this character') : `${count} selected ${forceBeta ? 'card(s)' : 'characters'}`;
+    summary.textContent = forceBeta
+      ? `Front Porch Group Cards are only supported by Beta for now. Export ${itemLabel} to the Beta data folder.`
+      : `Both Stable and Beta Front Porch data folders are configured. Choose where to export ${itemLabel}.`;
   }
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
@@ -9434,12 +10500,60 @@ function showFrontPorchSettingsError() {
   $('#settings')?.classList.add('active');
 }
 
-async function chooseFrontPorchExportTargets({ count = 1, mode = 'single' } = {}) {
+function textLooksLikeFrontPorchGroupPreview(text = '') {
+  const s = String(text || '');
+  if (!s) return false;
+  return /(^|\n)Members\s*\n/i.test(s)
+    && /(^|\n)Group (Overview|Scenario|Dynamic|Settings|System Prompt)\s*\n/i.test(s)
+    && /Member\s+1\s*:/i.test(s);
+}
+
+async function projectLooksLikeFrontPorchGroupCard(projectPath, browserCard = null) {
+  // Load the saved project first and classify from authoritative project fields.
+  // Browser cache can be stale after switching between group cards and normal cards,
+  // so it must not be allowed to force Beta-only export for normal single cards.
+  let loadedOk = false;
+  try {
+    if (projectPath && window.pywebview?.api?.load_character_project) {
+      const loaded = await window.pywebview.api.load_character_project(projectPath);
+      if (loaded && loaded.ok) {
+        loadedOk = true;
+        const payload = loaded.groupPayload;
+        if (payload && payload.spec === 'front_porch_group_card') return true;
+        const exportFormat = String(loaded.exportFormat || '').toLowerCase();
+        const frontend = String(loaded.frontend || '').toLowerCase();
+        const groupPath = String(loaded.groupCardPath || loaded.groupJsonPath || '').trim();
+        if (exportFormat === 'fpa_group_png' || exportFormat === 'fpa_group_json') return true;
+        if (frontend === 'front_porch_group') return true;
+        if (/\.group\.(png|json)$/i.test(groupPath)) return true;
+        return false;
+      }
+    }
+  } catch (_) {}
+
+  // Only use browser metadata when the project could not be loaded. This keeps
+  // right-click actions usable for missing/stale projects without poisoning normal exports.
+  const card = browserCard || {};
+  if (!loadedOk) {
+    const groupPath = String(card.groupCardPath || card.groupJsonPath || card.imagePath || card.cardPngPath || '').trim();
+    if (card.isGroupCard || card.exportFormat === 'fpa_group_png' || card.frontend === 'front_porch_group') return true;
+    if (/\.group\.(png|json)$/i.test(groupPath)) return true;
+  }
+  return false;
+}
+
+async function chooseFrontPorchExportTargets({ count = 1, mode = 'single', forceBeta = false } = {}) {
   settings = collectSettings();
   const hasStable = !!String(settings.frontPorchStableDataFolder || '').trim();
   const hasBeta = !!String(settings.frontPorchBetaDataFolder || '').trim();
+  if (forceBeta) {
+    if (hasBeta) return ['beta'];
+    setStatus('Front Porch Group Cards can only be exported to Beta for now. Set the Beta Front Porch Data Folder in Settings first.', 'error');
+    switchToSettingsTab();
+    return null;
+  }
   if (hasStable && hasBeta) {
-    return await openFrontPorchExportTargetModal({ count, mode });
+    return await openFrontPorchExportTargetModal({ count, mode, forceBeta });
   }
   if (hasStable) return ['stable'];
   if (hasBeta) return ['beta'];
@@ -9450,23 +10564,26 @@ async function chooseFrontPorchExportTargets({ count = 1, mode = 'single' } = {}
 async function exportFrontPorchProjectToTarget(projectPath, target, baseSettings = null) {
   const targetSettings = frontPorchSettingsForTarget(target, baseSettings);
   await window.pywebview.api.save_settings(targetSettings);
-  // Keep the bridge call one-argument for AppImage/stale frontend compatibility.
-  // The backend is beta7-tolerant of optional target/settings arguments, but does
-  // not require them because save_settings updates the active export target first.
-  return await window.pywebview.api.export_front_porch_from_project(projectPath);
+  return await window.pywebview.api.export_front_porch_from_project(projectPath, targetSettings, target);
 }
 
 async function exportSelectedCharacterToFrontPorch() {
   if (!selectedCharacterProjectPath) { setStatus('Select a character first.', 'error'); return; }
   settings = collectSettings();
-  const targets = await chooseFrontPorchExportTargets({ count: 1, mode: 'single' });
+  const selectedCard = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath) || {};
+  const selectedLooksGroup = await projectLooksLikeFrontPorchGroupCard(selectedCharacterProjectPath, selectedCard);
+  const targets = await chooseFrontPorchExportTargets({ count: 1, mode: selectedLooksGroup ? 'group' : 'single', forceBeta: selectedLooksGroup });
   if (!targets || !targets.length) return;
 
-  if (!frontPorchBothFoldersConfigured(settings)) {
+  if (selectedLooksGroup) {
+    setStatus('Front Porch Group Card export is Beta-only for now.', 'warn');
+  }
+
+  if (!frontPorchBothFoldersConfigured(settings) || selectedLooksGroup) {
     const label = frontPorchTargetInfo(targets[0], settings).label;
     const ok = confirm(`Export this saved character directly into ${label}?
 
-This will write to the selected Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A timestamped database backup will be created first. Close Front Porch before exporting if possible.`);
+This will write to the selected Front Porch SQLite database and copy the character card/emotion images into KoboldManager/Characters. A capped CCF backup will be saved in KoboldManager/backups, with only the latest 10 CCF backups kept. Close Front Porch before exporting if possible.`);
     if (!ok) return;
   }
 
@@ -9479,7 +10596,8 @@ This will write to the selected Front Porch SQLite database and copy the charact
       setBusy(`EXPORTING TO ${info.label.toUpperCase()}…`);
       const res = await exportFrontPorchProjectToTarget(selectedCharacterProjectPath, target, originalSettings);
       if (!res.ok) throw new Error(res.error || `${info.label} export failed.`);
-      results.push(`${res.targetLabel || info.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`);
+      if (res.groupId) results.push(`${res.targetLabel || info.label}: ${res.name} — group ${res.groupId} — members: ${res.memberCount}. DB: ${res.database}. Backup: ${res.backup}`);
+      else results.push(`${res.targetLabel || info.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`);
     }
     setStatus(`Exported to Front Porch AI. ${results.join(' | ')}`, 'ok');
   } catch (err) {
@@ -10330,6 +11448,32 @@ function buildGenerationQaTemplate(baseTemplate, options = {}) {
   return temp;
 }
 
+
+async function createConceptGeneratedGroupCard(savedProjects, sourceConcept) {
+  if (!FRONT_PORCH_GROUP_CARDS_ENABLED) throw new Error(FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE);
+  const paths = (savedProjects || []).map(item => String(item?.projectPath || item || '').trim()).filter(Boolean);
+  if (paths.length < 2) return null;
+  if (paths.length > 4) throw new Error('Front Porch group cards currently support a maximum of 4 members.');
+  await createBrowserCardGroup(paths, paths[0]);
+  const options = {
+    mode: 'ai',
+    name: browserGroupCardDefaultName(paths),
+    aiInstructions: String(sourceConcept || '').trim(),
+    scenario: '',
+    firstMessage: '',
+    systemPrompt: '',
+    turnOrder: 'roundRobin',
+    autoAdvance: false,
+    directorMode: false,
+    includeRealismState: true,
+  };
+  const res = await window.pywebview.api.export_group_card_from_projects(paths, options, settings);
+  if (!res?.ok) throw new Error(res?.error || 'Group card export failed.');
+  if (res.projectPath) selectedCharacterProjectPath = canonicalWorkspaceProjectPath(res.projectPath);
+  await refreshCharacterBrowser(false);
+  return res;
+}
+
 async function generateCard(options = {}) {
   options = { runQa: !!template?.qa?.enabled, temporaryNotes: '', customQaQuestions: [], ...(options || {}) };
   if ((options.customQaQuestions || []).length) options.runQa = true;
@@ -10350,12 +11494,12 @@ async function generateCard(options = {}) {
   await rememberCurrentModel(true);
   settings = collectSettings();
   const liveCardMode = ($('#cardMode') ? $('#cardMode').value : settings.cardMode || 'single');
-  if (['single', 'multi', 'split_cards'].includes(liveCardMode) && settings.cardMode !== liveCardMode) {
+  if (['single', 'multi', 'split_cards', ...(FRONT_PORCH_GROUP_CARDS_ENABLED ? ['group_cards'] : [])].includes(liveCardMode) && settings.cardMode !== liveCardMode) {
     // Last-line defence against stale saved/shared-scene state changing the
     // generation route. The visible Card Mode control wins.
     settings.cardMode = liveCardMode;
     if (liveCardMode === 'single') settings.sharedScenePolicy = 'ai_reconcile';
-    if (liveCardMode === 'split_cards') settings.sharedScenePolicy = 'split_cards';
+    if (liveCardMode === 'split_cards' || liveCardMode === 'group_cards') settings.sharedScenePolicy = 'split_cards';
   }
   const settingsError = validateTextApiSettings(settings);
   if (settingsError) {
@@ -10367,6 +11511,41 @@ async function generateCard(options = {}) {
     return;
   }
   try {
+    if (settings.cardMode === 'group_cards' && !FRONT_PORCH_GROUP_CARDS_ENABLED) {
+      settings.cardMode = 'split_cards';
+      if ($('#cardMode')) $('#cardMode').value = 'split_cards';
+      setStatus(FRONT_PORCH_GROUP_CARD_COMING_SOON_MESSAGE + ' Switched this generation back to Split into Multiple Cards.', 'warn');
+      updateCardModeHint();
+    }
+    if (settings.cardMode === 'group_cards') {
+      const groupCountInput = $('#multiCharacterCount');
+      const groupCount = Math.max(2, Math.min(4, Number(groupCountInput?.value || settings.multiCharacterCount || 2)));
+      if (groupCountInput) groupCountInput.value = String(groupCount);
+      const runGroupQa = !!(options.runQa || (options.customQaQuestions || []).length);
+      const splitSettings = { ...settings, cardMode: 'split_cards', sharedScenePolicy: 'split_cards', multiCharacterCount: groupCount };
+      setBusy(runGroupQa ? 'MULTI-CARD GROUP GENERATION — identifying members and running focused Q&A…' : 'MULTI-CARD GROUP GENERATION — creating member cards…');
+      setStatus(`Generating ${groupCount} member cards, then saving/grouping them and creating a Front Porch .group.png.`, '');
+      const res = await window.pywebview.api.generate_split_cards(conceptForModel, template, splitSettings, '', !runGroupQa, options.customQaQuestions || []);
+      if (!res.ok) throw new Error(res.error || 'Multi-card group generation failed.');
+      // generate_split_cards internally uses split mode for member generation;
+      // restore the visible Concept mode so reloads keep Multi-Card Group Card selected.
+      try { await window.pywebview.api.save_settings(settings); } catch (_) {}
+      const cards = (res.cards || []).map(card => ({ ...card, splitMode: 'group_cards', splitCard: 'group_cards' }));
+      setCharacterOutputTabs(cards);
+      currentBrowserDescription = '';
+      currentCardRating = '';
+      currentCardRatingReasoning = '';
+      currentCardRatingDetails = [];
+      currentCardRatingSourceHash = '';
+      updateAvailability();
+      setStatus(`Generated ${characterOutputTabs.length} member card${characterOutputTabs.length === 1 ? '' : 's'}. Saving workspaces before group-card export…`, 'ok');
+      const savedProjects = await saveCurrentWorkspace('group_card_generation');
+      const groupRes = await createConceptGeneratedGroupCard(savedProjects || [], conceptForModel);
+      const foundNames = Array.isArray(res.characters) && res.characters.length ? ` Identified: ${res.characters.join(', ')}.` : '';
+      setStatus(`Multi-card group generation complete: ${characterOutputTabs.length} member cards saved and grouped.${foundNames}${groupRes?.path ? ` Group card: ${groupRes.path}` : ''}`, 'ok');
+      return;
+    }
+
     if (settings.cardMode === 'split_cards') {
       const runSplitQa = !!(options.runQa || (options.customQaQuestions || []).length);
       setBusy(runSplitQa ? 'SPLIT-CARD GENERATION — identifying characters and running focused Q&A per card…' : 'SPLIT-CARD GENERATION — identifying characters and generating separate cards…');
@@ -11053,30 +12232,37 @@ function closeCardImageModal() {
 async function applyCardImageModalPath() {
   const value = String($('#cardImageModalPath')?.value || '').trim();
   if (!value) { setStatus('Enter an image path/URL or drop/select an image first.', 'error'); return; }
-  if (isProbablyUrl(value)) {
-    setBusy('IMPORTING CARD IMAGE FROM URL…');
-    try {
-      const res = await window.pywebview.api.save_image_from_url(value, 'card');
+  setBusy(isProbablyUrl(value) ? 'IMPORTING CARD IMAGE FROM URL…' : 'IMPORTING CARD IMAGE FROM PATH…');
+  try {
+    let res;
+    if (isProbablyUrl(value)) {
+      res = await window.pywebview.api.save_image_from_url(value, 'card');
       if (!res.ok) throw new Error(res.error || 'Card image URL import failed.');
-      $('#cardImagePath').value = res.path;
-      closeCardImageModal();
-    } catch (err) {
-      setStatus(err.message || String(err), 'error');
-      return;
-    } finally {
-      setBusy('');
+    } else if (window.pywebview?.api?.import_image_path) {
+      // Keep typed/pasted local paths consistent with browse/drop: copy the
+      // image into CCF's managed card-image folder, then preview/export that
+      // stable copy.  Raw local paths can work for export but pywebview can
+      // render them as broken in the Card Image preview on some Linux setups.
+      res = await window.pywebview.api.import_image_path(value, 'card');
+      if (!res.ok) throw new Error(res.error || 'Card image path import failed.');
+    } else {
+      res = { ok: true, path: value };
     }
-  } else {
-    $('#cardImagePath').value = value;
+    $('#cardImagePath').value = res.path || value;
+    if ($('#cardImageModalPath')) $('#cardImageModalPath').value = $('#cardImagePath').value;
     closeCardImageModal();
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value;
+    if (hasOutput()) await saveCurrentWorkspace('silent');
+    await updateCardImagePreview();
+    updateImportedCardToolsHint();
+    setStatus('Card image updated.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
   }
-  settings = collectSettings();
-  await window.pywebview.api.save_settings(settings);
-  if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value;
-  if (hasOutput()) await saveCurrentWorkspace('silent');
-  updateCardImagePreview();
-  updateImportedCardToolsHint();
-  setStatus('Card image updated.', 'ok');
 }
 
 function cardImagePreviewSrc(path) {
@@ -11085,8 +12271,9 @@ function cardImagePreviewSrc(path) {
   if (/^data:image\//i.test(value)) return value;
   if (/^https?:\/\//i.test(value)) return value;
   if (/^file:\/\//i.test(value)) return value;
-  const prefix = value.startsWith('/') ? 'file://' : 'file:///';
-  return prefix + value.split('/').map(part => encodeURIComponent(part)).join('/').replaceAll('%3A', ':');
+  const normalised = value.replaceAll('\\', '/');
+  const prefix = normalised.startsWith('/') ? 'file://' : 'file:///';
+  return prefix + normalised.split('/').map(part => encodeURIComponent(part)).join('/').replaceAll('%3A', ':');
 }
 
 function shortImageLabel(path) {
@@ -11110,21 +12297,62 @@ async function updateCardImagePreview() {
   if ($('#cardImageModalPath') && !$('#cardImageModal')?.classList.contains('hidden')) $('#cardImageModalPath').value = path;
   if (img) {
     img.alt = 'Current card image preview';
+    img.onerror = null;
     if (!path) {
       img.removeAttribute('src');
       img.classList.add('hidden');
+    } else if (/^data:image\//i.test(path) || /^https?:\/\//i.test(path)) {
+      img.classList.remove('hidden');
+      img.onerror = () => {
+        if (token !== cardImagePreviewToken) return;
+        img.classList.add('hidden');
+        if (hint) hint.textContent = `Current image is set, but the preview could not load: ${shortImageLabel(path)}`;
+      };
+      img.src = path;
+    } else if (window.pywebview?.api?.image_preview_data_url) {
+      // Prefer a backend-created data URL for local files.  It avoids pywebview
+      // file:// permission/caching quirks that could show a broken image even
+      // while export and the Character Browser thumbnail were using the image.
+      img.classList.add('hidden');
+      if (hint) hint.textContent = `Loading image preview: ${shortImageLabel(path)}`;
+      try {
+        const res = await window.pywebview.api.image_preview_data_url(path);
+        if (token !== cardImagePreviewToken) return;
+        if (res?.ok && res.dataUrl) {
+          img.classList.remove('hidden');
+          img.src = res.dataUrl;
+        } else {
+          img.classList.remove('hidden');
+          img.onerror = () => {
+            if (token !== cardImagePreviewToken) return;
+            img.classList.add('hidden');
+            if (hint) hint.textContent = `Current image is set, but the preview could not load: ${shortImageLabel(path)}`;
+          };
+          img.src = cardImagePreviewSrc(path);
+        }
+      } catch (_) {
+        if (token !== cardImagePreviewToken) return;
+        img.classList.remove('hidden');
+        img.onerror = () => {
+          if (token !== cardImagePreviewToken) return;
+          img.classList.add('hidden');
+          if (hint) hint.textContent = `Current image is set, but the preview could not load: ${shortImageLabel(path)}`;
+        };
+        img.src = cardImagePreviewSrc(path);
+      }
     } else {
       img.classList.remove('hidden');
+      img.onerror = () => {
+        if (token !== cardImagePreviewToken) return;
+        img.classList.add('hidden');
+        if (hint) hint.textContent = `Current image is set, but the preview could not load: ${shortImageLabel(path)}`;
+      };
       img.src = cardImagePreviewSrc(path);
-      if (window.pywebview?.api?.image_preview_data_url && !/^https?:\/\//i.test(path) && !/^data:image\//i.test(path)) {
-        try {
-          const res = await window.pywebview.api.image_preview_data_url(path);
-          if (token === cardImagePreviewToken && res?.ok && res.dataUrl) img.src = res.dataUrl;
-        } catch (_) {}
-      }
     }
   }
-  if (hint) hint.textContent = path ? `Current image set: ${shortImageLabel(path)}` : 'No custom image selected. PNG export will use the built-in blank image.';
+  if (hint && (!hint.textContent || !/preview could not load|Loading image preview/i.test(hint.textContent))) {
+    hint.textContent = path ? `Current image set: ${shortImageLabel(path)}` : 'No custom image selected. PNG export will use the built-in blank image.';
+  }
 }
 
 
@@ -11617,15 +12845,35 @@ async function exportCard() {
   setBusy('EXPORTING CHARACTER CARD — writing files…');
   try {
     await window.pywebview.api.save_settings(settings);
-    const res = await window.pywebview.api.export_card(
-      $('#outputText').value,
-      settings.frontend,
-      settings.exportFormat,
-      settings.cardImagePath,
-      buildConceptForModel(),
-      template,
-      settings
-    );
+    let res;
+    if (activeOutputTabIsGroupCard()) {
+      const tab = characterOutputTabs[activeOutputTabIndex] || {};
+      let projectPath = tab.projectPath || tab.workspaceProjectPath || '';
+      if (!projectPath && tab.groupPayload?.spec === 'front_porch_group_card') {
+        const saved = await saveCurrentWorkspace('silent');
+        if (saved?.ok && saved.projectPath) {
+          projectPath = canonicalWorkspaceProjectPath(saved.projectPath);
+          tab.projectPath = projectPath;
+          tab.workspaceProjectPath = projectPath;
+        }
+      }
+      if (projectPath) {
+        const groupFormat = settings.exportFormat === 'chara_v2_json' ? 'group_json' : (settings.exportFormat === 'markdown' ? 'markdown' : 'group_png');
+        res = await window.pywebview.api.export_character_from_project(projectPath, groupFormat);
+      } else {
+        res = { ok: false, error: 'This is a Front Porch Group Card preview, but CCF could not find or save the backing project path needed for fpa_group export.' };
+      }
+    } else {
+      res = await window.pywebview.api.export_card(
+        $('#outputText').value,
+        settings.frontend,
+        settings.exportFormat,
+        settings.cardImagePath,
+        buildConceptForModel(),
+        template,
+        settings
+      );
+    }
     if (res.ok) { closeExportModal(); setStatus('Exported to: ' + res.path + (res.folder ? ' — folder: ' + res.folder : '') + (res.projectPath ? ' — project: ' + res.projectPath : ''), 'ok'); await saveCurrentWorkspace('silent'); }
     else setStatus(res.error || 'Export failed.', 'error');
   } catch (err) {

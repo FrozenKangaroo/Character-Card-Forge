@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import base64
+import copy
 import mimetypes
 import threading
 import subprocess
@@ -21,6 +22,7 @@ import uuid
 import io
 import socket
 import ssl
+import struct
 import hashlib
 import traceback
 import webbrowser
@@ -1072,13 +1074,16 @@ class Api:
         with self._library_connect() as conn:
             conn.execute("DELETE FROM workspace_assets WHERE project_path=?", (project_key,))
             self._store_workspace_asset(conn, project_key, "workspace_payload", "json", data_text=json.dumps(workspace, ensure_ascii=False), metadata={"kind":"workspace"})
-            if image_path:
-                mime, blob, filename = self._read_file_asset_blob(image_path)
+            selected_image_source = str(image_path or workspace.get("cardImagePath") or workspace.get("imagePath") or "").strip()
+            if selected_image_source or workspace.get("imageDataUrl") or workspace.get("cardImageDataUrl") or workspace.get("generatedImages"):
+                mime, blob, filename = self._read_file_asset_blob(selected_image_source) if selected_image_source else ("", None, "")
                 if not blob:
-                    # Selected generated-image paths can be cleaned after save, while the
-                    # workspace still has the generated image as base64 dataUrl. Store that
-                    # base64 as the selected card image so saved-card exports can restore it.
-                    for candidate in self._workspace_card_image_candidates(workspace, image_path):
+                    # Selected/generated image paths can be cleaned after save, while
+                    # the workspace still has the generated image as base64 dataUrl.
+                    # Store that base64 as the selected card image so saved-card and
+                    # group-card exports can restore the real avatar instead of a
+                    # flat placeholder.
+                    for candidate in self._workspace_card_image_candidates(workspace, selected_image_source):
                         data_url = self._candidate_image_data_url_from_value(candidate)
                         if not data_url:
                             continue
@@ -1087,7 +1092,7 @@ class Api:
                             mime, blob, filename = cmime or "image/png", cblob, "selected_card_image" + (self._extension_from_mime(cmime or "image/png", "image") or ".png")
                             break
                 if blob:
-                    self._store_workspace_asset(conn, project_key, "selected_card_image", "image", filename=filename, mime_type=mime, source_path=image_path, data_blob=blob, metadata={"role":"selected_card_image"})
+                    self._store_workspace_asset(conn, project_key, "selected_card_image", "image", filename=filename, mime_type=mime, source_path=selected_image_source, data_blob=blob, metadata={"role":"selected_card_image"})
             def store_image_list(prefix, images):
                 if not isinstance(images, list):
                     return
@@ -1142,6 +1147,20 @@ class Api:
         key = str(Path(project_path).resolve())
         with self._library_connect() as conn:
             rows = [dict(r) for r in conn.execute("SELECT * FROM workspace_assets WHERE project_path=? ORDER BY asset_key", (key,)).fetchall()]
+            if not rows:
+                # Older snapshots and browser actions can point at a timestamped
+                # project while the asset DB is keyed by latest_ccf_project.json
+                # in the same folder.  Look inside the project folder before
+                # giving up, preferring selected-card and generated-image rows.
+                try:
+                    folder = str(Path(project_path).resolve().parent)
+                    prefix = folder.rstrip('/\\') + os.sep + "%"
+                    rows = [dict(r) for r in conn.execute(
+                        "SELECT * FROM workspace_assets WHERE project_path LIKE ? ORDER BY CASE asset_key WHEN 'selected_card_image' THEN 0 ELSE 1 END, asset_key",
+                        (prefix,),
+                    ).fetchall()]
+                except Exception:
+                    rows = []
         return rows
 
     def _hydrate_workspace_from_db_assets(self, project_path, loaded):
@@ -1285,6 +1304,9 @@ class Api:
             "projectHash": row.get("project_hash") or "",
             "cardPngHash": row.get("card_png_hash") or "",
             "imageHash": row.get("image_hash") or "",
+            "isGroupCard": bool(extra.get("isGroupCard")),
+            "exportFormat": extra.get("exportFormat") or "",
+            "groupCardPath": extra.get("groupCardPath") or "",
         }
 
     def _refresh_library_cache_for_project(self, project_path, force=False):
@@ -1312,7 +1334,13 @@ class Api:
                 )
             except Exception:
                 needs_token_counts = True
-            if card_hash_ok and image_hash_ok and not needs_token_counts:
+            needs_browser_index_refresh = True
+            try:
+                extra_for_index = json.loads(row.get("metadata_json") or "{}")
+                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 4
+            except Exception:
+                needs_browser_index_refresh = True
+            if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh:
                 return self._browser_card_from_db_row(row)
 
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1365,6 +1393,10 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
+                    "browserIndexVersion": 4,
+                    "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
+                    "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
+                    "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
                 },
             })
         else:
@@ -1390,6 +1422,10 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
+                    "browserIndexVersion": 4,
+                    "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
+                    "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
+                    "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
                 },
             })
         if virtual_folder_id != str(project.get("virtualFolderId") or ""):
@@ -1421,6 +1457,10 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
+                    "browserIndexVersion": 4,
+                    "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
+                    "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
+                    "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
                 },
                 })
             except Exception:
@@ -1880,9 +1920,9 @@ class Api:
         settings["alternateFirstMessageCustomStyles"] = _clean_text_list(settings.get("alternateFirstMessageCustomStyles", []), 120)
         settings["alternateFirstMessageInstructions"] = _clean_text_list(settings.get("alternateFirstMessageInstructions", []), 2000)
         mode = str(settings.get("cardMode") or "single").strip().lower()
-        settings["cardMode"] = "split_cards" if mode in {"split_cards", "split-cards", "multi_split", "split"} else ("multi" if mode in {"multi", "multi_character", "multi-character"} else "single")
+        settings["cardMode"] = "group_cards" if mode in {"group_cards", "group-cards", "group", "multi_card", "multi-card", "multi_cards", "multi-cards"} else ("split_cards" if mode in {"split_cards", "split-cards", "multi_split", "split"} else ("multi" if mode in {"multi", "multi_character", "multi-character"} else "single"))
         try:
-            settings["multiCharacterCount"] = max(2, min(12, int(settings.get("multiCharacterCount") or 2)))
+            settings["multiCharacterCount"] = max(2, min(4 if settings.get("cardMode") == "group_cards" else 12, int(settings.get("multiCharacterCount") or 2)))
         except Exception:
             settings["multiCharacterCount"] = 2
         settings["visionApiBaseUrl"] = str(settings.get("visionApiBaseUrl") or "").strip()
@@ -1997,9 +2037,37 @@ class Api:
         return _read_app_version()
 
     def _normalise_version_string(self, value):
+        """Return a clean semantic version from release/tag text.
+
+        GitHub tags are normally like v1.0.9-beta35, but Actions/manual
+        releases can accidentally produce names such as
+        character-card-forge-v1.0.9-beta35 or release-1.0.9_beta35.  The
+        update checker should still understand those instead of treating them
+        as version 0.0.0.
+        """
         raw = str(value or "").strip()
-        raw = re.sub(r"^[vV]", "", raw)
+        if not raw:
+            return ""
         raw = raw.split("+", 1)[0].strip()
+        raw = raw.replace("_", "-")
+        raw = re.sub(r"^[vV](?=\d)", "", raw)
+
+        # Prefer the first SemVer-looking substring anywhere in the text.
+        # This catches tags/release names with prefixes like
+        # character-card-forge-v1.0.9-beta35.
+        match = re.search(
+            r"(?i)(\d+(?:\.\d+){0,3})(?:[-\s.]*(alpha|beta|rc|preview|pre|nightly)[-\s.]*(\d+)?)?",
+            raw,
+        )
+        if match:
+            main = match.group(1) or ""
+            label = (match.group(2) or "").lower()
+            number = match.group(3) or ""
+            if label:
+                if label == "preview":
+                    label = "pre"
+                return f"{main}-{label}{number}"
+            return main
         return raw
 
     def _parse_version_for_compare(self, value):
@@ -2023,7 +2091,7 @@ class Api:
             return (nums, 3, 0, "")
         pre_l = pre.lower()
         rank = 0
-        if pre_l.startswith("alpha"):
+        if pre_l.startswith(("alpha", "nightly", "pre")):
             rank = 0
         elif pre_l.startswith("beta"):
             rank = 1
@@ -2048,9 +2116,58 @@ class Api:
 
     def _github_api_get_json(self, url, headers, timeout=15):
         req = urllib.request.Request(url, headers=headers)
-        with _safe_urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-        return json.loads(raw)
+        started = time.time()
+        try:
+            with _safe_urlopen(req, timeout=timeout) as resp:
+                status = getattr(resp, "status", None) or getattr(resp, "code", None)
+                raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw)
+            self._log_event("update_check_fetch_success", {
+                "url": url,
+                "status": status,
+                "bytes": len(raw.encode("utf-8", errors="replace")),
+                "elapsedMs": int((time.time() - started) * 1000),
+                "kind": type(parsed).__name__,
+                "count": len(parsed) if isinstance(parsed, list) else (len(parsed.keys()) if isinstance(parsed, dict) else 0),
+            })
+            return parsed
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace")[:800]
+            except Exception:
+                body = ""
+            self._log_event("update_check_fetch_http_error", {
+                "url": url,
+                "status": getattr(e, "code", None),
+                "reason": str(getattr(e, "reason", "") or e),
+                "bodyPreview": body,
+                "elapsedMs": int((time.time() - started) * 1000),
+            })
+            raise
+        except Exception as e:
+            self._log_event("update_check_fetch_failed", {
+                "url": url,
+                "error": str(e),
+                "errorType": type(e).__name__,
+                "portableCaBundle": bool(_PORTABLE_SSL_CONTEXT),
+                "certifiBundle": (certifi.where() if certifi else ""),
+                "elapsedMs": int((time.time() - started) * 1000),
+            })
+            raise
+
+    def _release_info_from_github_html_tag(self, tag, owner, repo):
+        tag = str(tag or "").strip()
+        version = self._normalise_version_string(tag)
+        return {
+            "tag": tag,
+            "version": version,
+            "name": tag or version or "Latest tag",
+            "url": f"https://github.com/{owner}/{repo}/releases/tag/{urllib.parse.quote(tag)}" if tag else f"https://github.com/{owner}/{repo}/releases",
+            "body": "",
+            "publishedAt": "",
+            "prerelease": self._is_prerelease_version(version),
+            "draft": False,
+        }
 
     def _release_info_from_github_release(self, data, owner, repo):
         data = data or {}
@@ -2137,38 +2254,90 @@ class Api:
             releases = []
             source_parts = []
             release_versions = set()
+            endpoint_errors = []
+
+            def remember_rows(rows, source_name):
+                added = 0
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        continue
+                    version_key = str(row.get("version") or "").casefold()
+                    tag_key = str(row.get("tag") or "").casefold()
+                    dedupe_key = version_key or tag_key
+                    if not dedupe_key or dedupe_key in release_versions:
+                        continue
+                    releases.append(row)
+                    release_versions.add(dedupe_key)
+                    added += 1
+                if added:
+                    source_parts.append(source_name)
+                return added
+
             try:
                 rel_url = f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=50"
                 data = self._github_api_get_json(rel_url, headers, timeout=15)
                 if isinstance(data, list):
-                    release_rows = [self._release_info_from_github_release(x, owner, repo) for x in data]
-                    releases.extend(release_rows)
-                    release_versions.update(str(r.get("version") or "").casefold() for r in release_rows if r.get("version"))
-                    if release_rows:
-                        source_parts.append("releases")
+                    remember_rows([self._release_info_from_github_release(x, owner, repo) for x in data], "releases")
             except Exception as releases_error:
-                self._log_event("update_check_releases_api_failed", {"currentVersion": current, "error": str(releases_error)})
+                err = str(releases_error)
+                endpoint_errors.append({"source": "releases", "error": err[:500]})
+                self._log_event("update_check_releases_api_failed", {"currentVersion": current, "error": err})
 
-            # Always merge tags as well as releases. Some beta builds are published
+            # Always merge tags as well as releases. Some builds can be published
             # as tags/assets without GitHub Release objects, and relying on
             # /releases alone makes the in-app update checker look dead.
             try:
                 tag_url = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=50"
                 data = self._github_api_get_json(tag_url, headers, timeout=15)
                 if isinstance(data, list):
-                    tag_rows = [self._release_info_from_github_tag(x, owner, repo) for x in data]
-                    added_tags = 0
-                    for row in tag_rows:
-                        version_key = str(row.get("version") or "").casefold()
-                        if not version_key or version_key in release_versions:
-                            continue
-                        releases.append(row)
-                        release_versions.add(version_key)
-                        added_tags += 1
-                    if added_tags:
-                        source_parts.append("tags")
+                    remember_rows([self._release_info_from_github_tag(x, owner, repo) for x in data], "tags")
             except Exception as tags_error:
-                self._log_event("update_check_tags_api_failed", {"currentVersion": current, "error": str(tags_error)})
+                err = str(tags_error)
+                endpoint_errors.append({"source": "tags", "error": err[:500]})
+                self._log_event("update_check_tags_api_failed", {"currentVersion": current, "error": err})
+
+            # Last-resort fallback: scrape public tag/release pages for tag links.
+            # This gives the debug log another signal if the GitHub JSON API is
+            # blocked/rate-limited but normal github.com pages still load.
+            if not releases:
+                html_headers = {
+                    "Accept": "text/html,application/xhtml+xml",
+                    "User-Agent": f"Mozilla/5.0 CharacterCardForge/{current or 'unknown'}",
+                }
+                for page_name, page_url in (
+                    ("tags_html", f"https://github.com/{owner}/{repo}/tags"),
+                    ("releases_html", f"https://github.com/{owner}/{repo}/releases"),
+                ):
+                    try:
+                        req = urllib.request.Request(page_url, headers=html_headers)
+                        started = time.time()
+                        with _safe_urlopen(req, timeout=15) as resp:
+                            status = getattr(resp, "status", None) or getattr(resp, "code", None)
+                            html = resp.read().decode("utf-8", errors="replace")
+                        tags = []
+                        for m in re.finditer(rf"/{re.escape(owner)}/{re.escape(repo)}/(?:releases/tag|tree)/([^\"'<>?#]+)", html):
+                            try:
+                                tag = urllib.parse.unquote(m.group(1))
+                            except Exception:
+                                tag = m.group(1)
+                            if tag and tag not in tags:
+                                tags.append(tag)
+                        added = remember_rows([self._release_info_from_github_html_tag(t, owner, repo) for t in tags], page_name)
+                        self._log_event("update_check_html_fallback", {
+                            "source": page_name,
+                            "url": page_url,
+                            "status": status,
+                            "bytes": len(html.encode("utf-8", errors="replace")),
+                            "elapsedMs": int((time.time() - started) * 1000),
+                            "tagsFound": len(tags),
+                            "added": added,
+                        })
+                        if releases:
+                            break
+                    except Exception as html_error:
+                        err = str(html_error)
+                        endpoint_errors.append({"source": page_name, "error": err[:500]})
+                        self._log_event("update_check_html_fallback_failed", {"source": page_name, "url": page_url, "error": err})
 
             source = "+".join(source_parts) if source_parts else "none"
             chosen, update_kind = self._select_best_update_release(current, releases)
@@ -2184,6 +2353,19 @@ class Api:
             stable_releases = [r for r in releases if r.get("version") and not r.get("prerelease") and "-" not in str(r.get("version") or "")]
             stable_releases.sort(key=lambda r: self._parse_version_for_compare(r.get("version")), reverse=True)
             latest_stable = stable_releases[0] if stable_releases else {}
+            candidates_sorted = sorted(
+                [r for r in releases if r.get("version")],
+                key=lambda r: self._parse_version_for_compare(r.get("version")),
+                reverse=True,
+            )
+            candidate_versions = []
+            for row in candidates_sorted[:12]:
+                candidate_versions.append({
+                    "version": row.get("version") or "",
+                    "tag": row.get("tag") or "",
+                    "prerelease": bool(row.get("prerelease")),
+                    "draft": bool(row.get("draft")),
+                })
 
             result = {
                 "ok": True,
@@ -2200,13 +2382,24 @@ class Api:
                 "isNewer": newer,
                 "updateKind": update_kind,
                 "source": source,
+                "candidateCount": len(releases),
+                "candidateVersions": candidate_versions,
+                "endpointErrors": endpoint_errors,
+                "versionFile": _app_version_file_path(),
                 "bodyPreview": body[:1200],
             }
-            self._log_event("update_check_complete", {k: result.get(k) for k in ("currentVersion", "currentIsPrerelease", "latestVersion", "latestStableVersion", "latestTag", "isNewer", "updateKind", "source", "releaseUrl")})
+            self._log_event("update_check_complete", {
+                k: result.get(k)
+                for k in (
+                    "currentVersion", "currentIsPrerelease", "latestVersion", "latestStableVersion",
+                    "latestTag", "isNewer", "updateKind", "source", "candidateCount", "candidateVersions",
+                    "endpointErrors", "versionFile", "releaseUrl"
+                )
+            })
             return result
         except Exception as e:
-            self._log_event("update_check_failed", {"currentVersion": current, "error": str(e)})
-            return {"ok": False, "currentVersion": current, "repositoryUrl": repo_url, "error": str(e)}
+            self._log_event("update_check_failed", {"currentVersion": current, "versionFile": _app_version_file_path(), "error": str(e)})
+            return {"ok": False, "currentVersion": current, "repositoryUrl": repo_url, "versionFile": _app_version_file_path(), "error": str(e)}
 
     def open_external_url(self, url):
         try:
@@ -3965,7 +4158,14 @@ class Api:
         lines.append("Follow the user-configured template exactly. Do not invent disabled sections.")
         lines.append("All primary characters and romantic/sexual participants must be 18+.")
         lines.append("If a source concept conflicts with the age rule, age characters up and adjust the setting.")
-        if settings.get("cardMode") == "split_cards":
+        if settings.get("cardMode") == "group_cards":
+            lines.append("CARD MODE: MULTI-CARD GROUP CARD — CURRENT PASS IS ONE MEMBER CARD ONLY.")
+            lines.append("Generate exactly one importable character card for the focused group member named in the concept instructions for this pass.")
+            lines.append("The focused character is the card's {{char}}. Do not make this member card a group/multi-character card; the group card will be assembled after member cards are generated.")
+            lines.append("Other important members from the original concept must be kept as Lorebook Entries, relationship context, background/supporting cast references, or scenario hooks so the focused member can still remember and refer to them.")
+            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, and Stable Diffusion Prompt must all focus on the focused member only.")
+            lines.append("Tags should describe the focused member/card, not the whole group, unless the Tags section is disabled.")
+        elif settings.get("cardMode") == "split_cards":
             lines.append("CARD MODE: SPLIT INTO MULTIPLE CARDS — CURRENT PASS IS ONE CHARACTER ONLY.")
             lines.append("Generate exactly one importable character card for the focused main character named in the concept instructions for this pass.")
             lines.append("The focused character is the card's {{char}}. Do not make the card a group/multi-character card.")
@@ -5183,7 +5383,7 @@ class Api:
             "Return strict JSON only: {\"characters\":[\"Name 1\",\"Name 2\"]}.",
             "Include only primary/main roleplay characters, not background-only side characters.",
             "If names are unknown, use short labels like Character 1, Character 2.",
-            f"Maximum characters: {max(2, min(12, int(merged.get('multiCharacterCount') or 2)))}",
+            f"Maximum characters: {max(2, min(4 if merged.get('cardMode') == 'group_cards' else 12, int(merged.get('multiCharacterCount') or 2)))}",
             "CONCEPT:",
             (concept or "").strip(),
         ])
@@ -5204,7 +5404,7 @@ class Api:
                 out = fallback
             if not out:
                 out = fallback
-            max_chars = max(2, min(12, int(merged.get("multiCharacterCount") or 2)))
+            max_chars = max(2, min(4 if merged.get("cardMode") == "group_cards" else 12, int(merged.get("multiCharacterCount") or 2)))
             return {"ok": True, "characters": out[:max_chars], "fallback": False, "notes": str(parsed.get("notes") or "") if isinstance(parsed, dict) else ""}
         except Exception as e:
             return {"ok": True, "characters": fallback, "fallback": True, "notes": str(e)}
@@ -6666,6 +6866,19 @@ class Api:
             "visionDescription": project.get("visionDescription") or workspace.get("visionDescription") or "",
             "conceptAttachments": project.get("conceptAttachments") or workspace.get("conceptAttachments") or [],
             "workspace": workspace,
+            # Front Porch Group Card projects keep the browser-readable summary
+            # in output, while the actual portable card lives in groupPayload /
+            # .group.png. Preserve those fields through load/export paths so a
+            # Browser Export JSON/PNG action does not accidentally convert the
+            # summary text into a normal Chara V2 card.
+            "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
+            "groupCardMode": project.get("groupCardMode") or workspace.get("groupCardMode") or "",
+            "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
+            "groupJsonPath": project.get("groupJsonPath") or workspace.get("groupJsonPath") or "",
+            "groupPayload": project.get("groupPayload") if isinstance(project.get("groupPayload"), dict) else (workspace.get("groupPayload") if isinstance(workspace.get("groupPayload"), dict) else {}),
+            "memberProjectPaths": project.get("memberProjectPaths") if isinstance(project.get("memberProjectPaths"), list) else (workspace.get("memberProjectPaths") if isinstance(workspace.get("memberProjectPaths"), list) else []),
+            "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
+            "frontend": project.get("frontend") or workspace.get("frontend") or "",
             "message": "Loaded full Character Card Forge project content. Global Settings were kept unchanged.",
         }
         # If an older saved project kept a generated-image URL as cardImagePath,
@@ -6679,9 +6892,15 @@ class Api:
                 loaded["cardImagePath"] = local_image_path
                 if isinstance(loaded.get("settings"), dict):
                     loaded["settings"]["cardImagePath"] = local_image_path
-        project_path = project.get("projectPath") or ""
+        # Prefer the actual file path used for this load. Older project JSON can
+        # contain a stale embedded projectPath, while workspace_assets are keyed
+        # by the real saved latest_ccf_project.json path.
+        project_path = str(path) if 'path' in locals() else ""
+        embedded_project_path = project.get("projectPath") or ""
         if project_path:
             loaded = self._hydrate_workspace_from_db_assets(project_path, loaded)
+        if (not loaded.get("imageDataUrl")) and embedded_project_path and embedded_project_path != project_path:
+            loaded = self._hydrate_workspace_from_db_assets(embedded_project_path, loaded)
             raw_image_path = str(loaded.get("imagePath") or "").strip()
             local_image_path = ""
             if raw_image_path:
@@ -8233,7 +8452,7 @@ class Api:
                 "lostDetailSource": lost_check.get('source') or '',
             }
         except Exception as e:
-            self._log_event("card_rating_improvement_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("card_rating_improvement_failed", {"project": str(canonical_project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not generate card improvement preview: {e}"}
 
     # CamelCase aliases for PyWebView/AppImage builds that sometimes expose or
@@ -8356,7 +8575,7 @@ class Api:
                 self._log_event("card_rating_improvement_committed", {"oldProject": str(path), "newProject": result.get("projectPath"), "preservedImage": image_path})
             return result
         except Exception as e:
-            self._log_event("card_rating_improvement_commit_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("card_rating_improvement_commit_failed", {"project": str(canonical_project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not commit improved card: {e}"}
 
     def _clean_character_tag(self, value):
@@ -8535,7 +8754,7 @@ class Api:
                         entry["tag"] = tag
                 projects.append({"path": str(project_path), "name": project.get("name") or project_path.parent.name, "tags": clean_tags})
             except Exception as e:
-                self._log_event("collect_library_tag_stats_error", {"project": str(project_path), "error": str(e)})
+                self._log_event("collect_library_tag_stats_error", {"project": str(canonical_project_path), "error": str(e)})
         return stats, projects
 
     def ai_suggest_tag_cleanup(self, settings=None):
@@ -8643,7 +8862,7 @@ class Api:
                             updated += 1
                             touched.append(str(project_path))
                 except Exception as e:
-                    self._log_event("rename_tags_project_failed", {"project": str(project_path), "error": str(e)})
+                    self._log_event("rename_tags_project_failed", {"project": str(canonical_project_path), "error": str(e)})
             return {"ok": True, "updated": updated, "projects": touched, "renameMap": clean_map}
         except Exception as e:
             return {"ok": False, "error": f"Could not rename tags: {e}"}
@@ -8776,7 +8995,7 @@ class Api:
                 "tags": project.get("tags") if isinstance(project.get("tags"), list) else [],
             }
         except Exception as e:
-            self._log_event("regenerate_browser_description_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("regenerate_browser_description_failed", {"project": str(canonical_project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not regenerate browser description: {e}"}
 
     def ensure_card_rating_details_for_project(self, project_path, settings=None):
@@ -8863,7 +9082,7 @@ class Api:
                 "projectPath": str(path),
             }
         except Exception as e:
-            self._log_event("ensure_card_rating_details_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("ensure_card_rating_details_failed", {"project": str(canonical_project_path), "error": str(e)})
             return {"ok": False, "error": f"Could not ensure card rating details: {e}"}
 
     def update_character_project_tags(self, project_path, tags):
@@ -8917,6 +9136,397 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Could not update tags: {e}"}
 
+    def _unique_character_variant_name(self, base_name, suffix="Copy"):
+        base = self._clean_character_name_value(base_name or "Character") or "Character"
+        suffix = self._clean_character_name_value(suffix or "Copy") or "Copy"
+        first = f"{base} {suffix}" if suffix.lower() not in base.lower() else base
+        candidate = first.strip()
+        n = 2
+        while (EXPORT_DIR / self._safe_slug(candidate)).exists():
+            candidate = f"{first} {n}".strip()
+            n += 1
+        return candidate
+
+    def _variation_suffix_from_instructions(self, instructions):
+        text = re.sub(r"\{\{user\}\}", "user", str(instructions or ""), flags=re.I)
+        lower = text.lower()
+        parts = []
+        m = re.search(r"\b(\d+)\s+(year|years|month|months)\s+later\b", lower)
+        if m:
+            unit = "Year" if m.group(2).startswith("year") else "Month"
+            parts.append(f"{m.group(1)} {unit}{'' if m.group(1) == '1' else 's'} Later")
+        if "married" in lower or "wife" in lower or "husband" in lower:
+            parts.append("Married Life")
+        if "university" in lower or "college" in lower:
+            parts.append("University")
+        if "high school" in lower:
+            parts.append("High School")
+        if "future" in lower and not parts:
+            parts.append("Future")
+        if "corrupt" in lower:
+            parts.append("Corrupted Route")
+        if "after" in lower and not parts:
+            parts.append("After Story")
+        if parts:
+            # Preserve order while deduping.
+            seen = set()
+            clean = []
+            for part in parts:
+                key = part.lower()
+                if key not in seen:
+                    seen.add(key)
+                    clean.append(part)
+            return " / ".join(clean)[:80]
+        words = re.findall(r"[A-Za-z0-9]+", text)
+        stop = {"make", "this", "card", "character", "variation", "set", "where", "when", "with", "from", "into", "using", "the", "and", "for", "new", "based", "years", "year", "later"}
+        useful = [w.capitalize() for w in words if w.lower() not in stop][:4]
+        return " ".join(useful)[:80] if useful else "Variation"
+
+    def _replace_name_section_for_variant(self, output, new_name):
+        text = str(output or "")
+        name = self._clean_character_name_value(new_name or "")
+        if not text.strip() or not name:
+            return text
+        try:
+            return self._replace_section_body(text, "name", name, self.template, "Name")
+        except Exception:
+            pass
+        # Fallback for cards with simple heading formatting.
+        pattern = re.compile(r"(?is)(^|\n)(\s*Name\s*\n+)(.*?)(?=\n\s*-{3,}\s*\n|\n\s*(?:Description|Personality|Scenario|First Message)\s*\n|$)")
+        if pattern.search(text):
+            return pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}{name}\n", text, count=1)
+        return f"Name\n\n{name}\n\n------------------------------------------------\n" + text.lstrip()
+
+    def _replace_path_strings_recursive(self, value, old_root, new_root):
+        old = str(old_root or "")
+        new = str(new_root or "")
+        if isinstance(value, dict):
+            return {k: self._replace_path_strings_recursive(v, old, new) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._replace_path_strings_recursive(v, old, new) for v in value]
+        if isinstance(value, str) and old and old in value:
+            return value.replace(old, new)
+        return value
+
+    def _clear_project_identity_recursive(self, value):
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                if k in {"projectPath", "workspaceProjectPath"}:
+                    out[k] = ""
+                else:
+                    out[k] = self._clear_project_identity_recursive(v)
+            return out
+        if isinstance(value, list):
+            return [self._clear_project_identity_recursive(v) for v in value]
+        return value
+
+    def duplicate_character_project(self, project_path):
+        """Create an editable duplicate project and make the browser able to group it.
+
+        The content is copied from the original, with only the card/project identity
+        made unique so later saves do not overwrite the source card.
+        """
+        try:
+            src_project = self._project_path_inside_exports(project_path)
+            src_folder = src_project.parent
+            payload = json.loads(src_project.read_text(encoding="utf-8"))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            if not isinstance(project, dict):
+                return {"ok": False, "error": "Invalid source character project."}
+            original_name = project.get("name") or self._extract_name(project.get("output") or "") or src_folder.name
+            duplicate_name = self._unique_character_variant_name(original_name, "Copy")
+            dest_folder = EXPORT_DIR / self._safe_slug(duplicate_name)
+            shutil.copytree(src_folder, dest_folder)
+            dest_project = dest_folder / "latest_ccf_project.json"
+            # Work from the copied latest file when available so sidecars and snapshots stay together.
+            if dest_project.exists():
+                payload = json.loads(dest_project.read_text(encoding="utf-8"))
+            payload = self._replace_path_strings_recursive(payload, str(src_folder), str(dest_folder))
+            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+            workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
+            output = str(project.get("output") or workspace.get("output") or "")
+            output = self._replace_name_section_for_variant(output, duplicate_name)
+            project["name"] = duplicate_name
+            project["output"] = output
+            project["projectPath"] = str(dest_project)
+            project["saved_at"] = time.strftime("%Y%m%d-%H%M%S")
+            project["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            workspace["name"] = duplicate_name
+            workspace["output"] = output
+            workspace["projectPath"] = str(dest_project)
+            workspace["workspaceProjectPath"] = str(dest_project)
+            for tab in workspace.get("characterTabs") if isinstance(workspace.get("characterTabs"), list) else []:
+                if isinstance(tab, dict):
+                    tab["name"] = duplicate_name
+                    tab["focusName"] = duplicate_name
+                    tab["output"] = output
+                    tab["fullTextOutput"] = output
+                    tab["projectPath"] = str(dest_project)
+                    tab["workspaceProjectPath"] = str(dest_project)
+            project["workspace"] = workspace
+            if isinstance(payload, dict) and payload.get("project") is not None:
+                payload["project"] = project
+                payload["version"] = self.get_app_version()
+                payload["saved_at"] = time.strftime("%Y%m%d-%H%M%S")
+            else:
+                payload = project
+            image_path = project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or workspace.get("imagePath") or ""
+            latest_card = dest_folder / f"{self._safe_slug(duplicate_name)}_latest_cardv2.png"
+            try:
+                card_payload = self._to_chara_card_v2(output, duplicate_name)
+                self._write_chara_png(latest_card, card_payload, image_path)
+                project["exportedPath"] = str(latest_card)
+                if isinstance(payload, dict) and payload.get("project") is not None:
+                    payload["project"] = project
+            except Exception as e:
+                self._log_event("duplicate_project_card_refresh_failed", {"source": str(src_project), "dest": str(dest_project), "error": str(e)})
+            try:
+                (dest_folder / "latest_output.md").write_text(output, encoding="utf-8")
+            except Exception:
+                pass
+            dest_project.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            try:
+                self._refresh_library_cache_for_project(dest_project, force=True)
+                vf = str(project.get("virtualFolderId") or workspace.get("virtualFolderId") or "").strip()
+                if vf:
+                    self._library_set_card_folder(dest_project, vf)
+            except Exception as e:
+                self._log_event("duplicate_project_library_refresh_failed", {"dest": str(dest_project), "error": str(e)})
+            self._log_event("character_project_duplicated", {"source": str(src_project), "dest": str(dest_project), "name": duplicate_name})
+            return {"ok": True, "name": duplicate_name, "projectPath": str(dest_project), "folder": str(dest_folder), "originalProjectPath": str(src_project)}
+        except Exception as e:
+            return {"ok": False, "error": f"Could not duplicate character project: {e}"}
+
+    def _variation_followup_prompt(self, original_name, suggested_name, instructions):
+        return "\n".join([
+            "Create a NEW alternate/future variation of this fictional character card from the current card.",
+            "Return the COMPLETE new card only, not a diff and not commentary.",
+            "This must be a separate route/version of the same character, suitable to save as its own card.",
+            "Preserve the character's core identity, voice, formatting, section order, and useful details unless the instructions require changing them.",
+            "Update timeline, relationship status, scenario, first message, background, sexual traits, tags, and state tracking as needed for the requested variation.",
+            f"Original card name: {original_name}",
+            f"Use this concise variation name in the Name section unless the user explicitly requested a better one: {suggested_name}",
+            "Do not mention that this is AI-generated.",
+            "",
+            "USER VARIATION INSTRUCTIONS",
+            str(instructions or "").strip(),
+        ]).strip()
+
+    def create_card_variation_from_workspace(self, workspace, instructions, settings=None):
+        try:
+            workspace = workspace or {}
+            instructions = str(instructions or "").strip()
+            if not instructions:
+                return {"ok": False, "error": "Enter variation instructions first."}
+            output = str(workspace.get("output") or "").strip()
+            if not output:
+                return {"ok": False, "error": "No card output was supplied for the variation."}
+            template = workspace.get("template") or self.template
+            concept = workspace.get("concept") or ""
+            merged_settings = self._normalise_settings({**self.settings, **(settings or workspace.get("settings") or {})})
+            original_name = self._extract_name(output) or workspace.get("name") or "Character"
+            suffix = self._variation_suffix_from_instructions(instructions)
+            suggested_name = self._unique_character_variant_name(original_name, suffix)
+            prompt = self._variation_followup_prompt(original_name, suggested_name, instructions)
+            revised = self.revise_card(output, prompt, concept, template, merged_settings)
+            if not revised.get("ok"):
+                return revised
+            new_output = str(revised.get("output") or "").strip()
+            new_name = self._extract_name(new_output) or suggested_name
+            if self._safe_slug(new_name).lower() == self._safe_slug(original_name).lower() or self._is_generic_character_name(new_name):
+                new_name = suggested_name
+                new_output = self._replace_name_section_for_variant(new_output, new_name)
+            elif (EXPORT_DIR / self._safe_slug(new_name)).exists():
+                unique_name = self._unique_character_variant_name(new_name, "Variation")
+                new_name = unique_name
+                new_output = self._replace_name_section_for_variant(new_output, new_name)
+            variation_workspace = self._clear_project_identity_recursive(json.loads(json.dumps(workspace, ensure_ascii=False)))
+            variation_workspace["name"] = new_name
+            variation_workspace["output"] = new_output
+            variation_workspace["browserDescription"] = ""
+            variation_workspace["browserDescriptionSource"] = ""
+            variation_workspace["cardRating"] = ""
+            variation_workspace["cardRatingReasoning"] = ""
+            variation_workspace["cardRatingDetails"] = []
+            variation_workspace["cardRatingSourceHash"] = ""
+            variation_workspace["template"] = template
+            variation_workspace["settings"] = merged_settings
+            tabs = variation_workspace.get("characterTabs") if isinstance(variation_workspace.get("characterTabs"), list) else []
+            if tabs:
+                for tab in tabs:
+                    if isinstance(tab, dict):
+                        tab["name"] = new_name
+                        tab["focusName"] = new_name
+                        tab["output"] = new_output
+                        tab["fullTextOutput"] = new_output
+            else:
+                variation_workspace["characterTabs"] = [{"name": new_name, "focusName": new_name, "output": new_output, "fullTextOutput": new_output, "cardImagePath": variation_workspace.get("cardImagePath") or variation_workspace.get("imagePath") or ""}]
+            saved = self.save_character_workspace(variation_workspace)
+            if not saved.get("ok"):
+                return saved
+            saved["output"] = new_output
+            saved["backupInfo"] = revised.get("backupInfo") or {}
+            saved["originalName"] = original_name
+            return saved
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create card variation: {e}"}
+
+    def create_card_variation_from_project(self, project_path, instructions, settings=None):
+        loaded = self.load_character_project(project_path)
+        if not loaded.get("ok"):
+            return loaded
+        workspace = loaded.get("workspace") if isinstance(loaded.get("workspace"), dict) else {}
+        merged = {**workspace, **loaded}
+        # Do not let the new variation save back over the source project.
+        merged = self._clear_project_identity_recursive(merged)
+        return self.create_card_variation_from_workspace(merged, instructions, settings)
+
+    def _workspace_group_payload(self, workspace):
+        """Return a valid Front Porch Group Card payload from a workspace-like dict.
+
+        Group Card browser projects have a human-readable preview in ``output``.
+        That preview must never be treated as a normal Chara V2 card on autosave
+        or export. The real portable data is the fpa_group payload.
+        """
+        if not isinstance(workspace, dict):
+            return {}
+        payload = workspace.get("groupPayload")
+        if isinstance(payload, dict) and payload.get("spec") == "front_porch_group_card":
+            return payload
+        nested = workspace.get("workspace") if isinstance(workspace.get("workspace"), dict) else {}
+        payload = nested.get("groupPayload") if isinstance(nested, dict) else None
+        if isinstance(payload, dict) and payload.get("spec") == "front_porch_group_card":
+            return payload
+        json_path = str(workspace.get("groupJsonPath") or nested.get("groupJsonPath") or "").strip()
+        if json_path and Path(json_path).exists():
+            try:
+                data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("spec") == "front_porch_group_card":
+                    return data
+            except Exception:
+                pass
+        return {}
+
+    def _save_front_porch_group_workspace(self, workspace):
+        """Autosave an opened Front Porch Group Card project without flattening it.
+
+        Normal workspace autosave writes a latest *_cardv2.png from output text.
+        For group cards, output is only a Forge preview, so this path preserves
+        groupPayload and rewrites latest .group.png/.group.json instead.
+        """
+        workspace = workspace or {}
+        payload = self._workspace_group_payload(workspace)
+        if not payload or payload.get("spec") != "front_porch_group_card":
+            return {"ok": False, "error": "This workspace is marked as a Group Card but is missing its Front Porch fpa_group payload."}
+        name = str(payload.get("name") or workspace.get("name") or self._extract_name(workspace.get("output") or "") or "Group Card").strip() or "Group Card"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        project_path_raw = str(workspace.get("projectPath") or workspace.get("workspaceProjectPath") or "").strip()
+        folder = None
+        if project_path_raw:
+            try:
+                candidate = self._project_path_inside_exports(project_path_raw)
+                if candidate and Path(candidate).exists():
+                    folder = Path(candidate).parent
+            except Exception:
+                folder = None
+        if folder is None:
+            folder = self._character_export_dir(name)
+        _safe_mkdir(folder)
+        safe = self._safe_slug(name or "group_card") or "group_card"
+
+        # Prefer the existing group image as cover, otherwise fall back to the
+        # first raw member avatar. The embedded fpa_group payload is what matters.
+        cover = str(workspace.get("groupCardPath") or workspace.get("cardImagePath") or workspace.get("imagePath") or "").strip()
+        if not cover:
+            raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+            if raw_members:
+                try:
+                    avatar_b64 = str((raw_members[0] or {}).get("avatar_base64") or "")
+                    if avatar_b64:
+                        tmp = Path(TEMP_DIR) / f"ccf_group_autosave_cover_{uuid.uuid4().hex}.png"
+                        tmp.write_bytes(base64.b64decode(avatar_b64))
+                        cover = str(tmp)
+                except Exception:
+                    cover = ""
+
+        group_png = folder / f"{safe}_latest.group.png"
+        group_json = folder / f"{safe}_latest.group.json"
+        self._write_front_porch_group_png(group_png, payload, cover)
+        group_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        output = str(workspace.get("output") or self._group_card_browser_output(payload, payload.get("raw_member_data") or [], workspace)).strip()
+        (folder / "latest_output.md").write_text(output + "\n", encoding="utf-8")
+
+        settings = self._normalise_settings(workspace.get("settings") or self.settings)
+        member_paths = workspace.get("memberProjectPaths") if isinstance(workspace.get("memberProjectPaths"), list) else []
+        group_profile = workspace.get("groupProfile") if isinstance(workspace.get("groupProfile"), dict) else {}
+        virtual_folder_id = str(workspace.get("virtualFolderId") or "").strip()
+        latest_project = folder / "latest_ccf_project.json"
+        workspace_copy = dict(workspace)
+        workspace_copy.update({
+            "name": name,
+            "output": output,
+            "settings": settings,
+            "cardImagePath": str(group_png),
+            "imagePath": str(group_png),
+            "groupCardPath": str(group_png),
+            "groupJsonPath": str(group_json),
+            "groupPayload": payload,
+            "groupProfile": group_profile,
+            "memberProjectPaths": member_paths,
+            "isGroupCard": True,
+            "groupCardMode": workspace.get("groupCardMode") or "insert",
+            "projectPath": str(latest_project),
+            "workspaceProjectPath": str(latest_project),
+        })
+        project = {
+            "format": "character-card-forge-project",
+            "version": self.get_app_version(),
+            "saved_at": stamp,
+            "project": {
+                "name": name,
+                "concept": str(workspace.get("concept") or ""),
+                "output": output,
+                "template": workspace.get("template") or self.template,
+                "settings": settings,
+                "imagePath": str(group_png),
+                "cardImagePath": str(group_png),
+                "exportedPath": str(group_png),
+                "groupCardPath": str(group_png),
+                "groupJsonPath": str(group_json),
+                "groupPayload": payload,
+                "groupProfile": group_profile,
+                "memberProjectPaths": member_paths,
+                "isGroupCard": True,
+                "groupCardMode": workspace.get("groupCardMode") or "insert",
+                "frontend": "front_porch_group",
+                "exportFormat": "fpa_group_png",
+                "browserDescription": str(workspace.get("browserDescription") or f"Front Porch group card with {len(payload.get('raw_member_data') or payload.get('members') or [])} members."),
+                "browserDescriptionSource": str(workspace.get("browserDescriptionSource") or "generated"),
+                "tags": ["group-card", "front-porch", "group-chat"],
+                "virtualFolderId": virtual_folder_id,
+                "characterTabs": workspace.get("characterTabs") if isinstance(workspace.get("characterTabs"), list) else [],
+                "conceptTabs": workspace.get("conceptTabs") if isinstance(workspace.get("conceptTabs"), list) else [],
+                "manualTabs": workspace.get("manualTabs") if isinstance(workspace.get("manualTabs"), list) else [],
+                "activeConceptTabIndex": workspace.get("activeConceptTabIndex", 0),
+                "activeManualGuideTabIndex": workspace.get("activeManualGuideTabIndex", 0),
+                "workspace": workspace_copy,
+            },
+        }
+        latest_project.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        snapshot = folder / f"{safe}_{stamp}_ccf_project.json"
+        if not snapshot.exists():
+            snapshot.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            self._refresh_library_cache_for_project(latest_project, force=True)
+            if virtual_folder_id:
+                self._library_set_card_folder(latest_project, virtual_folder_id)
+        except Exception as e:
+            self._log_event("group_workspace_cache_refresh_failed", {"project": str(latest_project), "error": str(e)})
+        self._log_event("front_porch_group_workspace_saved", {"name": name, "folder": str(folder), "project": str(latest_project)})
+        return {"ok": True, "name": name, "folder": str(folder), "projectPath": str(latest_project), "cardPath": str(group_png), "groupCard": True}
+
     def save_character_workspace(self, workspace):
         """Autosave the complete editable workspace into exports/<Character Name>/.
 
@@ -8926,6 +9536,8 @@ class Api:
         the whole route later.
         """
         workspace = workspace or {}
+        if workspace.get("isGroupCard") or self._workspace_group_payload(workspace):
+            return self._save_front_porch_group_workspace(workspace)
         output = workspace.get("output") or ""
         if not output.strip():
             return {"ok": False, "error": "Nothing to save yet. Generate or load a card first."}
@@ -9191,7 +9803,7 @@ class Api:
                 if card:
                     cards.append(card)
             except Exception as e:
-                self._log_event("character_library_card_error", {"project": str(project_path), "error": str(e)})
+                self._log_event("character_library_card_error", {"project": str(canonical_project_path), "error": str(e)})
 
         # Mark DB rows whose physical project vanished as deleted, rather than
         # showing stale cards from the cache.
@@ -9298,6 +9910,15 @@ class Api:
                 tab["imagePath"] = tab["cardImagePath"]
                 tab["projectPath"] = str(path)
                 tab["workspaceProjectPath"] = str(path)
+                if self._loaded_project_is_group_card(res):
+                    tab["isGroupCard"] = True
+                    tab["frontend"] = "front_porch_group"
+                    tab["exportFormat"] = "fpa_group_png"
+                    tab["groupCardMode"] = res.get("groupCardMode") or ""
+                    tab["groupCardPath"] = res.get("groupCardPath") or res.get("imagePath") or res.get("cardImagePath") or ""
+                    tab["groupJsonPath"] = res.get("groupJsonPath") or ""
+                    tab["groupPayload"] = res.get("groupPayload") if isinstance(res.get("groupPayload"), dict) else {}
+                    tab["memberProjectPaths"] = res.get("memberProjectPaths") if isinstance(res.get("memberProjectPaths"), list) else []
                 res["characterTabs"] = [tab]
 
             try:
@@ -9316,10 +9937,126 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Could not load character project: {e}"}
 
+    def _loaded_project_is_group_card(self, loaded):
+        if not isinstance(loaded, dict):
+            return False
+        payload = loaded.get("groupPayload") if isinstance(loaded.get("groupPayload"), dict) else {}
+        if payload.get("spec") == "front_porch_group_card":
+            return True
+        export_format = str(loaded.get("exportFormat") or "").strip().lower()
+        frontend = str(loaded.get("frontend") or "").strip().lower()
+        group_path = str(loaded.get("groupCardPath") or loaded.get("groupJsonPath") or "").strip()
+        # Be deliberately conservative. Some normal projects can carry stale
+        # browser metadata after a group-card tab was open, so don't treat a bare
+        # isGroupCard/groupCardPath truthy value as authoritative unless it is
+        # also a real fpa_group export marker.
+        return bool(
+            export_format in {"fpa_group_png", "fpa_group_json", "group_png", "group_json"}
+            or frontend == "front_porch_group"
+            or re.search(r"\.group\.(png|json)$", group_path, re.I)
+        )
+
+    def _load_group_payload_for_project(self, loaded):
+        payload = loaded.get("groupPayload") if isinstance(loaded.get("groupPayload"), dict) else {}
+        if payload.get("spec") == "front_porch_group_card":
+            return payload
+        json_path = str(loaded.get("groupJsonPath") or "").strip()
+        if json_path and Path(json_path).exists():
+            try:
+                data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return payload if isinstance(payload, dict) else {}
+
+    def _export_group_card_project(self, loaded, project_path, export_format="chara_v2_png"):
+        """Export a saved Front Porch Group Card project as .group.png/.group.json.
+
+        Group-card Browser projects store a readable summary in output so they can
+        be shown in CCF. That summary must never be converted to a normal Chara
+        V2 card during Browser Export PNG/JSON; the real artifact is the fpa_group
+        payload and its .group.png/.group.json files.
+        """
+        payload = self._load_group_payload_for_project(loaded)
+        if not isinstance(payload, dict) or payload.get("spec") != "front_porch_group_card":
+            return {"ok": False, "error": "This Group Card project is missing its Front Porch fpa_group payload."}
+        member_paths = loaded.get("memberProjectPaths") if isinstance(loaded.get("memberProjectPaths"), list) else []
+        payload = self._refresh_group_payload_member_avatars_from_projects(payload, member_paths)
+        name = str(payload.get("name") or loaded.get("name") or "Group Card").strip() or "Group Card"
+        safe = self._safe_slug(name)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        settings = self._normalise_settings({**self.settings, **(loaded.get("settings") or {})})
+        export_root = str(settings.get("exportDestinationFolder") or "").strip()
+        if export_root:
+            export_folder = Path(export_root).expanduser().resolve()
+            _safe_mkdir(export_folder)
+            if not _path_is_writable_dir(export_folder):
+                return {"ok": False, "error": "The selected export folder is not writable."}
+        else:
+            export_folder = Path(project_path).parent if project_path else self._character_export_dir(name)
+
+        fmt = str(export_format or "chara_v2_png").strip().lower()
+        if fmt in {"chara_v2_png", "png", "group_png", "fpa_group_png"}:
+            path = export_folder / f"{safe}_{stamp}.group.png"
+            source = str(loaded.get("groupCardPath") or loaded.get("imagePath") or loaded.get("cardImagePath") or "").strip()
+            try:
+                first_image = ""
+                raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+                if raw_members:
+                    try:
+                        avatar_b64 = str((raw_members[0] or {}).get("avatar_base64") or "")
+                        if avatar_b64:
+                            tmp = Path(TEMP_DIR) / f"ccf_group_export_cover_{uuid.uuid4().hex}.png"
+                            tmp.write_bytes(base64.b64decode(avatar_b64))
+                            first_image = str(tmp)
+                    except Exception:
+                        first_image = ""
+                if not first_image and source and Path(source).exists():
+                    first_image = source
+                self._write_front_porch_group_png(path, payload, first_image)
+            except Exception as e:
+                return {"ok": False, "error": f"Could not export Group Card PNG: {e}"}
+        elif fmt in {"chara_v2_json", "frontend_json", "json", "group_json", "fpa_group_json"}:
+            path = export_folder / f"{safe}_{stamp}.group.json"
+            try:
+                path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                return {"ok": False, "error": f"Could not export Group Card JSON: {e}"}
+        else:
+            path = export_folder / f"{safe}_{stamp}_group_summary.md"
+            try:
+                path.write_text(str(loaded.get("output") or self._group_card_browser_output(payload, payload.get("raw_member_data") or [])), encoding="utf-8")
+            except Exception as e:
+                return {"ok": False, "error": f"Could not export Group Card summary: {e}"}
+
+        return {
+            "ok": True,
+            "path": str(path),
+            "folder": str(export_folder),
+            "projectPath": str(project_path or loaded.get("projectPath") or ""),
+            "name": name,
+            "groupCard": True,
+            "exportFormat": "fpa_group_png" if path.suffix.lower() == ".png" else ("fpa_group_json" if path.suffix.lower() == ".json" else "markdown"),
+        }
+
     def export_character_from_project(self, project_path, export_format="chara_v2_png"):
         loaded = self.load_character_project(project_path)
         if not loaded.get("ok"):
+            self._log_event("front_porch_project_export_load_failed", {"project": str(project_path), "error": loaded.get("error")})
             return loaded
+        is_group_project = self._loaded_project_is_group_card(loaded)
+        self._log_event("front_porch_project_export_start", {
+            "project": str(project_path),
+            "target": None,
+            "isGroupProject": bool(is_group_project),
+            "frontend": loaded.get("frontend"),
+            "exportFormat": loaded.get("exportFormat"),
+            "groupCardPath": loaded.get("groupCardPath"),
+            "hasGroupPayload": isinstance(loaded.get("groupPayload"), dict) and loaded.get("groupPayload", {}).get("spec") == "front_porch_group_card",
+        })
+        if is_group_project:
+            return self._export_group_card_project(loaded, project_path, export_format or "chara_v2_png")
         return self.export_card(
             loaded.get("output") or "",
             "front_porch",
@@ -9329,6 +10066,937 @@ class Api:
             loaded.get("template") or self.template,
             loaded.get("settings") or self.settings,
         )
+
+
+    def _group_card_member_from_project(self, project_path):
+        """Build one high-fidelity Front Porch group-card member from a saved CCF project.
+
+        Front Porch's post-v30 group-card contract uses raw_member_data as the
+        fidelity source of truth. Each member needs a stable ID for export-time
+        remapping plus a complete avatar PNG that already contains a Chara V2
+        `chara` chunk.
+        """
+        loaded = self.load_character_project(project_path)
+        if not loaded.get("ok"):
+            raise ValueError(loaded.get("error") or "Could not load character project.")
+        output = str(loaded.get("output") or "").strip()
+        if not output:
+            raise ValueError("Saved project has no card output.")
+        name = self._extract_name(output) or loaded.get("name") or "Character"
+        payload = self._to_chara_card_v2(output, name)
+        data = dict(payload.get("data") or {})
+        data["name"] = name
+        data.setdefault("character_book", {"entries": []})
+        data.setdefault("world_names", [])
+        data.setdefault("alternate_greetings", [])
+        data.setdefault("tags", [])
+        data.setdefault("extensions", {})
+
+        stable_id = str(uuid.uuid4())
+
+        image_source = loaded.get("imagePath") or loaded.get("cardImagePath") or loaded.get("imageDataUrl") or loaded.get("cardImageDataUrl") or ""
+        canonical_project_path = str(project_path)
+        # Use the same robust image resolver as direct Front Porch export so
+        # group members do not fall back to blank grey avatars when a saved
+        # project only has the image in workspace_assets or an older card PNG.
+        local_image = self._resolve_front_porch_export_image(
+            image_source,
+            project_path=canonical_project_path,
+            loaded_project=loaded,
+            reason="group_card_member_avatar",
+        )
+        if not local_image:
+            # Some workspaces only surface the restored image after hydration on
+            # nested workspace/tab fields.  Search the loaded object itself as a
+            # final pre-placeholder pass.
+            for data_url in self._iter_image_data_urls_deep(loaded, limit=128):
+                candidate = self._ensure_local_card_image_path(data_url, "card", "group_card_member_avatar_loaded_deep")
+                if candidate and self._png_file_has_nonblank_visible_pixels(candidate):
+                    local_image = candidate
+                    self._log_event("group_card_member_avatar_resolved_loaded_deep", {"project": str(canonical_project_path), "name": name, "path": candidate})
+                    break
+        avatar_base64 = ""
+        try:
+            if local_image and Path(local_image).exists() and self._png_file_has_nonblank_visible_pixels(local_image):
+                img = Image.open(local_image).convert("RGBA")
+            else:
+                # Last-chance recoveries for source projects whose saved image path
+                # points at an expired temp file or an old flat placeholder.
+                recovered = self._front_porch_project_image_from_library_cache(canonical_project_path, "group_card_member_avatar_library_cache") or self._front_porch_existing_card_png_from_project(canonical_project_path, "group_card_member_avatar_existing_png")
+                if recovered and Path(recovered).exists() and self._png_file_has_nonblank_visible_pixels(recovered):
+                    img = Image.open(recovered).convert("RGBA")
+                    local_image = recovered
+                else:
+                    self._log_event("group_card_member_avatar_placeholder_used", {"project": str(canonical_project_path), "name": name, "resolvedImage": str(local_image or "")})
+                    img = Image.new("RGBA", (512, 768), (24, 24, 32, 255))
+
+            avatar_payload = {
+                "spec": payload.get("spec") or "chara_card_v2",
+                "spec_version": payload.get("spec_version") or "2.0",
+                "data": data,
+            }
+            avatar_meta = PngInfo()
+            avatar_json = json.dumps(avatar_payload, ensure_ascii=False)
+            avatar_chara = base64.b64encode(avatar_json.encode("utf-8")).decode("ascii")
+            avatar_text_chunks = {"chara": avatar_chara, "ccf_group_member_id": stable_id}
+            for k, v in avatar_text_chunks.items():
+                avatar_meta.add_text(k, v)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", pnginfo=avatar_meta)
+            avatar_bytes = self._png_bytes_with_text_chunks(buf.getvalue(), avatar_text_chunks)
+            avatar_base64 = base64.b64encode(avatar_bytes).decode("ascii")
+        except Exception as e:
+            self._log_event("group_card_avatar_encode_failed", {"project": str(canonical_project_path), "error": str(e)})
+
+        data["avatar_base64"] = avatar_base64
+        data["_original_stable_id"] = stable_id
+        return {"projectPath": str(project_path), "name": name, "output": output, "stableId": stable_id, "data": data}
+
+    def _group_card_realism_payloads(self, members):
+        """Build Front Porch-style group realism seed payloads.
+
+        A Front Porch-exported group card (post-v30/v33) uses a slightly mixed
+        compatibility shape:
+        - baseline_realism_state: JSON string containing a flat stableId -> state map.
+        - default_member_realism_state: JSON string containing {"perChar": {...}}.
+        - realism_state / extensions.realism_state: flat stableId -> state map.
+        - extensions.default_member_realism_state: object containing {"perChar": {...}}.
+
+        Keep this aligned with actual Front Porch group exports rather than the
+        earlier draft-only all-in-one perChar state object.
+        """
+        clean = []
+        for member in members or []:
+            if isinstance(member, dict):
+                data = member.get("data") if isinstance(member.get("data"), dict) else {}
+                sid = str(member.get("stableId") or data.get("_original_stable_id") or "").strip()
+                name = str(member.get("name") or data.get("name") or "Character").strip() or "Character"
+            else:
+                sid = ""
+                name = str(member or "Character").strip() or "Character"
+            if sid:
+                clean.append((sid, name))
+
+        baseline = {}
+        per_char = {}
+        for sid, name in clean:
+            baseline[sid] = {
+                "affection": 35,
+                "trust": 40,
+                "emotion": "neutral",
+                "emotionIntensity": "mild",
+                "timeOfDay": "morning",
+                "dayCount": 1,
+            }
+            per_char[sid] = {
+                "affection": 35,
+                "trust": 40,
+                "emotion": "neutral",
+                "emotionIntensity": "mild",
+                "timeOfDay": "morning",
+                "dayCount": 1,
+                "needs": {
+                    "hunger": 70,
+                    "thirst": 75,
+                    "rest": 65,
+                    "social": 60,
+                    "hygiene": 80,
+                    "bladder": 85,
+                },
+                "enjoysLowHygiene": False,
+                "relationships": {},
+            }
+        default_state = {"perChar": per_char}
+        return {
+            "baseline": baseline,
+            "default": default_state,
+            "realism": copy.deepcopy(baseline),
+        }
+
+    def _group_card_default_realism_state(self, members):
+        """Backward-compatible helper: return the default_member_realism_state object."""
+        return self._group_card_realism_payloads(members).get("default", {"perChar": {}})
+
+    def _group_card_ai_prompt(self, members, options):
+        summaries = []
+        for member in members:
+            data = member.get("data") or {}
+            book = data.get("character_book") if isinstance(data.get("character_book"), dict) else {}
+            lore_entries = []
+            for entry in book.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                lore_entries.append({
+                    "name": entry.get("name") or entry.get("key") or "",
+                    "keys": entry.get("keys") or entry.get("key") or [],
+                    "content": str(entry.get("content") or "")[:1000],
+                })
+                if len(lore_entries) >= 4:
+                    break
+            summaries.append({
+                "name": data.get("name") or member.get("name"),
+                "description": str(data.get("description") or "")[:2200],
+                "personality": str(data.get("personality") or "")[:3600],
+                "scenario": str(data.get("scenario") or "")[:1600],
+                "first_mes": str(data.get("first_mes") or "")[:1600],
+                "alternate_greetings": [str(x)[:900] for x in (data.get("alternate_greetings") or [])[:2]],
+                "example_dialogue": str(data.get("mes_example") or "")[:1600],
+                "lorebook_entries": lore_entries,
+                "tags": data.get("tags") or [],
+            })
+        return "\n".join([
+            "Create high-quality shared Front Porch group setup fields for these existing character cards.",
+            "Return STRICT JSON only. No markdown. No comments outside JSON.",
+            "Required JSON keys: name, group_overview, group_dynamic, member_roles, scenario, first_message, system_prompt, tags.",
+            "member_roles must be an object whose keys are character names and whose values are concise role/dynamic notes.",
+            "tags must be an array of short lowercase tags for Forge's preview only.",
+            "Do not rewrite, merge, or flatten the individual member cards. Each member card remains separate in members[] and raw_member_data[].",
+            "Do not create a fake Chara V2 character description/personality for the group itself. Front Porch group cards store shared scene fields at the group root and character fields on each member.",
+            "group_overview is only a Forge preview note for the group premise. It is not a character description and must not describe the group as if it were one character.",
+            "Your job is to write polished shared group fields: scenario, first message, group system prompt, relationship/dynamic notes, and optional preview overview.",
+            "Avoid generic filler such as 'created by Character Card Forge', 'each character keeps their own personality', or bland member lists.",
+            "Scenario should be the shared starting situation, not a copy-paste list of each member's solo scenario.",
+            "First_message should be a strong group opening scene with multiple members present, clear body language, and at least one character speaking.",
+            "System_prompt should give Front Porch strong group-running instructions: voice separation, attribution, turn handling, relationship dynamics, and what not to collapse.",
+            "Preserve canon facts from the member cards. If user instructions conflict with source cards, preserve source-card facts unless the instruction is clearly a route/timeline framing.",
+            "Use {{user}} exactly, never {user}.",
+            "",
+            "USER GROUP INSTRUCTIONS",
+            str(options.get("aiInstructions") or "").strip() or "Create a polished, emotionally specific shared group setup for these characters.",
+            "",
+            "REQUESTED GROUP NAME",
+            str(options.get("name") or "").strip() or "(AI may choose)",
+            "",
+            "MEMBER CARD SUMMARIES",
+            json.dumps(summaries, ensure_ascii=False, indent=2),
+        ]).strip()
+
+    def _build_group_card_fields_direct(self, members, options):
+        names = [m.get("name") or (m.get("data") or {}).get("name") or "Character" for m in members]
+        group_name = str(options.get("name") or "").strip() or " & ".join(names)
+        scenario = str(options.get("scenario") or "").strip()
+        if not scenario:
+            group_subject = (', '.join(names[:-1]) + (' and ' if len(names) > 1 else '') + names[-1]) if names else 'the group'
+            parts = [f"{{{{user}}}} is with {group_subject} in a shared group-card scene. Each character keeps their own personality, memory, and role while reacting naturally to both {{{{user}}}} and the other members."]
+            for member in members:
+                data = member.get("data") or {}
+                member_scenario = str(data.get("scenario") or "").strip()
+                if member_scenario:
+                    parts.append(f"{data.get('name') or member.get('name')}: {member_scenario}")
+            notes = str(options.get("aiInstructions") or "").strip()
+            if notes:
+                parts.append(f"Group notes: {notes}")
+            scenario = "\n\n".join(parts).strip()
+        first_message = str(options.get("firstMessage") or "").strip()
+        if not first_message:
+            first_message = f"*{group_name} begins with {', '.join(names)} together with {{{{user}}}}. Each character carries their own history, mood, and desires into the scene, waiting for {{{{user}}}} to speak first.*"
+        system_prompt = str(options.get("systemPrompt") or "").strip()
+        if not system_prompt:
+            system_prompt = "This is a Front Porch group card. Keep each member distinct, preserve their original card traits, and make sure dialogue/action attribution remains clear."
+        group_overview_lines = [
+            f"Shared Front Porch group setup for {', '.join(names)}.",
+            "This is a Forge preview note only; the actual character descriptions and personalities remain on each member card.",
+        ]
+        tags = sorted({"group-card", "front-porch", "group-chat", *[str(t).strip().lower() for member in members for t in ((member.get("data") or {}).get("tags") or []) if str(t).strip()]})[:24]
+        return {
+            "name": group_name,
+            "group_overview": "\n".join(group_overview_lines).strip(),
+            "group_dynamic": "",
+            "member_roles": {},
+            "scenario": scenario,
+            "first_message": first_message,
+            "system_prompt": system_prompt,
+            "tags": tags or ["group-card", "front-porch", "group-chat"],
+        }
+
+    def _clean_group_card_ai_tags(self, value):
+        tags = []
+        if isinstance(value, list):
+            source = value
+        elif isinstance(value, str):
+            source = re.split(r"[,\n]", value)
+        else:
+            source = []
+        seen = set()
+        for raw in source:
+            tag = re.sub(r"\s+", "-", str(raw or "").strip().lower())
+            tag = re.sub(r"[^a-z0-9_\-]+", "", tag)
+            if not tag or tag in seen:
+                continue
+            seen.add(tag)
+            tags.append(tag[:40])
+            if len(tags) >= 24:
+                break
+        return tags
+
+    def _build_group_card_fields_ai(self, members, options, settings):
+        merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        check = self._validate_text_api_settings(merged_settings)
+        if not check.get("ok"):
+            raise ValueError(check.get("error") or "AI settings are incomplete.")
+        prompt = self._group_card_ai_prompt(members, options)
+        ctx = self._context_check(prompt, merged_settings, mode_label="Group Card AI combine")
+        if not ctx.get("ok"):
+            raise ValueError(ctx.get("error") or "Group Card AI prompt exceeds context window.")
+        # This is an internal JSON-only combine pass.  Do not stream it into
+        # the visible Full Text Output box: during Concept → Group Card
+        # generation the active tab is usually member 1, so streaming here can
+        # overwrite/corrupt that member card with the group wrapper JSON.
+        raw = self._chat(prompt, {**merged_settings, "_streamTarget": ""})
+        data = self._loads_model_json(raw)
+        if not isinstance(data, dict):
+            raise ValueError("AI did not return a JSON object.")
+        direct = self._build_group_card_fields_direct(members, options)
+        member_roles = data.get("member_roles") or data.get("memberRoles") or {}
+        if not isinstance(member_roles, dict):
+            member_roles = {}
+        clean_roles = {}
+        for key, value in member_roles.items():
+            name = str(key or "").strip()
+            note = str(value or "").strip()
+            if name and note:
+                clean_roles[name[:120]] = note
+        tags = self._clean_group_card_ai_tags(data.get("tags"))
+        if not tags:
+            tags = direct.get("tags") or ["group-card", "front-porch", "group-chat"]
+        return {
+            "name": str(data.get("name") or direct["name"]).strip()[:180] or direct["name"],
+            "group_overview": str(data.get("group_overview") or data.get("groupOverview") or data.get("description") or direct.get("group_overview") or "").strip() or direct.get("group_overview", ""),
+            "group_dynamic": str(data.get("group_dynamic") or data.get("groupDynamic") or "").strip(),
+            "member_roles": clean_roles,
+            "scenario": str(data.get("scenario") or direct["scenario"]).strip() or direct["scenario"],
+            "first_message": str(data.get("first_message") or data.get("firstMessage") or direct["first_message"]).strip() or direct["first_message"],
+            "system_prompt": str(data.get("system_prompt") or data.get("systemPrompt") or direct["system_prompt"]).strip() or direct["system_prompt"],
+            "tags": tags,
+        }
+
+    def _refresh_group_payload_member_avatars_from_projects(self, payload, member_project_paths=None):
+        """Repair group-member avatar_base64 values using source member projects.
+
+        Existing beta builds could preserve a flat placeholder avatar because the
+        payload already had *some* PNG bytes.  For Front Porch import/export we
+        need actual visible member art, so always try to refresh from source
+        projects when available and only keep the current avatar if it is real.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+        if not raw_members:
+            return payload
+        paths = [str(p or "").strip() for p in (member_project_paths or []) if str(p or "").strip()]
+        if not paths:
+            # Last-resort recovery for older group projects that lost their
+            # memberProjectPaths: find saved CCF cards by member name in exports.
+            try:
+                name_to_project = {}
+                for proj in EXPORT_DIR.glob("*/latest_ccf_project.json"):
+                    try:
+                        data = json.loads(proj.read_text(encoding="utf-8"))
+                        pr = data.get("project", data) if isinstance(data, dict) else {}
+                        if not isinstance(pr, dict) or self._loaded_project_is_group_card(pr):
+                            continue
+                        n = str(pr.get("name") or self._extract_name(pr.get("output") or "") or "").strip().lower()
+                        if n and n not in name_to_project:
+                            name_to_project[n] = str(proj)
+                    except Exception:
+                        continue
+                for raw in raw_members:
+                    n = str((raw or {}).get("name") or "").strip().lower()
+                    paths.append(name_to_project.get(n, ""))
+                paths = [p for p in paths if p]
+            except Exception:
+                paths = []
+        updated = copy.deepcopy(payload)
+        updated_raw = []
+        changed = False
+        for idx, raw in enumerate(raw_members):
+            item = copy.deepcopy(raw if isinstance(raw, dict) else {})
+            current_avatar = str(item.get("avatar_base64") or "")
+            current_real = self._avatar_base64_has_nonblank_visible_pixels(current_avatar)
+            fresh_avatar = ""
+            if idx < len(paths):
+                try:
+                    fresh = self._group_card_member_from_project(self._project_path_inside_exports(paths[idx]))
+                    fresh_data = fresh.get("data") if isinstance(fresh, dict) else {}
+                    fresh_avatar = str((fresh_data or {}).get("avatar_base64") or "")
+                    self._log_event("group_payload_avatar_refresh_attempt", {
+                        "index": idx,
+                        "member": item.get("name"),
+                        "project": paths[idx],
+                        "currentBytes": len(current_avatar),
+                        "currentReal": bool(current_real),
+                        "freshBytes": len(fresh_avatar),
+                        "freshReal": bool(self._avatar_base64_has_nonblank_visible_pixels(fresh_avatar)),
+                    })
+                except Exception as e:
+                    self._log_event("group_payload_avatar_refresh_failed", {"index": idx, "project": paths[idx] if idx < len(paths) else "", "error": str(e)})
+            if fresh_avatar and self._avatar_base64_has_nonblank_visible_pixels(fresh_avatar):
+                if fresh_avatar != current_avatar:
+                    item["avatar_base64"] = fresh_avatar
+                    changed = True
+            elif not current_real:
+                self._log_event("group_payload_avatar_still_placeholder", {"index": idx, "member": item.get("name"), "project": paths[idx] if idx < len(paths) else "", "currentBytes": len(current_avatar), "freshBytes": len(fresh_avatar)})
+            updated_raw.append(item)
+        if changed:
+            updated["raw_member_data"] = updated_raw
+            if isinstance(updated.get("members"), list):
+                display_keys = [
+                    "name", "description", "personality", "scenario", "first_mes",
+                    "mes_example", "creator_notes", "system_prompt",
+                    "post_history_instructions", "alternate_greetings", "tags",
+                    "creator", "character_version", "character_book", "world_names", "extensions",
+                ]
+                display = []
+                for raw in updated_raw:
+                    minimal = {k: copy.deepcopy(raw.get(k)) for k in display_keys if isinstance(raw, dict) and k in raw}
+                    if isinstance(minimal.get("extensions"), dict):
+                        ext = dict(minimal["extensions"])
+                        ext.pop("raw_card", None)
+                        minimal["extensions"] = ext
+                    display.append(minimal)
+                updated["members"] = display
+        return updated
+
+    def _ensure_group_payload_avatar_chunks(self, payload, reason="group_payload_avatar_chunks"):
+        """Return a copy of a Front Porch Group Card payload whose raw member avatars
+        are complete PNGs with embedded Chara V2 metadata.
+
+        This is separate from the direct-DB avatar writer because .group.png export
+        and browser-project sidecars must also carry full-fidelity avatars in
+        raw_member_data[].avatar_base64. Front Porch's importer treats that field as
+        the source of truth for materialising private group member avatar files.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+        if not raw_members:
+            return payload
+        updated = copy.deepcopy(payload)
+        updated_raw = []
+        changed = False
+        for idx, raw in enumerate(raw_members):
+            item = copy.deepcopy(raw if isinstance(raw, dict) else {})
+            avatar_b64 = str(item.get("avatar_base64") or "").strip()
+            stable_id = str(item.get("_original_stable_id") or item.get("id") or item.get("name") or f"member_{idx+1}").strip()
+            before_len = len(avatar_b64)
+            before_keys = []
+            after_keys = []
+            ok = False
+            try:
+                png_bytes = base64.b64decode(avatar_b64) if avatar_b64 else b""
+                if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                    # Full Chara V2 payload for this member. Do not include the
+                    # transport-only avatar_base64 field inside the embedded chara.
+                    embedded_data = copy.deepcopy(item)
+                    embedded_data.pop("avatar_base64", None)
+                    embedded_data.pop("_original_stable_id", None)
+                    chara_payload = {"spec": "chara_card_v2", "spec_version": "2.0", "data": embedded_data}
+                    chara_text = base64.b64encode(json.dumps(chara_payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                    before_keys = self._png_text_chunk_keys_from_bytes(png_bytes)
+                    text_chunks = {"chara": chara_text, "ccf_group_member_id": stable_id}
+                    new_bytes = self._png_bytes_with_text_chunks(png_bytes, text_chunks)
+                    after_keys = self._png_text_chunk_keys_from_bytes(new_bytes)
+                    if new_bytes != png_bytes:
+                        item["avatar_base64"] = base64.b64encode(new_bytes).decode("ascii")
+                        changed = True
+                    ok = "chara" in after_keys
+            except Exception as e:
+                self._log_event("group_payload_avatar_chunk_ensure_failed", {"reason": reason, "index": idx, "member": item.get("name"), "error": str(e), "beforeBytes": before_len})
+            self._log_event("group_payload_avatar_chunk_ensure", {
+                "reason": reason,
+                "index": idx,
+                "member": item.get("name"),
+                "stableId": stable_id,
+                "beforeBytes": before_len,
+                "afterBytes": len(str(item.get("avatar_base64") or "")),
+                "beforeKeys": before_keys[:20],
+                "afterKeys": after_keys[:20],
+                "hasChara": bool(ok),
+                "real": bool(self._avatar_base64_has_nonblank_visible_pixels(str(item.get("avatar_base64") or ""))),
+            })
+            updated_raw.append(item)
+        updated["raw_member_data"] = updated_raw
+        if changed and isinstance(updated.get("members"), list):
+            display_keys = [
+                "name", "description", "personality", "scenario", "first_mes",
+                "mes_example", "creator_notes", "system_prompt",
+                "post_history_instructions", "alternate_greetings", "tags",
+                "creator", "character_version", "character_book", "world_names", "extensions",
+            ]
+            display = []
+            for raw in updated_raw:
+                minimal = {k: copy.deepcopy(raw.get(k)) for k in display_keys if isinstance(raw, dict) and k in raw}
+                if isinstance(minimal.get("extensions"), dict):
+                    ext = dict(minimal["extensions"])
+                    ext.pop("raw_card", None)
+                    minimal["extensions"] = ext
+                display.append(minimal)
+            updated["members"] = display
+        return updated
+
+    def _png_text_chunk_keys_from_bytes(self, data):
+        try:
+            data = bytes(data or b"")
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                return []
+            pos = 8
+            keys = []
+            while pos + 8 <= len(data):
+                length = struct.unpack(">I", data[pos:pos+4])[0]
+                ctype = data[pos+4:pos+8]
+                chunk = data[pos+8:pos+8+length]
+                pos += 12 + length
+                if ctype in (b"tEXt", b"zTXt", b"iTXt") and b"\x00" in chunk:
+                    keys.append(chunk.split(b"\x00", 1)[0].decode("utf-8", "replace"))
+                if ctype == b"IEND":
+                    break
+            return keys[:40]
+        except Exception:
+            return []
+
+    def _write_front_porch_group_png(self, path, payload, cover_image_path=""):
+        payload = self._ensure_group_payload_avatar_chunks(payload, reason="write_front_porch_group_png")
+        source = str(cover_image_path or "").strip()
+        local_source = self._ensure_local_card_image_path(source, "card", "write_group_card_png") if source else ""
+        if local_source and Path(local_source).exists():
+            img = Image.open(local_source).convert("RGBA")
+        else:
+            img = Image.new("RGBA", (512, 768), (24, 24, 32, 255))
+        metadata = PngInfo()
+        # Front Porch group-card convention: private fpa_group text chunk whose
+        # value is base64(UTF-8 JSON). Normal character-card tools ignore it.
+        json_text = json.dumps(payload, ensure_ascii=False)
+        text_chunks = {
+            "fpa_group": base64.b64encode(json_text.encode("utf-8")).decode("ascii"),
+            "ccf_group_summary": json.dumps({
+                "name": payload.get("name"),
+                "memberCount": len(payload.get("raw_member_data") or payload.get("members") or []),
+                "createdBy": "Character Card Forge",
+            }, ensure_ascii=True),
+        }
+        for k, v in text_chunks.items():
+            metadata.add_text(k, v)
+        img.save(path, "PNG", pnginfo=metadata)
+        self._ensure_png_text_chunks(path, text_chunks, log_reason="write_front_porch_group_png")
+
+    def _group_card_browser_output(self, payload, members, options=None):
+        """Build a readable CCF preview for a Front Porch Group Card project.
+
+        The portable data lives in the embedded fpa_group payload. The preview is
+        not a fake Chara V2 root card: shared group fields appear first, then each
+        member card is shown with its own character fields. This makes Full Text
+        Output useful for inspection while keeping export routed through fpa_group.
+        """
+        options = options if isinstance(options, dict) else {}
+        payload = payload if isinstance(payload, dict) else {}
+        name = str(payload.get("name") or "Group Card").strip() or "Group Card"
+
+        ext = payload.get("extensions") if isinstance(payload.get("extensions"), dict) else {}
+        ccf_ext = ext.get("character_card_forge") if isinstance(ext.get("character_card_forge"), dict) else {}
+        profile = ccf_ext.get("group_profile") if isinstance(ccf_ext.get("group_profile"), dict) else {}
+        if not profile and isinstance(options.get("groupProfile"), dict):
+            profile = options.get("groupProfile")
+
+        # Prefer high-fidelity raw_member_data for preview. Fall back to the
+        # caller's member wrappers or the lighter members[] array.
+        raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+        if not raw_members:
+            for member in members or []:
+                if isinstance(member, dict):
+                    data = member.get("data") if isinstance(member.get("data"), dict) else member
+                    if isinstance(data, dict):
+                        raw_members.append(data)
+        if not raw_members and isinstance(payload.get("members"), list):
+            raw_members = [m for m in payload.get("members") or [] if isinstance(m, dict)]
+
+        member_names = [str((m or {}).get("name") or "Character").strip() or "Character" for m in raw_members]
+        member_list = "\n".join(f"- Member {idx}: {member_name}" for idx, member_name in enumerate(member_names, start=1))
+        group_overview = str(profile.get("group_overview") or profile.get("description") or payload.get("description") or "").strip()
+        if not group_overview:
+            group_overview = "Member cards are preserved separately. This Forge preview shows the shared group setup followed by each embedded member card."
+
+        lines = [
+            "Name",
+            "",
+            name,
+            "",
+            "------------------------------------------------",
+            "Members",
+            "",
+            member_list or "- No members found in preview metadata.",
+            "",
+            "------------------------------------------------",
+            "Group Overview",
+            "",
+            group_overview,
+        ]
+
+        group_dynamic = str(profile.get("group_dynamic") or payload.get("group_dynamic") or payload.get("groupDynamic") or "").strip()
+        if group_dynamic:
+            lines.extend(["", "------------------------------------------------", "Group Dynamic", "", group_dynamic])
+
+        member_roles = profile.get("member_roles") or payload.get("member_roles") or payload.get("memberRoles") or {}
+        if isinstance(member_roles, dict) and member_roles:
+            lines.extend(["", "------------------------------------------------", "Member Roles", ""])
+            for role_name, role_text in member_roles.items():
+                role_name = str(role_name or "Character").strip() or "Character"
+                role_text = str(role_text or "").strip()
+                if role_text:
+                    lines.append(f"- {role_name}: {role_text}")
+
+        lines.extend([
+            "",
+            "------------------------------------------------",
+            "Group Scenario",
+            "",
+            str(payload.get("scenario") or "").strip() or "Shared group scenario is stored in the embedded Front Porch fpa_group data.",
+            "",
+            "------------------------------------------------",
+            "Group First Message",
+            "",
+            str(payload.get("first_message") or "").strip() or "Shared group opening is stored in the embedded Front Porch fpa_group data.",
+            "",
+            "------------------------------------------------",
+            "Group Settings",
+            "",
+            f"- Turn Order: {payload.get('turn_order') or 'roundRobin'}",
+            f"- Auto Advance: {'Yes' if payload.get('auto_advance') else 'No'}",
+            f"- Director Mode: {'Yes' if payload.get('director_mode') else 'No'}",
+            f"- Member Count: {len(member_names)}",
+        ])
+        notes = str(options.get("groupInstructions") or options.get("aiInstructions") or "").strip()
+        if notes:
+            lines.append("- Notes: " + notes)
+        system_prompt = str(payload.get("system_prompt") or "").strip()
+        if system_prompt:
+            lines.extend(["", "------------------------------------------------", "Group System Prompt", "", system_prompt])
+        tags = profile.get("tags") if isinstance(profile.get("tags"), list) else payload.get("tags")
+        if isinstance(tags, list):
+            tag_line = ", ".join(str(t).strip() for t in tags if str(t).strip())
+        else:
+            tag_line = str(tags or "").strip()
+        if not tag_line:
+            tag_line = "group-card, front-porch, group-chat"
+        lines.extend(["", "------------------------------------------------", "Group Tags", tag_line])
+
+        def add_member_section(title, value):
+            text = str(value or "").strip()
+            if text:
+                lines.extend(["", title, "", text])
+
+        def json_text(value):
+            try:
+                if value in (None, "", [], {}):
+                    return ""
+                return json.dumps(value, indent=2, ensure_ascii=False)
+            except Exception:
+                return str(value or "")
+
+        if raw_members:
+            lines.extend(["", "================================================", "Embedded Member Cards", "================================================"])
+            for idx, member in enumerate(raw_members, start=1):
+                if not isinstance(member, dict):
+                    continue
+                member_name = str(member.get("name") or f"Member {idx}").strip() or f"Member {idx}"
+                lines.extend(["", "------------------------------------------------", f"Member {idx}: {member_name}", "------------------------------------------------"])
+                add_member_section("Description", member.get("description"))
+                add_member_section("Personality", member.get("personality"))
+                add_member_section("Scenario", member.get("scenario"))
+                add_member_section("First Message", member.get("first_mes") or member.get("first_message"))
+                alts = member.get("alternate_greetings") or []
+                if isinstance(alts, list) and alts:
+                    alt_lines = []
+                    for alt_i, alt in enumerate(alts, start=1):
+                        alt_text = str(alt or "").strip()
+                        if alt_text:
+                            alt_lines.append(f"Alternative First Message {alt_i}\n{alt_text}")
+                    add_member_section("Alternative First Messages", "\n\n".join(alt_lines))
+                add_member_section("Example Dialogues", member.get("mes_example"))
+                add_member_section("System Prompt", member.get("system_prompt"))
+                add_member_section("Post-History Instructions", member.get("post_history_instructions"))
+                book = member.get("character_book")
+                entries = (book or {}).get("entries") if isinstance(book, dict) else []
+                if entries:
+                    lore_lines = []
+                    for entry_i, entry in enumerate(entries, start=1):
+                        if not isinstance(entry, dict):
+                            continue
+                        entry_name = str(entry.get("name") or entry.get("key") or f"Entry {entry_i}").strip()
+                        keys = entry.get("keys") or entry.get("key") or []
+                        keys_text = ", ".join(keys) if isinstance(keys, list) else str(keys or "")
+                        content = str(entry.get("content") or "").strip()
+                        lore_lines.append(f"Name: {entry_name}\nKey(s): {keys_text}\nContent: {content}".strip())
+                    add_member_section("Lorebook Entries", "\n\n".join(lore_lines))
+                member_tags = member.get("tags") or []
+                if isinstance(member_tags, list):
+                    add_member_section("Tags", ", ".join(str(t).strip() for t in member_tags if str(t).strip()))
+                else:
+                    add_member_section("Tags", member_tags)
+                world_names = member.get("world_names") or []
+                if world_names:
+                    add_member_section("World Names", json_text(world_names))
+                # Surface Forge/Front Porch text extras that are useful in the editor,
+                # but intentionally omit avatar_base64 to avoid dumping megabytes of PNG.
+                ext = member.get("extensions") if isinstance(member.get("extensions"), dict) else {}
+                if isinstance(ext, dict):
+                    add_member_section("Background", ext.get("background"))
+                    add_member_section("Sexual Traits", ext.get("sexual_traits"))
+                    add_member_section("State Tracking", ext.get("state_tracking_raw"))
+                    fp = ext.get("front_porch")
+                    if isinstance(fp, dict):
+                        add_member_section("Front Porch Extensions", json_text(fp))
+
+        return "\n".join(lines).strip() + "\n"
+
+    def _save_group_card_browser_project(self, folder, payload, group_png_path, group_json_path, members, clean_paths, options=None, mode="insert"):
+        """Create a Browser-visible CCF project for a generated Front Porch Group Card."""
+        options = options if isinstance(options, dict) else {}
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        name = str(payload.get("name") or "Group Card").strip() or "Group Card"
+        output = self._group_card_browser_output(payload, members, options)
+        latest_project = Path(folder) / "latest_ccf_project.json"
+        latest_output = Path(folder) / "latest_output.md"
+        latest_output.write_text(output, encoding="utf-8")
+        settings = self._normalise_settings(options.get("settings") or self.settings)
+        member_paths = [str(p) for p in clean_paths or []]
+        group_profile = options.get("groupProfile") if isinstance(options.get("groupProfile"), dict) else {}
+        if not group_profile:
+            ext = payload.get("extensions") if isinstance(payload.get("extensions"), dict) else {}
+            ccf_ext = ext.get("character_card_forge") if isinstance(ext.get("character_card_forge"), dict) else {}
+            group_profile = ccf_ext.get("group_profile") if isinstance(ccf_ext.get("group_profile"), dict) else {}
+        workspace = {
+            "name": name,
+            "output": output,
+            "settings": settings,
+            "cardImagePath": str(group_png_path or ""),
+            "imagePath": str(group_png_path or ""),
+            "groupCardPath": str(group_png_path or ""),
+            "groupJsonPath": str(group_json_path or ""),
+            "groupPayload": payload,
+            "groupProfile": group_profile,
+            "memberProjectPaths": member_paths,
+            "isGroupCard": True,
+            "groupCardMode": mode,
+        }
+        project = {
+            "format": "character-card-forge-project",
+            "version": self.get_app_version(),
+            "saved_at": stamp,
+            "project": {
+                "name": name,
+                "concept": str(options.get("aiInstructions") or options.get("groupInstructions") or ""),
+                "output": output,
+                "template": self.template,
+                "settings": settings,
+                "imagePath": str(group_png_path or ""),
+                "cardImagePath": str(group_png_path or ""),
+                "exportedPath": str(group_png_path or ""),
+                "groupCardPath": str(group_png_path or ""),
+                "groupJsonPath": str(group_json_path or ""),
+                "groupPayload": payload,
+                "groupProfile": group_profile,
+                "memberProjectPaths": member_paths,
+                "isGroupCard": True,
+                "frontend": "front_porch_group",
+                "exportFormat": "fpa_group_png",
+                "browserDescription": f"Front Porch group card with {len(member_paths)} member{'s' if len(member_paths) != 1 else ''}.",
+                "browserDescriptionSource": "generated",
+                "tags": ["group-card", "front-porch", "group-chat"],
+                "workspace": workspace,
+            },
+        }
+        latest_project.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        snapshot = Path(folder) / f"{self._safe_slug(name)}_{stamp}_ccf_project.json"
+        snapshot.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            self._refresh_library_cache_for_project(latest_project, force=True)
+        except Exception as e:
+            self._log_event("group_card_browser_project_cache_failed", {"project": str(latest_project), "error": str(e)})
+        return str(latest_project)
+
+    def export_group_card_from_projects(self, project_paths, options=None, settings=None):
+        """Create a Front Porch .group.png from 2-4 saved CCF cards."""
+        try:
+            options = options if isinstance(options, dict) else {}
+            clean_paths = []
+            for raw in project_paths or []:
+                path = str(raw or "").strip()
+                if path and path not in clean_paths:
+                    clean_paths.append(path)
+            if len(clean_paths) < 2:
+                return {"ok": False, "error": "Select at least two cards for a group card."}
+            if len(clean_paths) > 4:
+                return {"ok": False, "error": "Front Porch group cards currently support a maximum of 4 members."}
+
+            members = [self._group_card_member_from_project(self._project_path_inside_exports(path)) for path in clean_paths]
+            mode = str(options.get("mode") or "insert").strip().lower()
+            if mode == "ai":
+                fields = self._build_group_card_fields_ai(members, options, settings or {})
+            else:
+                fields = self._build_group_card_fields_direct(members, options)
+
+            raw_member_data = [dict(m.get("data") or {}) for m in members]
+            member_names = [m.get("name") or (m.get("data") or {}).get("name") or "Character" for m in members]
+            stable_ids = [m.get("stableId") or (m.get("data") or {}).get("_original_stable_id") for m in members]
+
+            # The display member list should remain a normal per-character
+            # card-shaped object. Each member keeps its own description,
+            # personality, scenario, etc. raw_member_data is the high-fidelity
+            # source and additionally carries avatar_base64/_original_stable_id.
+            display_member_keys = [
+                "name", "description", "personality", "scenario", "first_mes",
+                "mes_example", "creator_notes", "system_prompt",
+                "post_history_instructions", "alternate_greetings", "tags",
+                "creator", "character_version", "character_book", "world_names",
+                "extensions",
+            ]
+            display_members = []
+            for raw in raw_member_data:
+                minimal = {k: copy.deepcopy(raw.get(k)) for k in display_member_keys if k in raw}
+                if isinstance(minimal.get("extensions"), dict):
+                    # Keep display members readable/light; raw_member_data keeps
+                    # the complete original extensions payload.
+                    ext = dict(minimal["extensions"])
+                    ext.pop("raw_card", None)
+                    minimal["extensions"] = ext
+                display_members.append(minimal)
+
+            include_realism = bool(options.get("includeRealismState"))
+            realism_payloads = self._group_card_realism_payloads(members) if include_realism else {"baseline": {}, "default": {}, "realism": {}}
+            baseline_realism = realism_payloads.get("baseline") if isinstance(realism_payloads.get("baseline"), dict) else {}
+            default_member_realism = realism_payloads.get("default") if isinstance(realism_payloads.get("default"), dict) else {}
+            realism_state = realism_payloads.get("realism") if isinstance(realism_payloads.get("realism"), dict) else {}
+            baseline_json = json.dumps(baseline_realism, ensure_ascii=False) if baseline_realism else "{}"
+            default_realism_json = json.dumps(default_member_realism, ensure_ascii=False) if default_member_realism else "{}"
+            character_system_prompts = {}
+            for member in raw_member_data:
+                sid = str((member or {}).get("_original_stable_id") or "").strip()
+                prompt_text = str((member or {}).get("system_prompt") or "").strip()
+                if sid and prompt_text:
+                    character_system_prompts[sid] = prompt_text
+
+            group_profile = {
+                "group_overview": fields.get("group_overview") or "",
+                "group_dynamic": fields.get("group_dynamic") or "",
+                "member_roles": fields.get("member_roles") if isinstance(fields.get("member_roles"), dict) else {},
+                "tags": fields.get("tags") if isinstance(fields.get("tags"), list) else [],
+                "mode": mode,
+                "member_project_paths": clean_paths,
+                "stable_ids": stable_ids,
+            }
+
+            # Match the real Front Porch Group Card shape: the root is a group
+            # wrapper, members/raw_member_data contain the actual character cards,
+            # and realism compatibility fields mirror Front Porch exports.
+            payload = {
+                "name": fields.get("name") or " & ".join(member_names),
+                "members": display_members,
+                "turn_order": str(options.get("turnOrder") or "roundRobin"),
+                "auto_advance": bool(options.get("autoAdvance")),
+                "director_mode": bool(options.get("directorMode")),
+                "first_message": fields.get("first_message") or "",
+                "scenario": fields.get("scenario") or "",
+                "system_prompt": fields.get("system_prompt") or "",
+                "character_system_prompts": character_system_prompts,
+                "group_lorebook": json.dumps({"entries": []}, ensure_ascii=False, separators=(",", ":")),
+                "inherit_character_lorebooks": True,
+                "chaos_mode_enabled": False,
+                "chaos_nsfw_enabled": False,
+                "baseline_realism_state": baseline_json,
+                "default_member_realism_state": default_realism_json,
+                "extensions": {
+                    "realism_state": copy.deepcopy(realism_state),
+                    "default_member_realism_state": copy.deepcopy(default_member_realism),
+                },
+                "realism_state": copy.deepcopy(realism_state),
+                "raw_member_data": raw_member_data,
+                "spec": "front_porch_group_card",
+                "spec_version": "1.0",
+            }
+            payload = self._ensure_group_payload_avatar_chunks(payload, reason="create_group_card_payload")
+            raw_member_data = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else raw_member_data
+
+            safe_name = self._safe_slug(payload["name"] or "group_card")
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+            first_image = ""
+            try:
+                loaded0 = self.load_character_project(clean_paths[0])
+                first_image = loaded0.get("imagePath") or loaded0.get("cardImagePath") or loaded0.get("imageDataUrl") or ""
+            except Exception:
+                first_image = ""
+
+            # Always create a Browser-visible CCF project for the new group card.
+            # Previous beta builds only wrote the .group.png export, so Insert mode
+            # appeared to do nothing in the Character Browser.
+            browser_folder = self._character_export_dir(f"{payload['name']} Group Card")
+            browser_png = browser_folder / f"{safe_name}_{stamp}.group.png"
+            browser_latest_png = browser_folder / f"{safe_name}_latest.group.png"
+            self._write_front_porch_group_png(browser_png, payload, first_image)
+            try:
+                shutil.copy2(browser_png, browser_latest_png)
+            except Exception:
+                browser_latest_png = browser_png
+            browser_sidecar = browser_folder / f"{safe_name}_{stamp}.group.json"
+            browser_sidecar.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            browser_latest_sidecar = browser_folder / f"{safe_name}_latest.group.json"
+            try:
+                shutil.copy2(browser_sidecar, browser_latest_sidecar)
+            except Exception:
+                browser_latest_sidecar = browser_sidecar
+            project_path = self._save_group_card_browser_project(
+                browser_folder,
+                payload,
+                browser_latest_png,
+                browser_latest_sidecar,
+                members,
+                clean_paths,
+                {**options, "settings": merged_settings, "groupProfile": group_profile},
+                mode,
+            )
+
+            export_path = browser_png
+            export_sidecar = browser_sidecar
+            export_folder = browser_folder
+            export_root = str(merged_settings.get("exportDestinationFolder") or "").strip()
+            if export_root:
+                export_folder = Path(export_root).expanduser().resolve()
+                _safe_mkdir(export_folder)
+                if not _path_is_writable_dir(export_folder):
+                    return {"ok": False, "error": "The selected export folder is not writable."}
+                export_path = export_folder / f"{safe_name}_{stamp}.group.png"
+                export_sidecar = export_folder / f"{safe_name}_{stamp}.group.json"
+                try:
+                    shutil.copy2(browser_png, export_path)
+                    shutil.copy2(browser_sidecar, export_sidecar)
+                except Exception:
+                    self._write_front_porch_group_png(export_path, payload, first_image)
+                    export_sidecar.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            self._log_event("front_porch_group_card_exported", {
+                "path": str(export_path),
+                "browserPath": str(browser_latest_png),
+                "projectPath": str(project_path),
+                "memberCount": len(raw_member_data),
+                "mode": mode,
+                "realismState": bool(realism_state),
+                "stableIds": stable_ids,
+            })
+            return {
+                "ok": True,
+                "path": str(export_path),
+                "jsonPath": str(export_sidecar),
+                "browserPath": str(browser_latest_png),
+                "browserJsonPath": str(browser_latest_sidecar),
+                "folder": str(export_folder),
+                "browserFolder": str(browser_folder),
+                "projectPath": str(project_path),
+                "name": payload["name"],
+                "memberCount": len(raw_member_data),
+                "mode": mode,
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create Front Porch group card: {e}"}
 
     def create_emotion_zip_for_project(self, project_path):
         loaded = self.load_character_project(project_path)
@@ -10663,6 +12331,7 @@ class Api:
                 "targetLabel": ("Beta" if selected_target == "beta" else "Stable"),
                 "charactersDirExists": chars_dir.exists(),
             }
+            payload.update(self._front_porch_database_schema_summary(db))
             self._log_event("front_porch_scan_success", payload)
             return payload
         except Exception as e:
@@ -10684,6 +12353,146 @@ class Api:
 
     def _front_porch_avatar_dir(self, chars_dir, name):
         return Path(chars_dir) / self._safe_front_porch_character_folder(name) / "avatars"
+
+    def _front_porch_asset_root_from_kobold_manager(self, km):
+        """Return the Front Porch install/data root used for non-DB assets.
+
+        The database lives in <FrontPorchRoot>/KoboldManager, but current
+        Front Porch Beta stores group-private avatar folders at
+        <FrontPorchRoot>/groups/<group_id>/avatars, not under KoboldManager.
+        Older CCF betas incorrectly wrote KoboldManager/groups, which left the
+        DB rows valid-looking but gave Front Porch no member folders to load.
+        """
+        root = Path(km).expanduser()
+        try:
+            if root.name == "KoboldManager":
+                return root.parent
+        except Exception:
+            pass
+        return root
+
+
+    def _sqlite_backup_database_file(self, db, backup_path):
+        """Create a consistent SQLite backup, falling back to a file copy.
+
+        Front Porch may be open while CCF exports.  SQLite's backup API is safer
+        than a raw shutil.copy2 for WAL/active databases, but the fallback keeps
+        older Python/SQLite builds working.
+        """
+        db = Path(db)
+        backup_path = Path(backup_path)
+        try:
+            src = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                dst = sqlite3.connect(str(backup_path), timeout=5)
+                try:
+                    src.backup(dst)
+                    dst.commit()
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+            try:
+                shutil.copystat(db, backup_path)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                if backup_path.exists():
+                    backup_path.unlink()
+            except Exception:
+                pass
+            shutil.copy2(db, backup_path)
+
+    def _prune_front_porch_ccf_backups(self, backup_dir, db, keep=10, protect_path=None):
+        """Keep CCF-created Front Porch DB backups capped so exports do not spam files.
+
+        Only files with CCF backup markers are touched.  Front Porch's own backup
+        files are deliberately left alone.
+        """
+        backup_dir = Path(backup_dir)
+        db = Path(db)
+        keep = max(1, int(keep or 10))
+        patterns = [
+            f"{db.stem}.ccf_*{db.suffix}",
+            f"{db.name}.ccf_backup_*",
+        ]
+        protected = None
+        if protect_path:
+            try:
+                protected = str(Path(protect_path).resolve())
+            except Exception:
+                protected = str(protect_path)
+        found = []
+        seen = set()
+        for pattern in patterns:
+            for path in backup_dir.glob(pattern):
+                try:
+                    key = str(path.resolve())
+                except Exception:
+                    key = str(path)
+                if key in seen or not path.is_file():
+                    continue
+                seen.add(key)
+                found.append(path)
+        found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        pruned = []
+        kept = []
+        for path in found:
+            try:
+                key = str(path.resolve())
+            except Exception:
+                key = str(path)
+            if protected and key == protected:
+                kept.append(path)
+            elif len(kept) < keep:
+                kept.append(path)
+            else:
+                try:
+                    path.unlink()
+                    pruned.append(str(path))
+                except Exception as e:
+                    self._log_event("front_porch_backup_prune_failed", {"path": str(path), "error": str(e)})
+        return {"kept": len(kept), "pruned": pruned, "totalBefore": len(found)}
+
+    def _create_front_porch_db_backup(self, db, km=None, reason="export", keep=10):
+        """Create a capped CCF backup inside Front Porch's own backups folder.
+
+        Previous CCF builds wrote unlimited *.ccf_backup_* files beside the live
+        database.  Front Porch already has a KoboldManager/backups folder, so CCF
+        now writes there and keeps only the latest CCF-created backups.
+        """
+        db = Path(db)
+        km = Path(km) if km else db.parent
+        backup_dir = km / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(reason or "export")).strip("_") or "export"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        millis = int(time.time() * 1000) % 1000
+        backup_path = backup_dir / f"{db.stem}.ccf_{safe_reason}_{stamp}-{millis:03d}{db.suffix}"
+        counter = 1
+        while backup_path.exists():
+            backup_path = backup_dir / f"{db.stem}.ccf_{safe_reason}_{stamp}-{millis:03d}_{counter}{db.suffix}"
+            counter += 1
+        self._sqlite_backup_database_file(db, backup_path)
+        # The SQLite copy helper may preserve the source DB mtime.  Refresh the
+        # new backup timestamp so pruning never treats the just-created backup
+        # as an old sidecar.
+        try:
+            os.utime(backup_path, None)
+        except Exception:
+            pass
+        main_prune = self._prune_front_porch_ccf_backups(backup_dir, db, keep=keep, protect_path=backup_path)
+        legacy_prune = self._prune_front_porch_ccf_backups(db.parent, db, keep=keep)
+        self._log_event("front_porch_db_backup", {
+            "database": str(db),
+            "backup": str(backup_path),
+            "backupDir": str(backup_dir),
+            "reason": safe_reason,
+            "keep": keep,
+            "pruned": main_prune.get("pruned", []) + legacy_prune.get("pruned", []),
+        })
+        return backup_path
 
     def _json_for_db(self, value, default):
         if value is None:
@@ -10720,6 +12529,69 @@ class Api:
                 "pk": bool(row[5]),
             }
         return info
+
+    def _front_porch_empty_group_realism_state(self):
+        """Default JSON payload for Front Porch v30 group realism fields.
+
+        v30 stores group/member realism in sessions.group_realism_state and
+        groups.default_member_realism_state. Character Card Forge does not yet
+        author full Group Cards, but returning an explicit empty v30 payload keeps
+        direct SQL writes self-documenting when the column exists.
+        """
+        return "{}"
+
+    def _front_porch_v30_schema_summary(self, cursor):
+        """Return non-fatal Front Porch v30 group realism schema details."""
+        summary = {
+            "groupsTable": False,
+            "sessionsTable": False,
+            "groupsDefaultMemberRealismState": False,
+            "sessionsGroupRealismState": False,
+            "compatible": False,
+            "partial": False,
+        }
+        try:
+            table_rows = cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            tables = {str(row[0]) for row in table_rows}
+            summary["groupsTable"] = "groups" in tables
+            summary["sessionsTable"] = "sessions" in tables
+            if "groups" in tables:
+                groups_info = self._sqlite_table_info(cursor, "groups")
+                summary["groupsDefaultMemberRealismState"] = "default_member_realism_state" in groups_info
+            if "sessions" in tables:
+                sessions_info = self._sqlite_table_info(cursor, "sessions")
+                summary["sessionsGroupRealismState"] = "group_realism_state" in sessions_info
+            summary["compatible"] = bool(summary["groupsDefaultMemberRealismState"] and summary["sessionsGroupRealismState"])
+            summary["partial"] = bool(summary["groupsDefaultMemberRealismState"] or summary["sessionsGroupRealismState"]) and not summary["compatible"]
+        except Exception:
+            pass
+        return summary
+
+    def _front_porch_database_schema_summary(self, db):
+        """Open a Front Porch DB briefly and summarize optional schema features."""
+        summary = {
+            "frontPorchV30": {
+                "groupsTable": False,
+                "sessionsTable": False,
+                "groupsDefaultMemberRealismState": False,
+                "sessionsGroupRealismState": False,
+                "compatible": False,
+                "partial": False,
+            },
+            "schemaReadError": "",
+        }
+        try:
+            con = sqlite3.connect(str(db))
+            cur = con.cursor()
+            summary["frontPorchV30"] = self._front_porch_v30_schema_summary(cur)
+            con.close()
+        except Exception as e:
+            summary["schemaReadError"] = str(e)
+            try:
+                con.close()
+            except Exception:
+                pass
+        return summary
 
     def _audit_front_porch_insert_plan(self, table_info, table_name, provided_values):
         messages = []
@@ -10814,9 +12686,13 @@ class Api:
                 0, "{}", "{}", None,
                 now, now, None, None,
             ]
-            if "start_day_of_week" in self._sqlite_table_columns(cur, "sessions"):
+            sessions_columns_available = self._sqlite_table_columns(cur, "sessions")
+            if "start_day_of_week" in sessions_columns_available:
                 session_columns.append("start_day_of_week")
                 session_values.append(0)
+            if "group_realism_state" in sessions_columns_available:
+                session_columns.append("group_realism_state")
+                session_values.append(self._front_porch_empty_group_realism_state())
             placeholders = ", ".join(["?"] * len(session_columns))
             cur.execute(f"INSERT INTO sessions ({', '.join(session_columns)}) VALUES ({placeholders})", session_values)
             cur.execute("""
@@ -10935,6 +12811,21 @@ class Api:
                     "columns": sorted(info.keys()),
                     "columnCount": len(info),
                 }
+            if "groups" in tables:
+                groups_info = self._sqlite_table_info(cur, "groups")
+                report["tables"]["groups"] = {
+                    "columns": sorted(groups_info.keys()),
+                    "columnCount": len(groups_info),
+                }
+
+            v30_summary = self._front_porch_v30_schema_summary(cur)
+            report["frontPorchV30"] = v30_summary
+            if v30_summary.get("compatible"):
+                add("info", "Front Porch v30 group realism columns detected: groups.default_member_realism_state and sessions.group_realism_state.", "groups")
+            elif v30_summary.get("partial"):
+                add("warning", "Partial Front Porch v30 group realism schema detected. Group realism round-tripping may be incomplete until both v30 columns exist.", "groups")
+            else:
+                add("info", "Front Porch v30 group realism columns were not detected. This is fine for older Front Porch versions and normal 1:1 character exports.", "groups")
 
             if "characters" in tables:
                 character_values = {
@@ -10971,6 +12862,9 @@ class Api:
                     add("info", "sessions.start_day_of_week detected and will be written by Character Card Forge.", "sessions")
                 else:
                     add("info", "sessions.start_day_of_week not present; export will use Front Porch legacy weekday behavior.", "sessions")
+                if "group_realism_state" in session_info:
+                    session_values["group_realism_state"] = self._front_porch_empty_group_realism_state()
+                    add("info", "sessions.group_realism_state detected. Normal 1:1 exports write '{}' explicitly; future Group Card support can populate evolved per-member realism here.", "sessions")
                 for item in self._audit_front_porch_insert_plan(session_info, "sessions", session_values):
                     add(item["level"], item["message"], item.get("table"))
 
@@ -11091,18 +12985,18 @@ class Api:
         original_image_path = str(image_path or "").strip()
         local_image_path = self._resolve_front_porch_export_image(original_image_path, project_path=project_path, reason="front_porch_export")
         if not local_image_path:
-            return {"ok": False, "error": "The selected Front Porch card image could not be found, downloaded, or restored from saved base64/asset data, so export was stopped instead of creating a blank image. Try opening the saved card once, selecting/regenerating the image, then saving again. Check Debug Log for front_porch_image_resolution_failed.", "target": selected_target}
+            self._log_event("front_porch_export_image_missing_placeholder_allowed", {"name": name, "project": str(project_path or ""), "target": selected_target})
         try:
-            self._write_chara_png(image_dest, card_v2, local_image_path, require_image=True)
+            self._write_chara_png(image_dest, card_v2, local_image_path, require_image=False)
         except Exception as e:
             return {"ok": False, "error": f"Could not write Front Porch character card PNG: {e}"}
 
-        # Backup DB before direct write. SQLite writes are small, but this makes the feature less scary.
+        # Backup DB before direct write. Store it in Front Porch's own backups folder
+        # and prune old CCF backups instead of endlessly creating sidecar files.
         try:
-            backup_path = db.with_suffix(db.suffix + f".ccf_backup_{time.strftime('%Y%m%d-%H%M%S')}")
-            shutil.copy2(db, backup_path)
+            backup_path = self._create_front_porch_db_backup(db, km, reason="character_export", keep=10)
         except Exception as e:
-            return {"ok": False, "error": f"Could not create database backup before export: {e}"}
+            return {"ok": False, "error": f"Could not create capped database backup before export: {e}"}
 
         lorebook = data.get("character_book") or {"entries": []}
         tags = data.get("tags") or []
@@ -11118,56 +13012,99 @@ class Api:
         try:
             con = sqlite3.connect(str(db))
             cur = con.cursor()
-            cur.execute("""
-                INSERT INTO characters (
-                    id, name, description, personality, scenario, first_message, mes_example,
-                    system_prompt, post_history_instructions, alternate_greetings, tags, image_path,
-                    tts_voice, folder_id, lorebook, world_names, memory_sources, evolved_personality,
-                    evolved_scenario, evolution_count, created_at, updated_at, deleted_at, prime_avatar_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, '[]', '[]', '', '', 0, ?, ?, NULL, 1)
-            """, (
-                char_id, name, desc, personality, scenario, first_mes, mes_example,
-                system_prompt, post, json.dumps(alt, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), image_filename,
-                json.dumps(lorebook, ensure_ascii=False), now, now
-            ))
+            self._sqlite_insert_dynamic(cur, "characters", {
+                "id": char_id,
+                "name": name,
+                "description": desc,
+                "personality": personality,
+                "scenario": scenario,
+                "first_message": first_mes,
+                "mes_example": mes_example,
+                "system_prompt": system_prompt,
+                "post_history_instructions": post,
+                "alternate_greetings": json.dumps(alt, ensure_ascii=False),
+                "tags": json.dumps(tags, ensure_ascii=False),
+                "image_path": image_filename,
+                "tts_voice": None,
+                "folder_id": None,
+                "lorebook": json.dumps(lorebook, ensure_ascii=False),
+                "world_names": "[]",
+                "memory_sources": "[]",
+                "evolved_personality": "",
+                "evolved_scenario": "",
+                "evolution_count": 0,
+                "created_at": now,
+                "updated_at": now,
+                "deleted_at": None,
+                "prime_avatar_index": 1,
+            })
             session_id = str(ms + 1)
-            session_columns = [
-                "id", "character_id", "group_id", "name", "description", "author_note", "author_note_depth",
-                "summary", "summary_last_index", "parent_session", "fork_index", "affection_score", "relationship_tier",
-                "long_term_score", "long_term_tier", "turns_since_long_term_check", "short_term_deltas_summary",
-                "realism_enabled", "short_term_mood", "mood_decay_counter", "character_emotion", "emotion_intensity",
-                "time_of_day", "day_count", "nsfw_cooldown_enabled", "passage_of_time_enabled", "arousal_level",
-                "cooldown_turns_remaining", "trust_level", "active_fixation", "fixation_lifespan", "spatial_stance",
-                "trust_repair_pending", "chaos_mode_enabled", "chaos_pressure", "evolved_personality", "evolved_scenario",
-                "evolution_count", "group_evolved_personalities", "group_evolved_scenarios", "generation_settings",
-                "created_at", "updated_at", "deleted_at", "user_persona_id"
-            ]
-            session_values = [
-                session_id, char_id, None, None, None, "", 4,
-                None, None, None, None, int(fp.get("short_term_bond") or 0), 0,
-                int(fp.get("long_term_bond") or 0), 0, 0, 0,
-                1 if fp.get("enabled", True) else 0, 0, 0, str(fp.get("character_emotion") or ""), str(fp.get("emotion_intensity") or ""),
-                self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon"), int(fp.get("day_count") or 1),
-                1 if fp.get("nsfw_cooldown_enabled", True) else 0,
-                1 if fp.get("passage_of_time_enabled", True) else 0, 0,
-                0, int(fp.get("trust_level") or 0), "", 0, "",
-                0, 1 if fp.get("chaos_mode_enabled", True) else 0, 0, "", "",
-                0, "{}", "{}", None,
-                now, now, None, None
-            ]
-            sessions_columns_available = self._sqlite_table_columns(cur, "sessions")
-            if "start_day_of_week" in sessions_columns_available and "start_day_of_week" not in session_columns:
-                # Front Porch schema v28. It is safe to leave this as 0 (legacy/unset),
-                # but include it when available so our export understands the new schema.
-                session_columns.append("start_day_of_week")
-                session_values.append(self._normalize_front_porch_start_day_of_week(fp.get("start_day_of_week") or 0))
-            placeholders = ", ".join(["?"] * len(session_columns))
-            cur.execute(f"INSERT INTO sessions ({', '.join(session_columns)}) VALUES ({placeholders})", session_values)
+            session_values = {
+                "id": session_id,
+                "character_id": char_id,
+                "group_id": None,
+                "name": None,
+                "description": None,
+                "author_note": "",
+                "author_note_depth": 4,
+                "summary": None,
+                "summary_last_index": None,
+                "parent_session": None,
+                "fork_index": None,
+                "affection_score": int(fp.get("short_term_bond") or 0),
+                "relationship_tier": 0,
+                "long_term_score": int(fp.get("long_term_bond") or 0),
+                "long_term_tier": 0,
+                "turns_since_long_term_check": 0,
+                "short_term_deltas_summary": 0,
+                "realism_enabled": 1 if fp.get("enabled", True) else 0,
+                "short_term_mood": 0,
+                "mood_decay_counter": 0,
+                "character_emotion": str(fp.get("character_emotion") or ""),
+                "emotion_intensity": str(fp.get("emotion_intensity") or ""),
+                "time_of_day": self._normalize_front_porch_time_of_day(fp.get("time_of_day") or "afternoon"),
+                "day_count": int(fp.get("day_count") or 1),
+                "nsfw_cooldown_enabled": 1 if fp.get("nsfw_cooldown_enabled", True) else 0,
+                "passage_of_time_enabled": 1 if fp.get("passage_of_time_enabled", True) else 0,
+                "arousal_level": 0,
+                "cooldown_turns_remaining": 0,
+                "trust_level": int(fp.get("trust_level") or 0),
+                "active_fixation": "",
+                "fixation_lifespan": 0,
+                "spatial_stance": "",
+                "trust_repair_pending": 0,
+                "chaos_mode_enabled": 1 if fp.get("chaos_mode_enabled", True) else 0,
+                "chaos_pressure": 0,
+                "evolved_personality": "",
+                "evolved_scenario": "",
+                "evolution_count": 0,
+                "group_evolved_personalities": "{}",
+                "group_evolved_scenarios": "{}",
+                "generation_settings": None,
+                "start_day_of_week": self._normalize_front_porch_start_day_of_week(fp.get("start_day_of_week") or 0),
+                "group_realism_state": self._front_porch_empty_group_realism_state(),
+                "created_at": now,
+                "updated_at": now,
+                "deleted_at": None,
+                "user_persona_id": None,
+            }
+            self._sqlite_insert_dynamic(cur, "sessions", session_values)
             if first_mes:
-                cur.execute("""
-                    INSERT INTO messages (id, session_id, position, sender, is_user, character_id, swipes, swipe_index, swipe_durations, metadata, swipe_metadata, updated_at, deleted_at)
-                    VALUES (?, ?, 0, ?, 0, NULL, ?, 0, '[0]', NULL, NULL, ?, NULL)
-                """, (str(uuid.uuid4()), session_id, name, json.dumps([first_mes], ensure_ascii=False), now))
+                self._sqlite_insert_dynamic(cur, "messages", {
+                    "id": str(uuid.uuid4()),
+                    "session_id": session_id,
+                    "position": 0,
+                    "sender": name,
+                    "is_user": 0,
+                    "character_id": None,
+                    "swipes": json.dumps([first_mes], ensure_ascii=False),
+                    "swipe_index": 0,
+                    "swipe_durations": "[0]",
+                    "metadata": None,
+                    "swipe_metadata": None,
+                    "updated_at": now,
+                    "deleted_at": None,
+                })
 
             # Copy emotion/avatar images from the project/export folder and register them.
             # Front Porch resolves avatar_images.filename relative to:
@@ -11188,10 +13125,20 @@ class Api:
                     continue
                 avatar_file = f"avatar_{ms + emotion_count}.png"
                 shutil.copy2(src, char_emotion_dir / avatar_file)
-                cur.execute("INSERT INTO avatar_images (id, character_id, filename, label, display_order, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                            (str(uuid.uuid4()), char_id, avatar_file, emo, emotion_count, now))
+                self._sqlite_insert_dynamic(cur, "avatar_images", {
+                    "id": str(uuid.uuid4()),
+                    "character_id": char_id,
+                    "filename": avatar_file,
+                    "label": emo,
+                    "display_order": emotion_count,
+                    "created_at": now,
+                })
                 emotion_count += 1
-            cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
+            if "sync_meta" in {str(row[0]) for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
+                try:
+                    cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
+                except Exception:
+                    pass
             con.commit()
             con.close()
             self._log_event("front_porch_export", {"name": name, "id": char_id, "target": selected_target, "db": str(db), "image": image_filename, "sourceImage": str(local_image_path or original_image_path or ""), "emotions": emotion_count, "avatarDir": str(char_emotion_dir), "backup": str(backup_path)})
@@ -11202,6 +13149,746 @@ class Api:
             except Exception:
                 pass
             return {"ok": False, "error": f"Front Porch export failed: {e}. Database backup was created at: {backup_path}"}
+
+    def _sqlite_insert_dynamic(self, cursor, table_name, values):
+        """Insert a row using only columns present in the target DB.
+
+        Front Porch Rawhide changes quickly, so Group Card direct export must be
+        tolerant: write known columns when present and supply generic values for
+        NOT NULL/no-default columns so additive schema changes do not hard-crash.
+        """
+        info = self._sqlite_table_info(cursor, table_name)
+        if not info:
+            raise ValueError(f"Required table '{table_name}' is missing or unreadable.")
+        row = {}
+        def fallback_value(meta):
+            typ = str(meta.get("type") or "").upper()
+            if "INT" in typ:
+                return 0
+            if "REAL" in typ or "FLOA" in typ or "DOUB" in typ:
+                return 0.0
+            if "BLOB" in typ:
+                return b""
+            return ""
+
+        for key, value in (values or {}).items():
+            if key in info:
+                meta = info.get(key) or {}
+                if value is None and meta.get("notnull"):
+                    # Let SQLite apply a declared default when available; otherwise
+                    # provide a safe generic value. This keeps direct export stable
+                    # across Front Porch schema churn.
+                    if meta.get("default") is not None:
+                        continue
+                    row[key] = fallback_value(meta)
+                elif isinstance(value, (dict, list)):
+                    row[key] = json.dumps(value, ensure_ascii=False)
+                else:
+                    row[key] = value
+        for col, meta in info.items():
+            if meta.get("pk") or col in row:
+                continue
+            if meta.get("notnull") and meta.get("default") is None:
+                row[col] = fallback_value(meta)
+        if not row:
+            raise ValueError(f"No writable columns resolved for table '{table_name}'.")
+        cols = list(row.keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        cursor.execute(f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({placeholders})", [row[c] for c in cols])
+
+    def _json_loads_or_default(self, value, default=None):
+        default = {} if default is None else default
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return copy.deepcopy(default)
+            try:
+                return json.loads(s)
+            except Exception:
+                return copy.deepcopy(default)
+        if value is None:
+            return copy.deepcopy(default)
+        return copy.deepcopy(value)
+
+    def _remap_json_keys(self, value, id_map):
+        """Recursively remap stable-ID dictionary keys inside group state blobs."""
+        if not isinstance(id_map, dict) or not id_map:
+            return value
+        if isinstance(value, dict):
+            out = {}
+            for key, child in value.items():
+                skey = str(key)
+                new_key = id_map.get(skey, key)
+                out[new_key] = self._remap_json_keys(child, id_map)
+            return out
+        if isinstance(value, list):
+            return [self._remap_json_keys(item, id_map) for item in value]
+        if isinstance(value, str):
+            return id_map.get(value, value)
+        return value
+
+    def _json_string_or_default(self, value, default=None):
+        default = {} if default is None else default
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return json.dumps(default, ensure_ascii=False)
+            try:
+                json.loads(s)
+                return s
+            except Exception:
+                return json.dumps(default, ensure_ascii=False)
+        if value is None:
+            return json.dumps(default, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False)
+
+    def _uuid_like_or_new(self, value, used=None):
+        used = used if isinstance(used, set) else set()
+        raw = str(value or "").strip().lower()
+        try:
+            parsed = str(uuid.UUID(raw))
+            if parsed not in used:
+                used.add(parsed)
+                return parsed
+        except Exception:
+            pass
+        while True:
+            candidate = str(uuid.uuid4())
+            if candidate not in used:
+                used.add(candidate)
+                return candidate
+
+    def _png_text_chunk(self, key, value):
+        """Build a raw PNG tEXt chunk for a UTF-8/ascii text value."""
+        key_b = str(key or "").encode("latin-1", "replace")
+        if not key_b:
+            raise ValueError("PNG text chunk key cannot be empty.")
+        if b"\x00" in key_b:
+            key_b = key_b.split(b"\x00", 1)[0]
+        value_b = str(value or "").encode("latin-1", "replace")
+        chunk_type = b"tEXt"
+        chunk_data = key_b + b"\x00" + value_b
+        crc = zlib.crc32(chunk_type)
+        crc = zlib.crc32(chunk_data, crc) & 0xffffffff
+        return struct.pack(">I", len(chunk_data)) + chunk_type + chunk_data + struct.pack(">I", crc)
+
+    def _png_bytes_with_text_chunks(self, png_bytes, text_map):
+        """Return PNG bytes guaranteed to contain the requested text chunks.
+
+        Pillow normally writes PngInfo correctly, but this manual pass makes the
+        Front Porch group-member avatar contract deterministic. If a requested
+        key is missing, insert it immediately after IHDR so downstream loaders
+        see the metadata before IDAT regardless of how the image was produced.
+        """
+        data = bytes(png_bytes or b"")
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return data
+        wanted = {str(k): str(v or "") for k, v in (text_map or {}).items() if str(k or "").strip()}
+        if not wanted:
+            return data
+        pos = 8
+        existing = set()
+        ihdr_end = None
+        try:
+            while pos + 8 <= len(data):
+                length = struct.unpack(">I", data[pos:pos+4])[0]
+                ctype = data[pos+4:pos+8]
+                chunk_start = pos
+                chunk_end = pos + 12 + length
+                if chunk_end > len(data):
+                    break
+                chunk = data[pos+8:pos+8+length]
+                if ctype == b"IHDR" and ihdr_end is None:
+                    ihdr_end = chunk_end
+                if ctype in (b"tEXt", b"zTXt", b"iTXt") and b"\x00" in chunk:
+                    existing.add(chunk.split(b"\x00", 1)[0].decode("utf-8", "replace"))
+                pos = chunk_end
+                if ctype == b"IEND":
+                    break
+        except Exception:
+            return data
+        missing = [(k, v) for k, v in wanted.items() if k not in existing]
+        if not missing:
+            return data
+        insert_at = ihdr_end if ihdr_end is not None else 8
+        chunks = b"".join(self._png_text_chunk(k, v) for k, v in missing)
+        return data[:insert_at] + chunks + data[insert_at:]
+
+    def _ensure_png_text_chunks(self, path, text_map, log_reason="png_text_chunks"):
+        """Mutate an existing PNG so the requested text chunks are present."""
+        try:
+            p = Path(path)
+            before = p.read_bytes()
+            after = self._png_bytes_with_text_chunks(before, text_map)
+            changed = after != before
+            if changed:
+                p.write_bytes(after)
+            try:
+                keys = self._png_text_chunk_keys(p)
+            except Exception:
+                keys = []
+            self._log_event("png_text_chunk_ensure", {
+                "reason": log_reason,
+                "path": str(p),
+                "changed": bool(changed),
+                "requestedKeys": list((text_map or {}).keys()),
+                "textKeys": keys[:40],
+                "sizeBefore": len(before),
+                "sizeAfter": len(after),
+            })
+            return {"changed": changed, "textKeys": keys, "sizeBefore": len(before), "sizeAfter": len(after)}
+        except Exception as e:
+            self._log_event("png_text_chunk_ensure_failed", {"reason": log_reason, "path": str(path or ""), "error": str(e)})
+            return {"changed": False, "error": str(e)}
+
+    def _png_text_chunk_keys(self, path):
+        """Return PNG text chunk keywords for diagnostics without dumping payloads."""
+        try:
+            data = Path(path).read_bytes()
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                return []
+            pos = 8
+            keys = []
+            while pos + 8 <= len(data):
+                length = struct.unpack(">I", data[pos:pos+4])[0]
+                ctype = data[pos+4:pos+8]
+                chunk = data[pos+8:pos+8+length]
+                pos += 12 + length
+                if ctype in (b"tEXt", b"zTXt", b"iTXt") and b"\x00" in chunk:
+                    key = chunk.split(b"\x00", 1)[0].decode("utf-8", "replace")
+                    keys.append(key)
+                if ctype == b"IEND":
+                    break
+            return keys[:40]
+        except Exception:
+            return []
+
+    def _png_file_diagnostics(self, path):
+        """Small image diagnostics for Front Porch export logs."""
+        out = {"path": str(path or ""), "exists": False}
+        try:
+            p = Path(path)
+            out["exists"] = p.exists() and p.is_file()
+            if not out["exists"]:
+                return out
+            out["sizeBytes"] = p.stat().st_size
+            with Image.open(p) as img:
+                out["width"] = img.width
+                out["height"] = img.height
+                out["mode"] = img.mode
+            out["visibleReal"] = bool(self._png_file_has_nonblank_visible_pixels(p))
+            keys = self._png_text_chunk_keys(p)
+            out["textKeys"] = keys
+            out["hasChara"] = "chara" in keys
+            out["hasFpaGroup"] = "fpa_group" in keys
+        except Exception as e:
+            out["error"] = str(e)
+        return out
+
+    def _write_group_member_avatar_file(self, dest, member_data, member_id):
+        """Write a group member avatar PNG with embedded Chara V2 metadata."""
+        dest = Path(dest)
+        _safe_mkdir(dest.parent)
+        data = copy.deepcopy(member_data if isinstance(member_data, dict) else {})
+        avatar_b64 = str(data.pop("avatar_base64", "") or "").strip()
+        data.pop("_original_stable_id", None)
+        img = None
+        input_bytes = 0
+        input_real = False
+        input_dims = None
+        if avatar_b64:
+            try:
+                raw = base64.b64decode(avatar_b64)
+                input_bytes = len(raw)
+                if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    # Preserve visible pixels but always rewrite metadata so the
+                    # private group avatar matches the group_members row.
+                    img = Image.open(io.BytesIO(raw)).convert("RGBA")
+                    input_dims = [img.width, img.height]
+                    input_real = self._avatar_base64_has_nonblank_visible_pixels(avatar_b64)
+                    if not input_real:
+                        self._log_event("front_porch_group_member_avatar_is_placeholder", {"member": data.get("name"), "memberId": member_id, "inputBytes": input_bytes, "inputDims": input_dims})
+            except Exception as e:
+                self._log_event("front_porch_group_member_avatar_decode_failed", {"member": data.get("name"), "memberId": member_id, "error": str(e), "inputBytes": input_bytes})
+                img = None
+        payload = {"spec": "chara_card_v2", "spec_version": "2.0", "data": data}
+        chara_text = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        text_chunks = {"chara": chara_text, "ccf_group_member_id": member_id}
+        meta = PngInfo()
+        for k, v in text_chunks.items():
+            meta.add_text(k, v)
+        if img is None:
+            img = Image.new("RGBA", (512, 768), (24, 24, 32, 255))
+        img.save(dest, "PNG", pnginfo=meta)
+        # Manual safety pass: Front Porch expects private member avatars to be
+        # real Chara V2 PNGs, not just ordinary image files. Guarantee the tEXt
+        # chunks even if Pillow/image transformations dropped metadata.
+        self._ensure_png_text_chunks(dest, text_chunks, log_reason="group_member_avatar")
+        diag = self._png_file_diagnostics(dest)
+        diag.update({"member": data.get("name"), "memberId": member_id, "inputBytes": input_bytes, "inputReal": bool(input_real), "inputDims": input_dims})
+        self._log_event("front_porch_group_member_avatar_written", diag)
+        return diag
+
+    def export_group_card_to_front_porch_beta(self, loaded, settings=None, target=None):
+        """Directly export a Front Porch Group Card project into Front Porch Beta.
+
+        Stable Front Porch does not support the post-v30/v33 group_members contract
+        yet, so this path is deliberately Beta-only.
+        """
+        selected_target = str(target or (settings or {}).get("frontPorchExportTarget") or self.settings.get("frontPorchExportTarget") or "beta").strip().lower()
+        if selected_target != "beta":
+            return {"ok": False, "error": "Front Porch Group Card direct export is Beta-only for now. Set the target to Beta or configure the Beta Front Porch data folder.", "target": selected_target}
+        merged_settings = {**self.settings, **(settings or {}), "frontPorchExportTarget": "beta"}
+        km, db, err, selected_target = self._front_porch_paths(merged_settings, target="beta")
+        if err:
+            return {"ok": False, "error": err, "target": "beta"}
+        payload = self._load_group_payload_for_project(loaded)
+        if not isinstance(payload, dict) or payload.get("spec") != "front_porch_group_card":
+            return {"ok": False, "error": "This Group Card project is missing its fpa_group payload."}
+        raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else []
+        if not (2 <= len(raw_members) <= 4):
+            return {"ok": False, "error": "Front Porch group cards require 2–4 embedded members."}
+        member_project_paths = loaded.get("memberProjectPaths") if isinstance(loaded.get("memberProjectPaths"), list) else []
+        if member_project_paths:
+            payload = self._refresh_group_payload_member_avatars_from_projects(payload, member_project_paths)
+            raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else raw_members
+        payload = self._ensure_group_payload_avatar_chunks(payload, reason="front_porch_direct_export_payload")
+        raw_members = payload.get("raw_member_data") if isinstance(payload.get("raw_member_data"), list) else raw_members
+        # Keep the saved .group.png/.group.json in sync with the refreshed avatar payload.
+        # Earlier builds repaired images for direct DB export only, leaving the local
+        # group PNG sidecar with placeholder avatar_base64 values.
+        try:
+            group_card_path = str(loaded.get("groupCardPath") or "").strip()
+            if group_card_path:
+                cover = ""
+                if raw_members:
+                    cover_member = raw_members[0] if isinstance(raw_members[0], dict) else {}
+                    cover_b64 = str(cover_member.get("avatar_base64") or "")
+                    cover = self._ensure_local_card_image_path("data:image/png;base64," + cover_b64, "card", "front_porch_group_payload_cover") if cover_b64 else ""
+                self._write_front_porch_group_png(group_card_path, payload, cover)
+                sidecar = Path(group_card_path).with_suffix(".json")
+                sidecar.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                self._log_event("front_porch_group_payload_persisted", {"path": group_card_path, "jsonPath": str(sidecar), "members": len(raw_members)})
+        except Exception as e:
+            self._log_event("front_porch_group_payload_persist_failed", {"error": str(e), "path": str(loaded.get("groupCardPath") or "")})
+        try:
+            backup_path = self._create_front_porch_db_backup(db, km, reason="group_export", keep=10)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create capped database backup before group export: {e}"}
+
+        con = None
+        try:
+            con = sqlite3.connect(str(db))
+            cur = con.cursor()
+            tables = {str(row[0]) for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "groups" not in tables or "group_members" not in tables:
+                raise ValueError("This Beta database does not expose the required groups/group_members tables yet.")
+            try:
+                groups_info = self._sqlite_table_info(cur, "groups")
+                self._log_event("front_porch_groups_schema", {
+                    "db": str(db),
+                    "columns": list(groups_info.keys()),
+                    "legacyCharacterColumns": [c for c in groups_info.keys() if c.lower() in ("character_ids", "characterids")],
+                    "avatarColumns": [c for c in groups_info.keys() if any(tok in c.lower() for tok in ("avatar", "image", "cover", "thumbnail", "file"))],
+                })
+            except Exception as e:
+                self._log_event("front_porch_groups_schema_error", {"db": str(db), "error": str(e)})
+            try:
+                gm_info = self._sqlite_table_info(cur, "group_members")
+                self._log_event("front_porch_group_members_schema", {
+                    "db": str(db),
+                    "columns": list(gm_info.keys()),
+                    "avatarColumns": [c for c in gm_info.keys() if any(tok in c.lower() for tok in ("avatar", "image", "file"))],
+                })
+            except Exception as e:
+                self._log_event("front_porch_group_members_schema_error", {"db": str(db), "error": str(e)})
+            now_ms = int(time.time() * 1000)
+            now_sec = int(time.time())
+            # Front Porch-created groups in current Rawhide use a plain
+            # group_<milliseconds> id.  The extra random suffix used in beta30
+            # made valid group_members rows harder for some UI paths to resolve.
+            group_id = f"group_{now_ms}"
+            while cur.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone():
+                now_ms += 1
+                group_id = f"group_{now_ms}"
+            # group_members rows created by Front Porch's own importer currently
+            # use 0 for member created/updated timestamps, while groups/sync_meta
+            # use seconds.  Match that shape instead of writing millisecond values.
+            now = now_sec
+            member_ts = 0
+            used_ids = set()
+            member_rows = []
+            member_ids = []
+            source_character_ids = []
+            source_character_rows = []
+            source_session_rows = []
+            source_message_rows = []
+            stable_id_map = {}
+            asset_root = self._front_porch_asset_root_from_kobold_manager(km)
+            chars_dir = km / "Characters"
+            chars_dir.mkdir(parents=True, exist_ok=True)
+            # Important: Front Porch Beta keeps group avatar folders beside
+            # KoboldManager, e.g. FrontPorchAI-Beta/groups/<group_id>/avatars.
+            # They are not stored in KoboldManager/groups.
+            avatar_dir = asset_root / "groups" / group_id / "avatars"
+            avatar_dir.mkdir(parents=True, exist_ok=True)
+            if not avatar_dir.exists() or not avatar_dir.is_dir():
+                raise ValueError(f"Could not create Front Porch group avatar folder: {avatar_dir}")
+            if not chars_dir.exists() or not chars_dir.is_dir():
+                raise ValueError(f"Could not create Front Porch Characters folder: {chars_dir}")
+            existing_character_ids = {str(r[0]) for r in cur.execute("SELECT id FROM characters").fetchall()} if "characters" in tables else set()
+            for idx, member in enumerate(raw_members, start=1):
+                data = copy.deepcopy(member if isinstance(member, dict) else {})
+                original_stable_id = str(data.get("_original_stable_id") or "").strip()
+                member_name = str(data.get("name") or f"Member {idx}").strip() or f"Member {idx}"
+                safe_member = self._safe_front_porch_character_folder(member_name)
+                source_ms = now_ms + idx
+                source_character_id = f"{safe_member}_{source_ms}"
+                while source_character_id in existing_character_ids:
+                    source_ms += 1000
+                    source_character_id = f"{safe_member}_{source_ms}"
+                existing_character_ids.add(source_character_id)
+                source_character_ids.append(source_character_id)
+                if original_stable_id:
+                    stable_id_map[original_stable_id] = source_character_id
+                stable_id_map[member_name] = source_character_id
+                # Direct DB export must create the same normal character records
+                # that Front Porch has available when its own group creator asks
+                # you to select characters.  The private group_members rows below
+                # are still the scene snapshot, but these source rows give older
+                # edit/extract paths real characters to resolve instead of empty
+                # or private UUID-only references.
+                source_image_name = f"{source_character_id}.png"
+                source_image_path = chars_dir / source_image_name
+                source_card_data = copy.deepcopy(data)
+                source_card_data.pop("avatar_base64", None)
+                source_card_data.pop("_original_stable_id", None)
+                source_card_data["name"] = member_name
+                source_payload = {"spec": "chara_card_v2", "spec_version": "2.0", "data": source_card_data}
+                avatar_b64 = str(data.get("avatar_base64") or "").strip()
+                avatar_source = "data:image/png;base64," + avatar_b64 if avatar_b64 else ""
+                self._write_chara_png(source_image_path, source_payload, avatar_source, require_image=False)
+                source_ext = source_card_data.get("extensions") if isinstance(source_card_data.get("extensions"), dict) else {}
+                source_fp = self._normalise_front_porch_realism_engine(((source_ext.get("front_porch") or {}).get("realism_engine") or {}) if isinstance(source_ext.get("front_porch"), dict) else {})
+                source_character_rows.append({
+                    "id": source_character_id,
+                    "name": member_name,
+                    "description": str(source_card_data.get("description") or ""),
+                    "personality": str(source_card_data.get("personality") or ""),
+                    "scenario": str(source_card_data.get("scenario") or ""),
+                    "first_message": str(source_card_data.get("first_mes") or source_card_data.get("first_message") or ""),
+                    "mes_example": str(source_card_data.get("mes_example") or ""),
+                    "system_prompt": str(source_card_data.get("system_prompt") or ""),
+                    "post_history_instructions": str(source_card_data.get("post_history_instructions") or ""),
+                    "alternate_greetings": json.dumps(source_card_data.get("alternate_greetings") if isinstance(source_card_data.get("alternate_greetings"), list) else [], ensure_ascii=False),
+                    "tags": json.dumps(source_card_data.get("tags") if isinstance(source_card_data.get("tags"), list) else [], ensure_ascii=False),
+                    "image_path": source_image_name,
+                    "tts_voice": source_card_data.get("tts_voice"),
+                    "folder_id": None,
+                    "lorebook": json.dumps(source_card_data.get("character_book") if isinstance(source_card_data.get("character_book"), dict) else {"entries": []}, ensure_ascii=False),
+                    "world_names": json.dumps(source_card_data.get("world_names") if isinstance(source_card_data.get("world_names"), list) else [], ensure_ascii=False),
+                    "memory_sources": "[]",
+                    "evolved_personality": "",
+                    "evolved_scenario": "",
+                    "evolution_count": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                    "deleted_at": None,
+                    "prime_avatar_index": 1,
+                })
+                source_session_id = str(source_ms + 1)
+                source_session_rows.append({
+                    "id": source_session_id,
+                    "character_id": source_character_id,
+                    "group_id": None,
+                    "name": None,
+                    "description": None,
+                    "author_note": "",
+                    "author_note_depth": 4,
+                    "summary": None,
+                    "summary_last_index": None,
+                    "parent_session": None,
+                    "fork_index": None,
+                    "affection_score": int(source_fp.get("short_term_bond") or 0),
+                    "relationship_tier": 0,
+                    "long_term_score": int(source_fp.get("long_term_bond") or 0),
+                    "long_term_tier": 0,
+                    "turns_since_long_term_check": 0,
+                    "short_term_deltas_summary": 0,
+                    "realism_enabled": 1 if source_fp.get("enabled", True) else 0,
+                    "short_term_mood": 0,
+                    "mood_decay_counter": 0,
+                    "character_emotion": str(source_fp.get("character_emotion") or ""),
+                    "emotion_intensity": str(source_fp.get("emotion_intensity") or ""),
+                    "time_of_day": self._normalize_front_porch_time_of_day(source_fp.get("time_of_day") or "afternoon"),
+                    "day_count": int(source_fp.get("day_count") or 1),
+                    "nsfw_cooldown_enabled": 1 if source_fp.get("nsfw_cooldown_enabled", True) else 0,
+                    "passage_of_time_enabled": 1 if source_fp.get("passage_of_time_enabled", True) else 0,
+                    "arousal_level": 0,
+                    "cooldown_turns_remaining": 0,
+                    "trust_level": int(source_fp.get("trust_level") or 0),
+                    "active_fixation": "",
+                    "fixation_lifespan": 0,
+                    "spatial_stance": "",
+                    "trust_repair_pending": 0,
+                    "chaos_mode_enabled": 1 if source_fp.get("chaos_mode_enabled", True) else 0,
+                    "chaos_pressure": 0,
+                    "evolved_personality": "",
+                    "evolved_scenario": "",
+                    "evolution_count": 0,
+                    "group_evolved_personalities": "{}",
+                    "group_evolved_scenarios": "{}",
+                    "generation_settings": None,
+                    "start_day_of_week": self._normalize_front_porch_start_day_of_week(source_fp.get("start_day_of_week") or 0),
+                    "group_realism_state": self._front_porch_empty_group_realism_state(),
+                    "created_at": now,
+                    "updated_at": now,
+                    "deleted_at": None,
+                    "user_persona_id": None,
+                })
+                source_first = str(source_card_data.get("first_mes") or source_card_data.get("first_message") or "").strip()
+                if source_first:
+                    source_message_rows.append({
+                        "id": str(uuid.uuid4()),
+                        "session_id": source_session_id,
+                        "position": 0,
+                        "sender": member_name,
+                        "is_user": 0,
+                        "character_id": None,
+                        "swipes": json.dumps([source_first], ensure_ascii=False),
+                        "swipe_index": 0,
+                        "swipe_durations": "[0]",
+                        "metadata": None,
+                        "swipe_metadata": None,
+                        "updated_at": now,
+                        "deleted_at": None,
+                    })
+
+                member_id = self._uuid_like_or_new("", used_ids)
+                member_ids.append(member_id)
+                avatar_name = f"{member_id}.png"
+                # The group-member snapshot points back to the normal character
+                # id used by Front Porch realism/system-prompt blobs, while the
+                # row id and avatar filename stay private UUIDs.
+                data["_original_stable_id"] = source_character_id
+                avatar_diag = self._write_group_member_avatar_file(avatar_dir / avatar_name, data, member_id)
+                ext = data.get("extensions") if isinstance(data.get("extensions"), dict) else {}
+                front_porch_ext = ext.get("front_porch") if isinstance(ext.get("front_porch"), dict) else {}
+                raw_ext = copy.deepcopy(ext)
+                member_rows.append({
+                    "id": member_id,
+                    "group_id": group_id,
+                    "name": str(data.get("name") or f"Member {idx}"),
+                    "description": str(data.get("description") or ""),
+                    "personality": str(data.get("personality") or ""),
+                    "scenario": str(data.get("scenario") or ""),
+                    "first_message": str(data.get("first_mes") or data.get("first_message") or ""),
+                    "mes_example": str(data.get("mes_example") or ""),
+                    "system_prompt": str(data.get("system_prompt") or ""),
+                    "post_history_instructions": str(data.get("post_history_instructions") or ""),
+                    "alternate_greetings": json.dumps(data.get("alternate_greetings") if isinstance(data.get("alternate_greetings"), list) else [], ensure_ascii=False),
+                    "tags": json.dumps(data.get("tags") if isinstance(data.get("tags"), list) else [], ensure_ascii=False),
+                    "avatar_filename": avatar_name,
+                    # Schema drift guard: current Front Porch docs use avatar_filename,
+                    # but log/write common aliases if Rawhide changed the column name.
+                    # _sqlite_insert_dynamic only writes aliases that actually exist.
+                    "avatar_path": avatar_name,
+                    "avatar_file": avatar_name,
+                    "avatar_file_name": avatar_name,
+                    "avatarFilename": avatar_name,
+                    "image_path": avatar_name,
+                    "image_filename": avatar_name,
+                    "image": avatar_name,
+                    "tts_voice": data.get("tts_voice"),
+                    "lorebook": json.dumps(data.get("character_book") if isinstance(data.get("character_book"), dict) else {"entries": []}, ensure_ascii=False),
+                    "world_names": json.dumps(data.get("world_names") if isinstance(data.get("world_names"), list) else [], ensure_ascii=False),
+                    "front_porch_extensions": json.dumps(front_porch_ext, ensure_ascii=False),
+                    "raw_extensions": json.dumps(raw_ext, ensure_ascii=False),
+                    "member_state": "{}",
+                    "created_at": member_ts,
+                    "updated_at": member_ts,
+                })
+
+            profile = (((payload.get("extensions") or {}).get("character_card_forge") or {}).get("group_profile") or {}) if isinstance(payload.get("extensions"), dict) else {}
+            if not profile and isinstance(loaded.get("groupProfile"), dict):
+                profile = loaded.get("groupProfile")
+            group_lorebook = payload.get("group_lorebook") if payload.get("group_lorebook") is not None else json.dumps({"entries": []}, ensure_ascii=False)
+            baseline_obj = self._json_loads_or_default(payload.get("baseline_realism_state"), {})
+            default_obj = self._json_loads_or_default(payload.get("default_member_realism_state") or payload.get("realism_state"), {})
+            prompts_obj = self._json_loads_or_default(payload.get("character_system_prompts"), {})
+            # Remap the temporary .group-card stable IDs to the real normal
+            # Front Porch character IDs created above.  group_members still use
+            # private UUID row IDs/avatar filenames, but the state blobs and
+            # legacy character_ids column should resolve to actual characters.
+            baseline_obj = self._remap_json_keys(baseline_obj, stable_id_map)
+            default_obj = self._remap_json_keys(default_obj, stable_id_map)
+            prompts_obj = self._remap_json_keys(prompts_obj, stable_id_map)
+            baseline = self._json_string_or_default(baseline_obj, {})
+            default_realism = self._json_string_or_default(default_obj, {})
+            character_prompts = self._json_string_or_default(prompts_obj, {})
+            group_values = {
+                "id": group_id,
+                "name": str(payload.get("name") or "Group Card"),
+                "description": str(profile.get("group_overview") or ""),
+                "scenario": str(payload.get("scenario") or ""),
+                "first_message": str(payload.get("first_message") or ""),
+                "system_prompt": str(payload.get("system_prompt") or ""),
+                "turn_order": str(payload.get("turn_order") or "roundRobin"),
+                "auto_advance": 1 if payload.get("auto_advance") else 0,
+                "director_mode": 1 if payload.get("director_mode") else 0,
+                # Match Front Porch-created groups: members come from
+                # group_members, while the source character links live inside
+                # realism/system-prompt state blobs.  Filling character_ids with
+                # private/member/source IDs can make some Rawhide UI paths treat
+                # the group as malformed.
+                "character_ids": json.dumps([], ensure_ascii=False),
+                "characterIds": json.dumps([], ensure_ascii=False),
+                "default_member_realism_state": default_realism,
+                "baseline_realism_state": baseline,
+                "character_system_prompts": character_prompts,
+                "group_lorebook": self._json_string_or_default(group_lorebook, {"entries": []}),
+                "world_ids": self._json_string_or_default(payload.get("world_ids"), []),
+                "inherit_character_lorebooks": 1 if payload.get("inherit_character_lorebooks", True) else 0,
+                "chaos_mode_enabled": 1 if payload.get("chaos_mode_enabled") else 0,
+                "chaos_nsfw_enabled": 1 if payload.get("chaos_nsfw_enabled") else 0,
+                "created_at": now,
+                "updated_at": now,
+                "deleted_at": None,
+            }
+            if "characters" in tables:
+                for row in source_character_rows:
+                    self._sqlite_insert_dynamic(cur, "characters", row)
+            if "sessions" in tables:
+                for row in source_session_rows:
+                    self._sqlite_insert_dynamic(cur, "sessions", row)
+            if "messages" in tables:
+                for row in source_message_rows:
+                    self._sqlite_insert_dynamic(cur, "messages", row)
+            try:
+                self._log_event("front_porch_group_source_characters", {
+                    "groupId": group_id,
+                    "characterIds": source_character_ids,
+                    "characterImages": [str(chars_dir / f"{cid}.png") for cid in source_character_ids],
+                    "frontPorchAssetRoot": str(asset_root),
+                    "groupAvatarDir": str(avatar_dir),
+                })
+            except Exception:
+                pass
+            self._sqlite_insert_dynamic(cur, "groups", group_values)
+            try:
+                groups_info = self._sqlite_table_info(cur, "groups")
+                group_select_cols = [c for c in ("id", "name", "character_ids", "characterIds", "turn_order", "auto_advance", "director_mode", "avatar_filename", "avatar_path", "image_path", "cover_image", "thumbnail") if c in groups_info]
+                if group_select_cols:
+                    q = ", ".join(group_select_cols)
+                    r = cur.execute(f"SELECT {q} FROM groups WHERE id = ?", (group_id,)).fetchone()
+                    if r:
+                        self._log_event("front_porch_group_db_row", {"groupId": group_id, "columns": group_select_cols, "row": {group_select_cols[i]: r[i] for i in range(len(group_select_cols))}})
+            except Exception as e:
+                self._log_event("front_porch_group_db_row_error", {"groupId": group_id, "error": str(e)})
+            for row in member_rows:
+                self._sqlite_insert_dynamic(cur, "group_members", row)
+            try:
+                gm_info = self._sqlite_table_info(cur, "group_members")
+                avatar_cols = [c for c in gm_info.keys() if any(tok in c.lower() for tok in ("avatar", "image", "file"))]
+                select_cols = ["id", "group_id", "name"] + avatar_cols
+                select_cols = [c for c in select_cols if c in gm_info]
+                if select_cols:
+                    q = ", ".join(select_cols)
+                    rows = cur.execute(f"SELECT {q} FROM group_members WHERE group_id = ?", (group_id,)).fetchall()
+                    snapshots = []
+                    for r in rows:
+                        snapshots.append({select_cols[i]: r[i] for i in range(len(select_cols))})
+                    self._log_event("front_porch_group_member_db_rows", {"groupId": group_id, "columns": select_cols, "rows": snapshots})
+            except Exception as e:
+                self._log_event("front_porch_group_member_db_rows_error", {"groupId": group_id, "error": str(e)})
+
+            session_id = str(now_ms + len(source_character_ids) + 1000)
+            if "sessions" in tables:
+                session_values = {
+                    "id": session_id,
+                    "character_id": None,
+                    "group_id": group_id,
+                    "name": str(payload.get("name") or "Group Card"),
+                    "description": str(profile.get("group_overview") or ""),
+                    "author_note": "",
+                    "author_note_depth": 4,
+                    "summary": None,
+                    "summary_last_index": None,
+                    "parent_session": None,
+                    "fork_index": None,
+                    "affection_score": 0,
+                    "relationship_tier": 0,
+                    "long_term_score": 0,
+                    "long_term_tier": 0,
+                    "turns_since_long_term_check": 0,
+                    "short_term_deltas_summary": 0,
+                    "realism_enabled": 1,
+                    "short_term_mood": 0,
+                    "mood_decay_counter": 0,
+                    "character_emotion": "neutral",
+                    "emotion_intensity": "mild",
+                    "time_of_day": "afternoon",
+                    "day_count": 1,
+                    "nsfw_cooldown_enabled": 1,
+                    "passage_of_time_enabled": 1,
+                    "arousal_level": 0,
+                    "cooldown_turns_remaining": 0,
+                    "trust_level": 0,
+                    "active_fixation": "",
+                    "fixation_lifespan": 0,
+                    "spatial_stance": "",
+                    "trust_repair_pending": 0,
+                    "chaos_mode_enabled": 1 if payload.get("chaos_mode_enabled") else 0,
+                    "chaos_pressure": 0,
+                    "evolved_personality": "",
+                    "evolved_scenario": "",
+                    "evolution_count": 0,
+                    "group_evolved_personalities": "{}",
+                    "group_evolved_scenarios": "{}",
+                    "generation_settings": None,
+                    "group_realism_state": default_realism,
+                    "start_day_of_week": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                    "deleted_at": None,
+                    "user_persona_id": None,
+                }
+                self._sqlite_insert_dynamic(cur, "sessions", session_values)
+                first_message = str(payload.get("first_message") or "").strip()
+                if first_message and "messages" in tables:
+                    cur.execute("""
+                        INSERT INTO messages (id, session_id, position, sender, is_user, character_id, swipes, swipe_index, swipe_durations, metadata, swipe_metadata, updated_at, deleted_at)
+                        VALUES (?, ?, 0, ?, 0, NULL, ?, 0, '[0]', NULL, NULL, ?, NULL)
+                    """, (str(uuid.uuid4()), session_id, str(payload.get("name") or "Group"), json.dumps([first_message], ensure_ascii=False), now))
+            try:
+                cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
+            except Exception:
+                pass
+            con.commit()
+            try:
+                avatar_checks = []
+                for mid in member_ids:
+                    avatar_checks.append(self._png_file_diagnostics(avatar_dir / f"{mid}.png"))
+                self._log_event("front_porch_group_export_verify", {
+                    "groupId": group_id,
+                    "db": str(db),
+                    "avatarDir": str(avatar_dir),
+                    "avatarDirExists": avatar_dir.exists(),
+                    "avatarFiles": sorted([p.name for p in avatar_dir.glob("*.png")]) if avatar_dir.exists() else [],
+                    "avatarChecks": avatar_checks,
+                })
+            except Exception as e:
+                self._log_event("front_porch_group_export_verify_error", {"groupId": group_id, "error": str(e)})
+            con.close()
+            self._log_event("front_porch_group_export", {"name": payload.get("name"), "groupId": group_id, "target": "beta", "members": len(member_rows), "sourceCharacterIds": source_character_ids, "db": str(db), "avatarDir": str(avatar_dir), "backup": str(backup_path)})
+            return {"ok": True, "name": payload.get("name") or "Group Card", "groupId": group_id, "sessionId": session_id, "target": "beta", "targetLabel": "Beta", "database": str(db), "memberCount": len(member_rows), "memberCharacterIds": source_character_ids, "avatarDir": str(avatar_dir), "charactersDir": str(chars_dir), "backup": str(backup_path)}
+        except Exception as e:
+            try:
+                if con:
+                    con.rollback(); con.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Front Porch Beta Group Card export failed: {e}. Database backup was created at: {backup_path}"}
 
     def export_front_porch_from_project(self, project_path, settings=None, target=None, *args):
         """Export a saved project directly into Front Porch AI.
@@ -11218,7 +13905,25 @@ class Api:
             settings = None
         loaded = self.load_character_project(project_path)
         if not loaded.get("ok"):
+            self._log_event("front_porch_project_export_load_failed", {"project": str(project_path), "error": loaded.get("error")})
             return loaded
+        is_group_project = self._loaded_project_is_group_card(loaded)
+        self._log_event("front_porch_project_export_start", {
+            "project": str(project_path),
+            "target": target,
+            "isGroupProject": bool(is_group_project),
+            "frontend": loaded.get("frontend"),
+            "exportFormat": loaded.get("exportFormat"),
+            "groupCardPath": loaded.get("groupCardPath"),
+            "hasGroupPayload": isinstance(loaded.get("groupPayload"), dict) and loaded.get("groupPayload", {}).get("spec") == "front_porch_group_card",
+        })
+        if is_group_project:
+            merged_settings = {**(loaded.get("settings") or {}), **self.settings}
+            if isinstance(settings, dict):
+                merged_settings = {**merged_settings, **settings}
+            if target:
+                merged_settings["frontPorchExportTarget"] = str(target or "beta").strip().lower()
+            return self.export_group_card_to_front_porch_beta(loaded, merged_settings, target=merged_settings.get("frontPorchExportTarget") or target or "beta")
         # Current app settings win over older settings saved inside the character workspace,
         # otherwise a saved project with a blank Front Porch folder can mask the value the user just entered.
         merged_settings = {**(loaded.get("settings") or {}), **self.settings}
@@ -11793,8 +14498,68 @@ class Api:
             "sillytavern_chara_card_v2": card_v2,
         }
 
+    def _image_mime_from_bytes(self, raw):
+        """Guess a browser-safe image MIME from decoded bytes."""
+        try:
+            if not raw:
+                return ""
+            if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                return "image/png"
+            if raw.startswith(b"\xff\xd8\xff"):
+                return "image/jpeg"
+            if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+                return "image/webp"
+            if raw.startswith(b"GIF87a") or raw.startswith(b"GIF89a"):
+                return "image/gif"
+        except Exception:
+            pass
+        return ""
+
+    def _raw_base64_image_to_data_url(self, value, preferred_mime=""):
+        """Convert raw image base64 into a data URL when the bytes really are an image."""
+        try:
+            text = str(value or "").strip()
+            if len(text) < 256:
+                return ""
+            if text.lower().startswith(("data:", "http://", "https://", "file://")):
+                return ""
+            if text.startswith("{") or text.startswith("["):
+                return ""
+            compact = re.sub(r"\s+", "", text)
+            if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact):
+                return ""
+            pad = "=" * (-len(compact) % 4)
+            candidates = [compact + pad]
+            if "-" in compact or "_" in compact:
+                candidates.append(compact.replace("-", "+").replace("_", "/") + pad)
+            for candidate in candidates:
+                try:
+                    raw = base64.b64decode(candidate, validate=False)
+                except Exception:
+                    continue
+                mime = preferred_mime if str(preferred_mime or "").lower().startswith("image/") else self._image_mime_from_bytes(raw)
+                if not mime:
+                    continue
+                # Verify it is actually loadable by Pillow before surfacing it.
+                try:
+                    with Image.open(io.BytesIO(raw)) as img:
+                        img.verify()
+                except Exception:
+                    continue
+                return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+        except Exception:
+            return ""
+        return ""
+
     def _candidate_image_data_url_from_value(self, value):
-        """Return an image data URL found inside a value, if one exists."""
+        """Return an image data URL found inside a value, if one exists.
+
+        CCF has used several storage shapes over time: normal data URLs, raw
+        base64 strings, and dictionaries with base64/b64/bytes plus a MIME field.
+        Front Porch group-member avatars need the real image bytes, so this helper
+        accepts all of those shapes while rejecting non-image base64 such as chara
+        JSON.
+        """
         if value is None:
             return ""
         if isinstance(value, str):
@@ -11802,11 +14567,28 @@ class Api:
             if text.lower().startswith("data:image/") and ";base64," in text.lower():
                 return text
             # Some saved JSON/workspace strings can contain a nested data URL.
-            m = re.search(r"data:image/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=_\\s-]+", text, re.I)
-            return m.group(0) if m else ""
+            m = re.search(r"data:image/[a-z0-9.+-]+(?:;charset=[^;,]+)?;base64,[A-Za-z0-9+/=_\\s-]+", text, re.I)
+            if m:
+                return m.group(0)
+            # Some CCF/browser DB fields store the image as raw base64 only.
+            return self._raw_base64_image_to_data_url(text)
         if isinstance(value, dict):
-            for key in ("dataUrl", "data_url", "imageDataUrl", "image_data_url", "url", "uri", "src", "image", "data"):
+            mime = str(value.get("mime") or value.get("mime_type") or value.get("content_type") or value.get("type") or "").strip()
+            # Prefer obvious combined image fields first.
+            for key in ("dataUrl", "data_url", "imageDataUrl", "image_data_url", "url", "uri", "src", "image"):
                 found = self._candidate_image_data_url_from_value(value.get(key))
+                if found:
+                    return found
+            # Then support split/raw base64 payload fields.
+            for key in ("base64", "b64", "bytes", "data", "imageBase64", "image_base64", "thumbnailBase64", "thumbnail_base64"):
+                raw_value = value.get(key)
+                if isinstance(raw_value, str):
+                    found = self._raw_base64_image_to_data_url(raw_value, mime)
+                    if found:
+                        return found
+            # Finally recurse through remaining values.
+            for child in value.values():
+                found = self._candidate_image_data_url_from_value(child)
                 if found:
                     return found
         return ""
@@ -11892,7 +14674,15 @@ class Api:
             if obj is None:
                 return
             if isinstance(obj, str):
-                # A field may be exactly a data URL, or it may be a JSON/text blob containing one.
+                # A field may be exactly a data URL, a raw image base64 string,
+                # or a JSON/text blob containing a data URL.
+                direct = self._candidate_image_data_url_from_value(obj)
+                if direct and direct not in seen:
+                    seen.add(direct)
+                    count += 1
+                    yield direct
+                    if count >= limit:
+                        return
                 for m in re.finditer(r"data:image/[a-z0-9.+-]+(?:;charset=[^;,]+)?;base64,[A-Za-z0-9+/=_\s-]+", obj, re.I):
                     data_url = m.group(0).strip()
                     if data_url and data_url not in seen:
@@ -11929,12 +14719,67 @@ class Api:
                         return
         yield from walk(value)
 
+    def _png_file_has_nonblank_visible_pixels(self, path):
+        """Return True when an image file appears to contain real visible art."""
+        try:
+            p = Path(str(path or ""))
+            if not p.exists() or not p.is_file():
+                return False
+            with Image.open(p) as img:
+                sample = img.convert("RGBA")
+                sample.thumbnail((32, 32))
+                pixels = list(sample.getdata())
+            if not pixels:
+                return False
+            channels = list(zip(*pixels))
+            rgb_delta = max((max(ch) - min(ch)) for ch in channels[:3]) if len(channels) >= 3 else 0
+            alpha_delta = (max(channels[3]) - min(channels[3])) if len(channels) > 3 else 0
+            return rgb_delta >= 8 or alpha_delta >= 8
+        except Exception:
+            return False
+
+    def _avatar_base64_has_nonblank_visible_pixels(self, avatar_b64):
+        try:
+            raw = base64.b64decode(str(avatar_b64 or ""), validate=False)
+            if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                return False
+            with Image.open(io.BytesIO(raw)) as img:
+                sample = img.convert("RGBA")
+                sample.thumbnail((32, 32))
+                pixels = list(sample.getdata())
+            if not pixels:
+                return False
+            channels = list(zip(*pixels))
+            rgb_delta = max((max(ch) - min(ch)) for ch in channels[:3]) if len(channels) >= 3 else 0
+            alpha_delta = (max(channels[3]) - min(channels[3])) if len(channels) > 3 else 0
+            return rgb_delta >= 8 or alpha_delta >= 8
+        except Exception:
+            return False
+
+    def _front_porch_project_image_from_library_cache(self, project_path, reason="front_porch_library_cache_image"):
+        """Recover a Browser thumbnail when older projects lost the original image path."""
+        try:
+            row = self._library_get_card_row(Path(str(project_path or "")).expanduser())
+        except Exception:
+            row = None
+        if not row:
+            return ""
+        for key in ("thumbnail_data_url", "image_data_url"):
+            thumb = str(row.get(key) or "").strip()
+            if not thumb:
+                continue
+            local = self._ensure_local_card_image_path(thumb, "card", reason)
+            if local and Path(local).exists() and self._png_file_has_nonblank_visible_pixels(local):
+                self._log_event("front_porch_image_library_cache_materialized", {"project": str(project_path or ""), "key": key, "path": local})
+                return local
+        return ""
+
     def _front_porch_project_image_from_assets(self, project_path, selected_path="", reason="front_porch_asset_image"):
         """Restore the selected/main card image from the workspace asset DB using the real project path."""
         try:
             rows = self._load_workspace_assets_from_db(project_path)
         except Exception as e:
-            self._log_event("front_porch_image_asset_lookup_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("front_porch_image_asset_lookup_failed", {"project": str(canonical_project_path), "error": str(e)})
             rows = []
         if not rows:
             return ""
@@ -11972,12 +14817,17 @@ class Api:
 
         for row in ordered:
             blob = row.get("data_blob")
-            if not blob:
-                continue
             mime = row.get("mime_type") or "image/png"
             label = f"{reason}_{row.get('asset_key') or 'asset'}"
-            path = self._save_raw_card_image_bytes(blob, mime, "card", label)
-            if path:
+            path = ""
+            if blob:
+                path = self._save_raw_card_image_bytes(blob, mime, "card", label)
+            if not path:
+                data_text = row.get("data_text") or ""
+                data_url = self._candidate_image_data_url_from_value(data_text)
+                if data_url:
+                    path = self._ensure_local_card_image_path(data_url, "card", label + "_data_text")
+            if path and self._png_file_has_nonblank_visible_pixels(path):
                 self._log_event("front_porch_image_asset_materialized", {
                     "project": str(project_path),
                     "selectedPath": selected,
@@ -11986,6 +14836,14 @@ class Api:
                     "path": path,
                 })
                 return path
+            if path:
+                self._log_event("front_porch_image_asset_skipped_flat", {
+                    "project": str(project_path),
+                    "selectedPath": selected,
+                    "assetKey": row.get("asset_key"),
+                    "assetType": row.get("asset_type"),
+                    "path": path,
+                })
         return ""
 
     def _front_porch_project_image_from_json(self, project_path, selected_path="", reason="front_porch_project_json"):
@@ -11993,7 +14851,7 @@ class Api:
         try:
             payload = json.loads(Path(project_path).read_text(encoding="utf-8"))
         except Exception as e:
-            self._log_event("front_porch_image_project_json_read_failed", {"project": str(project_path), "error": str(e)})
+            self._log_event("front_porch_image_project_json_read_failed", {"project": str(canonical_project_path), "error": str(e)})
             return ""
         project = payload.get("project", payload) if isinstance(payload, dict) else {}
         if not isinstance(project, dict):
@@ -12062,16 +14920,20 @@ class Api:
 
         for candidate in candidates:
             local = self._ensure_local_card_image_path(candidate, "card", reason)
-            if local:
+            if local and self._png_file_has_nonblank_visible_pixels(local):
                 self._log_event("front_porch_image_project_json_materialized", {"project": str(project_path), "sourceKind": "candidate", "path": local})
                 return local
+            if local:
+                self._log_event("front_porch_image_project_json_skipped_flat", {"project": str(project_path), "sourceKind": "candidate", "path": local})
 
-        # Last resort: recursively scan the saved project for any embedded data:image URL.
+        # Last resort: recursively scan the saved project for any embedded image data.
         for data_url in self._iter_image_data_urls_deep(project):
             local = self._ensure_local_card_image_path(data_url, "card", reason + "_deep_scan")
-            if local:
+            if local and self._png_file_has_nonblank_visible_pixels(local):
                 self._log_event("front_porch_image_project_json_materialized", {"project": str(project_path), "sourceKind": "deep_data_url", "path": local})
                 return local
+            if local:
+                self._log_event("front_porch_image_project_json_skipped_flat", {"project": str(project_path), "sourceKind": "deep_data_url", "path": local})
         return ""
 
     def _image_file_is_probably_blank_placeholder(self, path):
@@ -12130,7 +14992,7 @@ class Api:
                 payload = json.loads(project_path.read_text(encoding="utf-8"))
                 project = payload.get("project", payload) if isinstance(payload, dict) else {}
             except Exception as e:
-                self._log_event("front_porch_existing_card_png_json_read_failed", {"project": str(project_path), "error": str(e)})
+                self._log_event("front_porch_existing_card_png_json_read_failed", {"project": str(canonical_project_path), "error": str(e)})
                 project = {}
             if isinstance(project, dict):
                 workspace = project.get("workspace") if isinstance(project.get("workspace"), dict) else {}
@@ -12144,9 +15006,22 @@ class Api:
                 if name:
                     add_path(folder / f"{self._safe_slug(name)}_latest_cardv2.png")
 
-            # Folder-level legacy fallbacks. Prefer latest_cardv2, then newest cardv2.
+            # Folder-level legacy fallbacks. Prefer latest_cardv2, then newest cardv2,
+            # then any non-placeholder image in the project folder.
             candidates.extend(sorted(folder.glob("*_latest_cardv2.png"), key=lambda x: x.stat().st_mtime, reverse=True))
             candidates.extend(sorted(folder.glob("*_cardv2.png"), key=lambda x: x.stat().st_mtime, reverse=True))
+            extra_images = []
+            emotion_names = {f"{e}.png" for e in EMOTION_OPTIONS}
+            for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+                try:
+                    extra_images.extend(folder.glob(pattern))
+                except Exception:
+                    pass
+            for extra in sorted(extra_images, key=lambda x: x.stat().st_mtime, reverse=True):
+                low = extra.name.lower()
+                if low in emotion_names or ".group." in low or low.endswith(".group.png"):
+                    continue
+                candidates.append(extra)
 
             seen = set()
             for candidate in candidates:
@@ -12187,39 +15062,51 @@ class Api:
             attempts.append({"label": label, "candidatePrefix": candidate[:120], "ok": bool(local), "local": local})
             return local
 
-        local = try_candidate(original, "passed_image_path")
+        def accept_local(local, method):
+            if not local:
+                return ""
+            if self._png_file_has_nonblank_visible_pixels(local):
+                self._log_event("front_porch_image_resolved", {"reason": reason, "method": method, "path": local})
+                return local
+            self._log_event("front_porch_image_candidate_skipped_flat", {"reason": reason, "method": method, "path": local})
+            return ""
+
+        local = accept_local(try_candidate(original, "passed_image_path"), "passed_image_path")
         if local:
-            self._log_event("front_porch_image_resolved", {"reason": reason, "method": "passed_image_path", "path": local})
             return local
 
         if isinstance(loaded_project, dict):
-            for key in ("imagePath", "imageDataUrl"):
-                local = try_candidate(loaded_project.get(key), f"loaded_{key}")
+            for key in ("imagePath", "imageDataUrl", "cardImagePath", "cardImageDataUrl"):
+                local = accept_local(try_candidate(loaded_project.get(key), f"loaded_{key}"), f"loaded_{key}")
                 if local:
-                    self._log_event("front_porch_image_resolved", {"reason": reason, "method": f"loaded_{key}", "path": local})
                     return local
             local = self._resolve_workspace_card_image_path(loaded_project, original, f"{reason}_loaded_workspace")
             attempts.append({"label": "loaded_workspace_candidates", "ok": bool(local), "local": local})
+            local = accept_local(local, "loaded_workspace_candidates")
             if local:
-                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "loaded_workspace_candidates", "path": local})
                 return local
 
         if project_path:
             # Use the actual project_path supplied by the frontend, not the old embedded projectPath inside JSON.
             local = self._front_porch_project_image_from_assets(project_path, original, f"{reason}_asset_db")
             attempts.append({"label": "asset_db", "ok": bool(local), "local": local})
+            local = accept_local(local, "asset_db")
             if local:
-                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "asset_db", "path": local})
                 return local
             local = self._front_porch_project_image_from_json(project_path, original, f"{reason}_project_json")
             attempts.append({"label": "project_json", "ok": bool(local), "local": local})
+            local = accept_local(local, "project_json")
             if local:
-                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "project_json", "path": local})
+                return local
+            local = self._front_porch_project_image_from_library_cache(project_path, f"{reason}_library_cache")
+            attempts.append({"label": "library_cache", "ok": bool(local), "local": local})
+            local = accept_local(local, "library_cache")
+            if local:
                 return local
             local = self._front_porch_existing_card_png_from_project(project_path, f"{reason}_existing_card_png")
             attempts.append({"label": "existing_card_png", "ok": bool(local), "local": local})
+            local = accept_local(local, "existing_card_png")
             if local:
-                self._log_event("front_porch_image_resolved", {"reason": reason, "method": "existing_card_png", "path": local})
                 return local
 
         self._log_event("front_porch_image_resolution_failed", {"reason": reason, "imagePathPrefix": original[:200], "project": str(project_path or ""), "attempts": attempts})
@@ -12382,9 +15269,14 @@ class Api:
         # import this directly as a card image.
         metadata = PngInfo()
         json_text = json.dumps(payload, ensure_ascii=False)
-        metadata.add_text("chara", base64.b64encode(json_text.encode("utf-8")).decode("ascii"))
-        metadata.add_text("ccf_raw", payload.get("data", {}).get("extensions", {}).get("raw_card", ""))
+        text_chunks = {
+            "chara": base64.b64encode(json_text.encode("utf-8")).decode("ascii"),
+            "ccf_raw": payload.get("data", {}).get("extensions", {}).get("raw_card", ""),
+        }
+        for k, v in text_chunks.items():
+            metadata.add_text(k, v)
         img.save(path, "PNG", pnginfo=metadata)
+        self._ensure_png_text_chunks(path, text_chunks, log_reason="write_chara_png")
 
     def _extract_alternates(self, text):
         """Return clean individual alternate greetings for Chara Card V2.

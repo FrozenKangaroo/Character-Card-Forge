@@ -51,6 +51,48 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # Windows needs an .ico for the executable/taskbar icon.
+      # This is generated from the same icon.png used by the Linux AppImage build.
+      - name: Prepare Windows Icon
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          pip install pillow
+          New-Item -ItemType Directory -Force build | Out-Null
+          @'
+          from pathlib import Path
+          from PIL import Image
+
+          src = Path("icon.png")
+          out = Path("build/character-card-forge.ico")
+          if not src.exists():
+              raise SystemExit("icon.png not found; cannot create Windows icon")
+
+          img = Image.open(src).convert("RGBA")
+          sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+          img.save(out, format="ICO", sizes=sizes)
+          print(f"Wrote {out}")
+          '@ | python -
+
+      # macOS needs an .icns for the .app bundle icon.
+      # This is generated from the same icon.png used by the Linux AppImage build.
+      - name: Prepare macOS Icon
+        if: matrix.os == 'macos-latest'
+        run: |
+          test -f icon.png || (echo "icon.png not found; cannot create macOS icon" && exit 1)
+          mkdir -p build/character-card-forge.iconset
+          sips -z 16 16     icon.png --out build/character-card-forge.iconset/icon_16x16.png
+          sips -z 32 32     icon.png --out build/character-card-forge.iconset/icon_16x16@2x.png
+          sips -z 32 32     icon.png --out build/character-card-forge.iconset/icon_32x32.png
+          sips -z 64 64     icon.png --out build/character-card-forge.iconset/icon_32x32@2x.png
+          sips -z 128 128   icon.png --out build/character-card-forge.iconset/icon_128x128.png
+          sips -z 256 256   icon.png --out build/character-card-forge.iconset/icon_128x128@2x.png
+          sips -z 256 256   icon.png --out build/character-card-forge.iconset/icon_256x256.png
+          sips -z 512 512   icon.png --out build/character-card-forge.iconset/icon_256x256@2x.png
+          sips -z 512 512   icon.png --out build/character-card-forge.iconset/icon_512x512.png
+          sips -z 1024 1024 icon.png --out build/character-card-forge.iconset/icon_512x512@2x.png
+          iconutil -c icns build/character-card-forge.iconset -o build/character-card-forge.icns
+
       # --- COMPILATION & PACKAGING PHASE ---
 
       - name: Build Standalone Executable (Windows)
@@ -58,7 +100,7 @@ jobs:
         shell: pwsh
         run: |
           # Added VERSION mapping to match local fix behavior
-          pyinstaller --hidden-import certifi --collect-data certifi --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend;./frontend" --add-data "data;./data" --add-data "VERSION;." app.py
+          pyinstaller --hidden-import certifi --collect-data certifi --noconfirm --onedir --windowed --name="Character-Card-Forge" --icon "build/character-card-forge.ico" --add-data "frontend;./frontend" --add-data "data;./data" --add-data "VERSION;." app.py
           cd dist
           tar -a -c -f Character-Card-Forge-Windows.zip Character-Card-Forge
 
@@ -66,10 +108,11 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           # Added VERSION mapping to ensure Mac builds fetch correctly from bundle roots
-          pyinstaller --hidden-import certifi --collect-data certifi --noconfirm --onedir --windowed --name="Character-Card-Forge" --add-data "frontend:frontend" --add-data "data:data" --add-data "VERSION:." app.py
+          pyinstaller --hidden-import certifi --collect-data certifi --noconfirm --onedir --windowed --name="Character-Card-Forge" --icon "build/character-card-forge.icns" --add-data "frontend:frontend" --add-data "data:data" --add-data "VERSION:." app.py
           mkdir -p dist/dmg
           create-dmg \
             --volname "Character Card Forge" \
+            --volicon "build/character-card-forge.icns" \
             --window-size 500 300 \
             --icon-size 100 \
             --app-drop-link 350 115 \
