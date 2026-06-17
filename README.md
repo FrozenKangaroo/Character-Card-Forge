@@ -1,3 +1,22 @@
+## v1.0.10
+
+- Stable public release of the v1.0.10 cycle.
+- Group Card export now supports both stable and beta Front Porch AI builds now that Group Chat is available in stable.
+- Removed the `-beta` suffix from the app version and frontend cache-busting.
+- Added API Image Model support alongside local SD Forge / Automatic1111 generation.
+- Added Image Generation provider setting: Local SD Forge / Automatic1111 or API Image Model.
+- Added Image API Base URL / API Key fields, which can fall back to the existing text API settings.
+- Added dynamic API image model fetching from OpenAI/NanoGPT-style `/models?detailed=true` metadata.
+- API image model picker filters for usable text-to-image / text+image-to-image models and skips obvious tools/upscalers/edit-only routes for this first beta.
+- Added API Resolution / Size setting so models can use values such as `1024x1024`, `1:1`, `2k`, `4k`, or `auto` depending on the selected model.
+- Added API Prompt Style setting:
+  - Auto chooses between Stable Diffusion tag prompts and natural-English prompts based on the model family.
+  - Stable Diffusion tag mode sends the existing Positive Prompt / Negative Prompt style.
+  - Natural English mode builds a character-card portrait instruction from the card fields and visual prompt notes.
+- API image generation accepts cards even if the Stable Diffusion Prompt section is missing; local SD Forge still requires a positive prompt.
+- API image responses are parsed flexibly from OpenAI-style `data[].b64_json`, provider URLs, raw base64, raw image bytes, and common nested response shapes.
+- Generated API images are saved into the same generated-image workflow as local SD images, so Use This / Card Image / export behaviour remains shared.
+
 ## v1.0.9
 
 - Fixed Quick Save / Image Card Image preview showing as broken while the selected image still exported and appeared in Character Browser.
@@ -31,11 +50,11 @@
 - Updated version files and frontend cache-busting to `1.0.9-beta25`.
 
 ### v1.0.9-beta22
-- Group Card Front Porch export is now Beta-only in the UI even for older/stale Browser metadata.
+- Group Card Front Porch export now supports Stable and Beta targets.
 - Added stronger Group Card detection using saved project metadata and group-preview text markers.
 - Group member avatars now reject flat placeholder PNGs and try harder to recover real images from saved project data, browser cache thumbnails, existing card PNGs, and nearby image files.
 - Exporting an existing Group Card now rewrites the `.group.png` from the refreshed `fpa_group` payload instead of copying an older placeholder-avatar file.
-- Direct Beta Group Card export refreshes placeholder/missing `avatar_base64` values from the original member projects before writing `group_members` avatar files.
+- Direct Group Card export refreshes placeholder/missing `avatar_base64` values from the original member projects before writing `group_members` avatar files.
 - Single-card Front Porch export no longer hard-fails just because an image cannot be restored; it falls back to a metadata-safe placeholder like older builds.
 - Updated version files and frontend cache-busting to `1.0.9-beta22`.
 

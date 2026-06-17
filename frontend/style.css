@@ -3110,3 +3110,18 @@ main {
     width: 100%;
   }
 }
+
+.browser-show-more-card {
+  border: 1px dashed rgba(160, 174, 192, 0.45);
+  border-radius: 14px;
+  padding: 18px;
+  min-height: 120px;
+  background: rgba(18, 24, 38, 0.68);
+  color: var(--text, #e5e7eb);
+  font-weight: 700;
+  cursor: pointer;
+}
+.browser-show-more-card:hover {
+  border-color: rgba(147, 197, 253, 0.8);
+  background: rgba(30, 41, 59, 0.92);
+}

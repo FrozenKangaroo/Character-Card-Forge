@@ -376,13 +376,22 @@
         </div>
 
         <div id="settings-sd" class="subtab-panel" data-subtab-panel="settings">
-          <div class="card wide"><div class="card-title"><div><h3>Stable Diffusion</h3><p>SD Forge / Automatic1111 settings for portrait and emotion image generation.</p></div><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button></div></div>
+          <div class="card wide"><div class="card-title"><div><h3>Image Generation</h3><p>Choose local SD Forge / Automatic1111 or an OpenAI-compatible image API such as NanoGPT image models.</p></div><div class="actions"><button id="fetchSdModelsBtn" type="button">Fetch SD Models</button><button id="fetchApiImageModelsBtn" type="button">Fetch API Image Models</button></div></div>
             <div class="settings-grid">
+              <label>Image Provider<select id="imageGenerationProvider"><option value="sd">Local SD Forge / Automatic1111</option><option value="api">API Image Model</option></select></label>
+              <label>Generated Images<input id="sdImageCountSettings" type="number" min="1" max="20" step="1" value="4" /></label>
               <label>SD Forge Base URL<input id="sdBaseUrl" placeholder="http://127.0.0.1:7860" /></label>
               <label>SD Model<select id="sdModel"><option value="">Use current/default server model</option></select></label>
               <label>SD Steps<input id="sdSteps" type="number" min="1" max="150" step="1" value="28" /></label>
               <label>SD CFG Scale<input id="sdCfgScale" type="number" min="1" max="30" step="0.5" value="7" /></label>
               <label>SD Sampler<input id="sdSampler" placeholder="Euler a" /></label>
+              <label>Image API Base URL<input id="imageApiBaseUrl" placeholder="Leave blank to reuse Text API Base URL" /></label>
+              <label>Image API Key<input id="imageApiKey" type="password" placeholder="Leave blank to reuse Text API Key" /></label>
+              <label>API Image Model<select id="imageModel"><option value="">Select or enter an API image model</option></select></label>
+              <label>API Resolution / Size<input id="imageResolution" placeholder="1024x1024, 1:1, 2k, auto…" /></label>
+              <label>API Prompt Style<select id="imagePromptMode"><option value="auto">Auto: choose SD tags or natural English by model</option><option value="sd">Stable Diffusion tag prompt</option><option value="natural">Natural English prompt</option></select></label>
+              <label>Image Visual Style<select id="imageVisualStyle"><option value="anime">Anime style</option><option value="realistic">Realistic style</option></select></label>
+              <label class="wide-setting">API Image Notes<div class="small muted">API models are fetched dynamically from NanoGPT-style model metadata. Text-only tools/upscalers may appear in the source list but CCF filters to image-generation models where possible.</div></label>
             </div>
           </div>
         </div>
@@ -538,7 +547,7 @@
           <div class="actions output-actions quick-save-main-actions"><button id="openQuickImportModalBtn" type="button">Import Card</button><button id="openExportModalBtn" type="button" class="primary">Export Card</button><button id="copyBtn">Copy</button></div>
           <div class="quick-image-workflow">
             <div class="card card-image-small-card"><div class="card-title compact"><div><h3>Card Image</h3><p>Current V2 PNG portrait.</p></div></div><div class="card-image-small-preview"><img id="cardImagePreview" alt="Current card image preview" /></div><div id="cardImagePreviewHint" class="small muted card-image-small-hint">No custom image selected.</div><div class="actions vertical-actions"><button id="openCardImageModalBtn" type="button">Change Card Image</button><button id="clearImageBtn" type="button" class="danger-ghost">Clear</button></div><input id="cardImagePath" class="hidden-field" aria-hidden="true" tabindex="-1" placeholder="Optional. Leave blank to use the built-in blank PNG." /></div>
-            <div class="card image-generation-card"><div class="card-title"><div><h3>Generate Images</h3><p>Generate candidate portraits from the Stable Diffusion Prompt in the full card output. Results appear below.</p></div><div class="actions"><label class="inline-number-label">Images<input id="sdImageCount" type="number" min="1" max="16" value="4" /></label><button id="generateImagesBtn" type="button" class="primary">Generate Images</button></div></div><div id="importedCardToolsHint" class="small muted">Load or import a card first. Imported cards can generate a missing Stable Diffusion Prompt from the import modal.</div></div>
+            <div class="card image-generation-card"><div class="card-title"><div><h3>Generate Images</h3><p>Generate candidate portraits from the Stable Diffusion Prompt or a natural API image prompt. Results appear below.</p></div><div class="actions"><label class="inline-number-label">Images<input id="sdImageCount" type="number" min="1" max="20" value="4" /></label><button id="generateImagesBtn" type="button" class="primary">Generate Images</button></div></div><div class="actions compact-wrap"><button id="generateSdPromptFromOutputBtn" type="button">Full Text → SD Prompt</button><button id="generateSdPromptFromVisionBtn" type="button">Vision → SD Prompt</button><button id="generateNaturalPromptFromOutputBtn" type="button">Full Text → Natural Prompt</button></div><div id="imageGenerationProviderHint" class="small muted">Using local SD Forge / Automatic1111 image generation.</div><div id="importedCardToolsHint" class="small muted">Load or import a card first. Imported cards can generate missing image prompt sections from the buttons above.</div></div>
           </div>
           <div id="generatedImages" class="generated-images"></div>
         </div>
@@ -985,6 +994,6 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.9"></script>
+  <script src="app.js?v=1.0.10"></script>
 </body>
 </html>

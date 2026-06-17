@@ -520,8 +520,15 @@ DEFAULT_SETTINGS = {
     "alternateFirstMessages": 2,
     "exportFormat": "chara_v2_png",
     "cardImagePath": "",
+    "imageGenerationProvider": "sd",
     "sdBaseUrl": "http://127.0.0.1:7860",
     "sdModel": "",
+    "imageApiBaseUrl": "",
+    "imageApiKey": "",
+    "imageModel": "",
+    "imageResolution": "1024x1024",
+    "imagePromptMode": "auto",
+    "imageVisualStyle": "anime",
     "streamAi": False,
     "sdSteps": 28,
     "sdCfgScale": 7.0,
@@ -704,7 +711,16 @@ DEFAULT_TEMPLATE = {'globalRules': ['You are a fictional character generator and
                           {'id': 'negative',
                            'label': 'Negative Prompt',
                            'enabled': True,
-                           'hint': 'low quality, bad anatomy, blurry, watermark, text'}]}],
+                           'hint': 'low quality, bad anatomy, blurry, watermark, text'}]},
+              {'id': 'natural_image_prompt',
+               'title': 'Natural English Image Prompt',
+               'enabled': False,
+               'category': 'image',
+               'description': 'Optional natural-language prompt for API image models that respond better to normal English instructions.',
+               'fields': [{'id': 'prompt',
+                           'label': 'Prompt',
+                           'enabled': True,
+                           'hint': 'A clear natural-language prompt for portrait generation.'}]}],
  'qa': {'enabled': False,
         'questions': ['What does this character want from {{user}} at the start?',
                       'What personality flaw or contradiction makes them interesting?',
@@ -1374,10 +1390,47 @@ class Api:
         if not path.exists():
             return None
         folder = path.parent
-        project_hash = self._hash_file(path)
         row = self._library_get_card_row(path)
+        if row and not force:
+            # Very fast cache path for normal Browser opens: avoid hashing/parsing JSON
+            # and thumbnails when the project/card/image stat metadata is unchanged.
+            try:
+                extra_fast = json.loads(row.get("metadata_json") or "{}")
+                path_stat = path.stat()
+                project_stat_ok = (
+                    int(extra_fast.get("projectMtimeNs") or 0) == int(getattr(path_stat, "st_mtime_ns", int(path_stat.st_mtime * 1_000_000_000)))
+                    and int(extra_fast.get("projectSize") or -1) == int(path_stat.st_size)
+                )
+                card_png_path = str(row.get("card_png_path") or "")
+                image_fast_path = str(row.get("image_path") or "")
+                def stat_matches_fast(file_path, mtime_key, size_key):
+                    value = str(file_path or "").strip()
+                    if not value:
+                        return True
+                    fp = Path(value)
+                    if not fp.exists():
+                        return False
+                    st = fp.stat()
+                    return (
+                        int(extra_fast.get(mtime_key) or 0) == int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+                        and int(extra_fast.get(size_key) or -1) == int(st.st_size)
+                    )
+                card_stat_ok = stat_matches_fast(card_png_path, "cardPngMtimeNs", "cardPngSize")
+                image_stat_ok = stat_matches_fast(image_fast_path, "imageMtimeNs", "imageSize")
+                token_ok = (
+                    isinstance(extra_fast.get("tokenCounts"), dict)
+                    and int(extra_fast.get("tokenTotal") or 0) > 0
+                    and int(extra_fast.get("tokenBreakdownVersion") or 0) >= 3
+                )
+                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 5
+                if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok:
+                    return self._browser_card_from_db_row(row)
+            except Exception:
+                pass
+        project_hash = self._hash_file(path)
         if row and not force and str(row.get("project_hash") or "") == project_hash:
-            # Do a quick real-file hash check for the cached images too.
+            # Older cache rows may not have stat metadata. Fall back to file hashes once,
+            # then refresh/upsert with browserIndexVersion 5 for future instant loads.
             card_png_path = str(row.get("card_png_path") or "")
             image_path = str(row.get("image_path") or "")
             card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
@@ -1396,7 +1449,7 @@ class Api:
             needs_browser_index_refresh = True
             try:
                 extra_for_index = json.loads(row.get("metadata_json") or "{}")
-                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 4
+                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 5
             except Exception:
                 needs_browser_index_refresh = True
             if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh:
@@ -1463,7 +1516,13 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 4,
+                    "browserIndexVersion": 5,
+                    "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
+                    "projectSize": int(path.stat().st_size) if path.exists() else 0,
+                    "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
+                    "cardPngSize": int(Path(card_png).stat().st_size) if card_png and Path(card_png).exists() else 0,
+                    "imageMtimeNs": int(getattr(Path(image_path).stat(), "st_mtime_ns", int(Path(image_path).stat().st_mtime * 1_000_000_000))) if image_path and Path(image_path).exists() else 0,
+                    "imageSize": int(Path(image_path).stat().st_size) if image_path and Path(image_path).exists() else 0,
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
@@ -1492,7 +1551,13 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 4,
+                    "browserIndexVersion": 5,
+                    "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
+                    "projectSize": int(path.stat().st_size) if path.exists() else 0,
+                    "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
+                    "cardPngSize": int(Path(card_png).stat().st_size) if card_png and Path(card_png).exists() else 0,
+                    "imageMtimeNs": int(getattr(Path(image_path).stat(), "st_mtime_ns", int(Path(image_path).stat().st_mtime * 1_000_000_000))) if image_path and Path(image_path).exists() else 0,
+                    "imageSize": int(Path(image_path).stat().st_size) if image_path and Path(image_path).exists() else 0,
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
@@ -1527,7 +1592,13 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 4,
+                    "browserIndexVersion": 5,
+                    "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
+                    "projectSize": int(path.stat().st_size) if path.exists() else 0,
+                    "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
+                    "cardPngSize": int(Path(card_png).stat().st_size) if card_png and Path(card_png).exists() else 0,
+                    "imageMtimeNs": int(getattr(Path(image_path).stat(), "st_mtime_ns", int(Path(image_path).stat().st_mtime * 1_000_000_000))) if image_path and Path(image_path).exists() else 0,
+                    "imageSize": int(Path(image_path).stat().st_size) if image_path and Path(image_path).exists() else 0,
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
@@ -1632,6 +1703,26 @@ class Api:
         # start_day_of_week/day_of_week support and preserves any custom fields.
         try:
             template, _ = _merge_front_porch_state_tracking_section(template)
+        except Exception:
+            pass
+        try:
+            sections = template.get("sections") if isinstance(template.get("sections"), list) else []
+            ids = {str(s.get("id") or "") for s in sections if isinstance(s, dict)}
+            if "natural_image_prompt" not in ids:
+                insert_at = len(sections)
+                for idx, section in enumerate(sections):
+                    if str(section.get("id") or "") == "stable_diffusion":
+                        insert_at = idx + 1
+                        break
+                sections.insert(insert_at, {
+                    "id": "natural_image_prompt",
+                    "title": "Natural English Image Prompt",
+                    "enabled": False,
+                    "category": "image",
+                    "description": "Optional natural-language prompt for API image models that respond better to normal English instructions.",
+                    "fields": [{"id": "prompt", "label": "Prompt", "enabled": True, "hint": "A clear natural-language prompt for portrait generation."}],
+                })
+                template["sections"] = sections
         except Exception:
             pass
         return template
@@ -1900,8 +1991,18 @@ class Api:
             nsfw_tags_value = ", ".join(str(x).strip() for x in nsfw_tags_value if str(x).strip())
         nsfw_tags_value = str(nsfw_tags_value or DEFAULT_SETTINGS.get("nsfwTags", "NSFW")).strip()
         settings["nsfwTags"] = nsfw_tags_value or "NSFW"
+        provider = str(settings.get("imageGenerationProvider") or DEFAULT_SETTINGS.get("imageGenerationProvider", "sd")).strip().lower()
+        settings["imageGenerationProvider"] = provider if provider in {"sd", "api"} else "sd"
         settings["sdBaseUrl"] = str(settings.get("sdBaseUrl") or DEFAULT_SETTINGS["sdBaseUrl"]).strip() or DEFAULT_SETTINGS["sdBaseUrl"]
         settings["sdModel"] = str(settings.get("sdModel") or "").strip()
+        settings["imageApiBaseUrl"] = str(settings.get("imageApiBaseUrl") or "").strip()
+        settings["imageApiKey"] = str(settings.get("imageApiKey") or "").strip()
+        settings["imageModel"] = str(settings.get("imageModel") or "").strip()
+        settings["imageResolution"] = str(settings.get("imageResolution") or DEFAULT_SETTINGS.get("imageResolution", "1024x1024")).strip() or "1024x1024"
+        prompt_mode = str(settings.get("imagePromptMode") or DEFAULT_SETTINGS.get("imagePromptMode", "auto")).strip().lower()
+        settings["imagePromptMode"] = prompt_mode if prompt_mode in {"auto", "sd", "natural"} else "auto"
+        visual_style = str(settings.get("imageVisualStyle") or DEFAULT_SETTINGS.get("imageVisualStyle", "anime")).strip().lower()
+        settings["imageVisualStyle"] = visual_style if visual_style in {"anime", "realistic"} else "anime"
         settings["streamAi"] = bool(settings.get("streamAi"))
 
         idea_fields = {"archetype", "conflict", "setting", "tone", "occupation", "relationship", "status", "personality", "subjectOf", "engagesIn", "sexualEngagesIn"}
@@ -4062,7 +4163,7 @@ class Api:
             embedded_heading_re = re.compile(
                 r"^(?:Name|Description|Personality|Sexual Traits|Sexual Profile|Background|Backstory|Scenario|"
                 r"First Message|Alternative First Messages|Alternate First Messages|Example Dialogues?|Example Messages?|"
-                r"Lorebook Entries?|Lore Book Entries?|Tags|State Tracking|Stable Diffusion Prompt|SD Prompt|Image Prompt)\s*:?\s*$",
+                r"Lorebook Entries?|Lore Book Entries?|Tags|State Tracking|Stable Diffusion Prompt|SD Prompt|Natural English Image Prompt|Natural Image Prompt|Image Prompt)\s*:?\s*$",
                 re.IGNORECASE,
             )
             starts = [0]
@@ -4122,7 +4223,7 @@ class Api:
                 key = "tags"
             elif norm.startswith("state tracking") or norm in {"state", "stats", "tracking"}:
                 key = "stateTracking"
-            elif norm.startswith("stable diffusion") or norm.startswith("sd prompt") or norm.startswith("image prompt"):
+            elif norm.startswith("stable diffusion") or norm.startswith("sd prompt") or norm.startswith("image prompt") or norm.startswith("natural english image prompt") or norm.startswith("natural image prompt") or norm.startswith("natural prompt"):
                 key = "stableDiffusion"
             counts[key] += self._estimate_card_browser_tokens(section_text)
         # Keep the headline total mathematically consistent with the rows
@@ -4233,14 +4334,14 @@ class Api:
             lines.append("Generate exactly one importable character card for the focused group member named in the concept instructions for this pass.")
             lines.append("The focused character is the card's {{char}}. Do not make this member card a group/multi-character card; the group card will be assembled after member cards are generated.")
             lines.append("Other important members from the original concept must be kept as Lorebook Entries, relationship context, background/supporting cast references, or scenario hooks so the focused member can still remember and refer to them.")
-            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, and Stable Diffusion Prompt must all focus on the focused member only.")
+            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, Stable Diffusion Prompt, and Natural English Image Prompt must all focus on the focused member only.")
             lines.append("Tags should describe the focused member/card, not the whole group, unless the Tags section is disabled.")
         elif settings.get("cardMode") == "split_cards":
             lines.append("CARD MODE: SPLIT INTO MULTIPLE CARDS — CURRENT PASS IS ONE CHARACTER ONLY.")
             lines.append("Generate exactly one importable character card for the focused main character named in the concept instructions for this pass.")
             lines.append("The focused character is the card's {{char}}. Do not make the card a group/multi-character card.")
             lines.append("Other important characters from the original concept must be kept as Lorebook Entries or background/supporting cast references so {{char}} can still remember and refer to them.")
-            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, and Stable Diffusion Prompt must all focus on the focused character only.")
+            lines.append("Name, Description, Personality, Scenario, First Message, Example Dialogues, State Tracking, Stable Diffusion Prompt, and Natural English Image Prompt must all focus on the focused character only.")
             lines.append("Tags should describe the focused character/card, not the whole group, unless the Tags section is disabled.")
         elif settings.get("cardMode") == "multi":
             count = int(settings.get("multiCharacterCount") or 2)
@@ -4311,7 +4412,7 @@ class Api:
                     lines.append("Allowed tags: " + ", ".join(allowed_tags))
             if section.get("id") == "stable_diffusion":
                 lines.append("Return only these labels and their comma-separated prompt text: Positive Prompt: ... and Negative Prompt: ...")
-                lines.append("Do not echo helper text, ordering guidance, field descriptions, or explanations inside the Stable Diffusion Prompt section.")
+                lines.append("Do not echo helper text, ordering guidance, field descriptions, or explanations inside the Stable Diffusion Prompt or Natural English Image Prompt sections.")
             if section.get("id") == "first_message":
                 lines.append(f"First message style/instructions: {style_text}")
             if section.get("id") == "example_dialogues":
@@ -4610,7 +4711,7 @@ class Api:
         chunk_sections = {
             "core": "Name, Description, Personality, Sexual Traits, Background",
             "scene": "Scenario, First Message, Alternative First Messages, Example Dialogues",
-            "extras": "Lorebook Entries, Tags, Custom System Prompt, State Tracking, Stable Diffusion Prompt",
+            "extras": "Lorebook Entries, Tags, Custom System Prompt, State Tracking, Stable Diffusion Prompt, Natural English Image Prompt",
         }
         lines = [
             "Compact Lite generation for an 8k-context model. Return only the requested card sections.",
@@ -4847,7 +4948,7 @@ class Api:
             "background": "Background", "scenario": "Scenario", "first_message": "First Message",
             "alternate_first_messages": "Alternative First Messages", "example_dialogues": "Example Dialogues",
             "lorebook": "Lorebook Entries", "tags": "Tags", "system_prompt": "Custom System Prompt",
-            "state_tracking": "State Tracking", "stable_diffusion": "Stable Diffusion Prompt",
+            "state_tracking": "State Tracking", "stable_diffusion": "Stable Diffusion Prompt", "natural_image_prompt": "Natural English Image Prompt",
         }
         titles = dict(default_titles)
         for s in (template or {}).get("sections", []):
@@ -5590,7 +5691,7 @@ class Api:
         self._log_event("concept_fidelity_retry_request", {"missing": missing, "primaryName": report.get("primaryName", "")})
         retry_settings = {**settings, "_streamTarget": ""}
         retry = self._apply_restricted_tags_to_output(
-            self._clean_generated_output(self._generate_full_or_lite_output(retry_concept, template, retry_settings)),
+            self._ensure_image_prompt_sections(self._clean_generated_output(self._generate_full_or_lite_output(retry_concept, template, retry_settings)), retry_settings),
             template,
             settings,
         )
@@ -5655,7 +5756,7 @@ class Api:
                     self._log_event("split_card_shared_qa_ignored", {"focus": focus, "reason": "split cards require per-character Q&A; shared Q&A was not copied into this tab"})
                 focus_concept = self._split_card_focus_concept(concept, focus, names, per_qa)
                 self._reset_backup_info()
-                output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(focus_concept, template, per_settings)), template, per_settings)
+                output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(focus_concept, template, per_settings)), template, per_settings), per_settings)
                 fidelity_info = {"repaired": False}
                 fidelity_report = self._concept_fidelity_report(focus_concept, output)
                 if fidelity_report.get("drifted"):
@@ -5665,7 +5766,7 @@ class Api:
                 repair_info = {"repaired": False, "missing": []}
                 if not validation.get("ok"):
                     output, repair_info = self._repair_missing_output(output, focus_concept, template, per_settings, validation.get("missing", []))
-                    output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, per_settings)
+                    output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, per_settings), per_settings)
                     validation = self.validate_output_against_template(output, template, per_settings)
                 cards.append({
                     "name": self._extract_output_name(output, focus),
@@ -5702,7 +5803,7 @@ class Api:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
+            output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings), merged_settings)
             fidelity_info = {"repaired": False}
             fidelity_report = self._concept_fidelity_report(generation_concept, output)
             if fidelity_report.get("drifted"):
@@ -5718,7 +5819,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
-                output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings)
+                output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings), merged_settings)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -5746,7 +5847,7 @@ class Api:
                 generation_concept = concept.rstrip() + "\n\nPRE-GENERATION CHARACTER Q&A NOTES (private planning context, do not reproduce as a section):\n" + qa_answers
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings)
+            output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(self._generate_full_or_lite_output(generation_concept, template, output_settings)), template, merged_settings), merged_settings)
             fidelity_info = {"repaired": False}
             fidelity_report = self._concept_fidelity_report(generation_concept, output)
             if fidelity_report.get("drifted"):
@@ -5762,7 +5863,7 @@ class Api:
             if not validation.get("ok"):
                 self._raise_if_cancelled()
                 output, repair_info = self._repair_missing_output(output, generation_concept, template, merged_settings, validation.get("missing", []))
-                output = self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings)
+                output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(output), template, merged_settings), merged_settings)
                 self._raise_if_cancelled()
                 validation = self.validate_output_against_template(output, template, merged_settings)
                 self._log_event("generation_validation_after_repair", {"validation": validation})
@@ -5825,7 +5926,7 @@ class Api:
                     return check
             self._reset_backup_info()
             output_settings = {**merged_settings, "_streamTarget": "output"}
-            output = self._apply_restricted_tags_to_output(self._clean_generated_output(self._chat(prompt, output_settings)), template, merged_settings)
+            output = self._ensure_image_prompt_sections(self._apply_restricted_tags_to_output(self._clean_generated_output(self._chat(prompt, output_settings)), template, merged_settings), merged_settings)
             info = self._get_backup_info()
             if info.get("used"):
                 info["phase"] = "followup_revision"
@@ -6846,6 +6947,7 @@ class Api:
             add("State Tracking", ext.get("state_tracking", ""))
         if ext.get("stable_diffusion_prompt"):
             add("Stable Diffusion Prompt", ext.get("stable_diffusion_prompt", ""))
+            add("Natural English Image Prompt", ext.get("natural_image_prompt", ""))
 
         # Chara Card V3 and some frontend extensions often store extra useful
         # text outside the classic V2 fields. Preserve those details when
@@ -6972,6 +7074,7 @@ class Api:
             ("system_prompt", "Custom System Prompt"),
             ("state_tracking", "State Tracking"),
             ("stable_diffusion", "Stable Diffusion Prompt"),
+            ("natural_image_prompt", "Natural English Image Prompt"),
             ("creator_notes", "Creator Notes"),
             ("post_history_instructions", "Post History Instructions"),
         ]
@@ -8612,7 +8715,7 @@ class Api:
             # Preview generation should not stream into the main Output box.
             local_settings["streamAi"] = False
             local_settings["_streamTarget"] = ""
-            revised = self._clean_generated_output(self._chat(prompt, local_settings))
+            revised = self._ensure_image_prompt_sections(self._clean_generated_output(self._chat(prompt, local_settings)), local_settings)
             if not revised or self._looks_like_text_refusal(revised):
                 return {"ok": False, "error": "The model did not return a usable revised card."}
             validation = self.validate_output_against_template(revised, template, active_settings)
@@ -9723,8 +9826,26 @@ class Api:
         the whole route later.
         """
         workspace = workspace or {}
-        if workspace.get("isGroupCard") or self._workspace_group_payload(workspace):
+        group_payload = self._workspace_group_payload(workspace)
+        if group_payload:
             return self._save_front_porch_group_workspace(workspace)
+        # v1.0.10-beta8 migration guard: some pre-Group-Card single-card workspaces
+        # can carry stale isGroupCard/frontend/exportFormat fields after being loaded
+        # through newer builds.  Do not let those stale flags hijack normal autosave
+        # unless a real fpa_group payload exists.
+        if workspace.get("isGroupCard"):
+            self._log_event("stale_group_flag_ignored_on_workspace_save", {
+                "name": str(workspace.get("name") or "")[:120],
+                "projectPath": str(workspace.get("projectPath") or workspace.get("workspaceProjectPath") or "")[:500],
+                "frontend": str(workspace.get("frontend") or "")[:80],
+                "exportFormat": str(workspace.get("exportFormat") or "")[:80],
+            })
+            for stale_key in ("isGroupCard", "groupCardMode", "groupCardPath", "groupJsonPath", "groupPayload", "memberProjectPaths"):
+                workspace.pop(stale_key, None)
+            if str(workspace.get("frontend") or "").strip().lower() == "front_porch_group":
+                workspace.pop("frontend", None)
+            if str(workspace.get("exportFormat") or "").strip().lower() in {"fpa_group_png", "fpa_group_json", "group_png", "group_json"}:
+                workspace.pop("exportFormat", None)
         output = workspace.get("output") or ""
         if not output.strip():
             return {"ok": False, "error": "Nothing to save yet. Generate or load a card first."}
@@ -9936,8 +10057,15 @@ class Api:
                 self._library_set_card_folder(latest_project, vf)
         except Exception as e:
             self._log_event("library_db_workspace_upsert_failed", {"name": safe_name, "error": str(e)})
+        browser_card = None
+        try:
+            row = self._library_get_card_row(latest_project)
+            if row:
+                browser_card = self._browser_card_from_db_row(row)
+        except Exception:
+            browser_card = None
         self._log_event("character_workspace_saved", {"name": safe_name, "folder": str(folder), "project": str(latest_project)})
-        return {"ok": True, "name": safe_name, "folder": str(folder), "projectPath": str(latest_project), "cardPath": str(latest_card) if str(latest_card) else ""}
+        return {"ok": True, "name": safe_name, "folder": str(folder), "projectPath": str(latest_project), "cardPath": str(latest_card) if str(latest_card) else "", "browserCard": browser_card}
 
     def _virtual_folder_assignment_keys(self, project_path, folder, name=""):
         keys = []
@@ -10005,7 +10133,7 @@ class Api:
                 if card:
                     cards.append(card)
             except Exception as e:
-                self._log_event("character_library_card_error", {"project": str(canonical_project_path), "error": str(e)})
+                self._log_event("character_library_card_error", {"project": str(project_path), "error": str(e)})
 
         # Mark DB rows whose physical project vanished as deleted, rather than
         # showing stale cards from the cache.
@@ -11750,6 +11878,44 @@ class Api:
     def _default_sd_negative_prompt(self):
         return "bad anatomy, extra fingers, missing fingers, extra limbs, missing limbs, poorly drawn hands, poorly drawn face, deformed, disfigured, mutation, ugly, blurry, cropped, out of frame, low quality, worst quality, normal quality, jpeg artifacts, watermark, signature, text, logo"
 
+    def _extract_natural_image_prompt(self, output):
+        section = self._clean_section_text(self._section(output, "Natural English Image Prompt"))
+        return section.strip()
+
+    def _build_natural_image_prompt_body(self, output, settings=None, model=None):
+        prompts = self._extract_sd_prompts(output or "")
+        existing = self._extract_natural_image_prompt(output or "")
+        if existing:
+            return existing
+        body = self._build_natural_api_image_prompt(output or "", prompts, settings or self.settings, model or "")
+        return self._clean_section_text(body)
+
+    def generate_natural_prompt_from_output(self, output, settings=None):
+        output = (output or "").strip()
+        if not output:
+            return {"ok": False, "error": "Generate or load a card first so I can read the character text."}
+        natural_body = self._build_natural_image_prompt_body(output, settings=settings)
+        if not natural_body:
+            return {"ok": False, "error": "Could not build a Natural English Image Prompt from the current card."}
+        updated_output = self._replace_section_body(output, "natural_image_prompt", natural_body, template=self.template, title_fallback="Natural English Image Prompt")
+        updated_output = self._clean_generated_output(updated_output)
+        return {"ok": True, "output": updated_output, "naturalImagePromptBody": natural_body, "method": "full_text_output"}
+
+    def _ensure_image_prompt_sections(self, output, settings=None):
+        text_out = str(output or "")
+        if not text_out.strip():
+            return text_out
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        has_sd = bool(self._extract_sd_prompts(text_out).get("positive"))
+        natural = self._extract_natural_image_prompt(text_out)
+        provider = str(merged.get("imageGenerationProvider") or "sd").strip().lower()
+        wants_natural = provider == "api" and self._api_image_prompt_style(merged, merged.get("imageModel") or "") == "natural"
+        if (has_sd or wants_natural) and not natural:
+            body = self._build_natural_image_prompt_body(text_out, settings=merged, model=merged.get("imageModel") or "")
+            if body:
+                text_out = self._replace_section_body(text_out, "natural_image_prompt", body, template=self.template, title_fallback="Natural English Image Prompt")
+        return text_out
+
     def _build_sd_prompt_from_character_text(self, reference_text, settings=None, vision_summary=""):
         local_settings = self._normalise_settings({**self.settings, **(settings or {})})
         validation = self._validate_text_api_settings(local_settings)
@@ -11761,13 +11927,16 @@ class Api:
         base_context = (reference_text or "").strip()
         if not base_context and not vision_summary:
             return {"ok": False, "error": "There is not enough character information to generate a Stable Diffusion Prompt."}
+        visual_style = self._image_visual_style(local_settings)
+        style_label = "anime-style illustrated" if visual_style == "anime" else "realistic cinematic"
         prompt_parts = [
-            "Create a Stable Diffusion Prompt section for a fictional anime-style character card.",
+            f"Create a Stable Diffusion Prompt section for a fictional {style_label} character card.",
             "Return ONLY the Stable Diffusion Prompt section body, not the whole card.",
             "Use exactly this format:",
             "Positive Prompt: <comma-separated prompt>",
             "Negative Prompt: <comma-separated negative prompt>",
             "The positive prompt should focus on a single polished portrait/card image of the character and include appearance, body type, hair, eyes, clothing, key accessories, expression, pose, environment/background, lighting, style, and quality tags.",
+            f"The prompt style must lean {style_label}.",
             "The negative prompt must be concise: 15-30 UNIQUE comma-separated tags only. Do not repeat tags or phrases.",
             "Do not include explanations, bullet points, JSON, markdown fences, helper text, or headings other than Positive Prompt and Negative Prompt.",
         ]
@@ -11850,7 +12019,7 @@ class Api:
         if not res.get("ok"):
             return res
         updated_output = self._replace_section_body(output, "stable_diffusion", res.get("stableDiffusionBody") or "", template=self.template, title_fallback="Stable Diffusion Prompt")
-        updated_output = self._clean_generated_output(updated_output)
+        updated_output = self._ensure_image_prompt_sections(self._clean_generated_output(updated_output), settings)
         return {"ok": True, "output": updated_output, "stableDiffusionBody": res.get("stableDiffusionBody"), "positive": res.get("positive"), "negative": res.get("negative"), "method": "full_text_output"}
 
     def generate_sd_prompt_from_vision(self, image_path, output='', settings=None):
@@ -11870,7 +12039,7 @@ class Api:
         if not res.get("ok"):
             return res
         updated_output = self._replace_section_body(output or "", "stable_diffusion", res.get("stableDiffusionBody") or "", template=self.template, title_fallback="Stable Diffusion Prompt")
-        updated_output = self._clean_generated_output(updated_output)
+        updated_output = self._ensure_image_prompt_sections(self._clean_generated_output(updated_output), settings)
         return {"ok": True, "output": updated_output, "stableDiffusionBody": res.get("stableDiffusionBody"), "positive": res.get("positive"), "negative": res.get("negative"), "visionDescription": vision_summary, "method": "vision"}
 
     def select_card_image(self):
@@ -11948,6 +12117,471 @@ class Api:
             payload["override_settings_restore_afterwards"] = True
         return payload
 
+
+    def _image_api_base_url(self, settings):
+        base = str(settings.get("imageApiBaseUrl") or settings.get("apiBaseUrl") or DEFAULT_SETTINGS.get("apiBaseUrl") or "").strip()
+        if not base:
+            return ""
+        if not re.match(r"^https?://", base, re.I):
+            base = "https://" + base
+        base = base.rstrip("/")
+        lowered = base.lower()
+        for suffix in ("/images/generations", "/image/generations", "/images/generate", "/generate-image", "/image-models", "/models"):
+            if lowered.endswith(suffix):
+                base = base[: -len(suffix)]
+                lowered = base.lower()
+        return base.rstrip("/")
+
+    def _image_api_key(self, settings):
+        return str(settings.get("imageApiKey") or settings.get("apiKey") or "").strip()
+
+    def _parse_api_image_price(self, item):
+        try:
+            pricing = item.get("pricing") if isinstance(item, dict) else {}
+            per_image = pricing.get("per_image") if isinstance(pricing, dict) else {}
+            if isinstance(per_image, dict) and per_image:
+                first_key = next(iter(per_image.keys()))
+                val = per_image.get(first_key)
+                return f"${float(val):g}/{first_key}"
+        except Exception:
+            pass
+        return ""
+
+    def _api_image_model_entry(self, item):
+        if not isinstance(item, dict):
+            return None
+        model_id = str(item.get("id") or item.get("model") or "").strip()
+        if not model_id:
+            return None
+        category = str(item.get("category") or "").strip().lower()
+        if category == "tools":
+            return None
+        arch = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+        modality = str(arch.get("modality") or item.get("modality") or "").strip()
+        input_modalities = arch.get("input_modalities") if isinstance(arch.get("input_modalities"), list) else []
+        output_modalities = arch.get("output_modalities") if isinstance(arch.get("output_modalities"), list) else []
+        caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+        params = item.get("supported_parameters") if isinstance(item.get("supported_parameters"), dict) else {}
+        tags = [str(t).lower() for t in (item.get("tags") if isinstance(item.get("tags"), list) else [])]
+        if caps and caps.get("image_generation") is False:
+            return None
+        if output_modalities and "image" not in [str(x).lower() for x in output_modalities]:
+            return None
+        # For the first beta, CCF only generates card portraits from text.  Pure edit/upscale/crop tools need
+        # reference-image upload workflows, so keep them out of the picker for now.
+        modality_l = modality.lower()
+        if modality_l == "image->image" or any(t in {"upscale", "crop", "background-remover", "text-removal", "virtual-try-on"} for t in tags):
+            return None
+        if input_modalities and "text" not in [str(x).lower() for x in input_modalities]:
+            return None
+        resolutions = params.get("resolutions") if isinstance(params.get("resolutions"), list) else []
+        try:
+            max_images = int(params.get("max_output_images") or params.get("max_images") or 1)
+        except Exception:
+            max_images = 1
+        name = str(item.get("name") or model_id).strip()
+        owner = str(item.get("owned_by") or "").strip()
+        price = self._parse_api_image_price(item)
+        bits = [name]
+        if owner:
+            bits.append(owner)
+        if modality:
+            bits.append(modality)
+        if price:
+            bits.append(price)
+        if max_images:
+            bits.append(f"max {max_images}")
+        display = " • ".join(bits) + f" — {model_id}"
+        return {
+            "value": model_id,
+            "id": model_id,
+            "name": name,
+            "ownedBy": owner,
+            "displayName": display,
+            "description": str(item.get("description") or ""),
+            "modality": modality,
+            "resolutions": [str(x) for x in resolutions],
+            "defaultResolution": str(resolutions[0]) if resolutions else "1024x1024",
+            "maxImages": max_images,
+            "imageToImage": bool(caps.get("image_to_image")),
+            "nsfw": bool(caps.get("nsfw")),
+        }
+
+    def fetch_api_image_models(self, settings=None):
+        """Fetch OpenAI/NanoGPT-style image model metadata for the API image picker."""
+        merged = self._normalise_settings({**self.settings, **(settings or {})})
+        base = self._image_api_base_url(merged)
+        key = self._image_api_key(merged)
+        if not base:
+            return {"ok": False, "error": "Enter an Image API Base URL or Text API Base URL first."}
+        if self._api_key_required_for_base(base) and not key:
+            return {"ok": False, "error": "Enter an Image API Key or Text API Key first."}
+        endpoint_candidates = [
+            base + "/image-models",
+            base + "/image-models?detailed=true",
+            base + "/models?detailed=true",
+            base + "/models",
+        ]
+        endpoints = []
+        seen_endpoints = set()
+        for url in endpoint_candidates:
+            if url not in seen_endpoints:
+                seen_endpoints.add(url)
+                endpoints.append(url)
+        last_error = ""
+        for url in endpoints:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header("Accept", "application/json")
+            if key:
+                req.add_header("Authorization", f"Bearer {key}")
+                req.add_header("x-api-key", key)
+            try:
+                with self._urlopen_with_retries(req, merged, timeout=120, label="API image model list") as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                items = data.get("data") if isinstance(data, dict) else data
+                if not isinstance(items, list):
+                    items = []
+                models = []
+                seen = set()
+                for item in items:
+                    entry = self._api_image_model_entry(item)
+                    if not entry:
+                        continue
+                    key_id = entry["id"].lower()
+                    if key_id in seen:
+                        continue
+                    seen.add(key_id)
+                    models.append(entry)
+                selected = str(merged.get("imageModel") or "").strip()
+                default_resolution = "1024x1024"
+                if selected:
+                    for m in models:
+                        if m.get("id") == selected and m.get("defaultResolution"):
+                            default_resolution = m.get("defaultResolution")
+                            break
+                elif models:
+                    default_resolution = models[0].get("defaultResolution") or default_resolution
+                self._log_event("api_image_models_fetched", {"url": url, "count": len(models), "selected": selected})
+                if models:
+                    return {"ok": True, "models": models, "selectedModel": selected, "defaultResolution": default_resolution}
+                # Keep trying fallback endpoints if this endpoint returns no usable image models.
+                last_error = f"No usable image models found at {url}"
+                continue
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                last_error = f"HTTP {e.code}: {body[:800]}"
+            except Exception as e:
+                last_error = str(e)
+        return {"ok": False, "error": f"Could not fetch API image models: {last_error}"}
+
+    def _api_image_prompt_style(self, settings, model):
+        mode = str(settings.get("imagePromptMode") or "auto").strip().lower()
+        if mode in {"sd", "natural"}:
+            return mode
+        m = str(model or "").lower()
+        natural_markers = [
+            "gpt", "openai", "banana", "gemini", "imagen", "seedream", "qwen", "wan", "hidream",
+            "ideogram", "recraft", "grok", "kling", "vidu", "runway", "midjourney", "minimax",
+            "hunyuan", "ernie", "longcat", "reve", "lucid", "krea", "riverflow", "bagel"
+        ]
+        sd_markers = [
+            "stable-diffusion", "sdxl", "sd3", "sd-", "pony", "animagine", "dreamshaper", "rev-animated",
+            "illustrious", "hassaku", "realvis", "cyberrealistic", "chroma", "juggernaut", "proteus", "flux"
+        ]
+        if any(x in m for x in natural_markers):
+            return "natural"
+        if any(x in m for x in sd_markers):
+            return "sd"
+        return "natural"
+
+    def _image_visual_style(self, settings=None):
+        style = str((settings or {}).get("imageVisualStyle") or self.settings.get("imageVisualStyle") or "anime").strip().lower()
+        return style if style in {"anime", "realistic"} else "anime"
+
+    def _image_visual_style_phrase(self, settings=None):
+        return "anime-style illustrated" if self._image_visual_style(settings) == "anime" else "realistic cinematic"
+
+    def _natural_prompt_filter_safe_positive_close(self, settings=None):
+        if self._image_visual_style(settings) == "anime":
+            return "Use a clean anime illustration style, polished linework, appealing color design, balanced lighting, and a focused single-character portrait composition."
+        return "Use a realistic cinematic portrait style, natural skin texture, believable lighting, detailed fabric and hair, and a focused single-character portrait composition."
+
+    def _build_natural_api_image_prompt(self, output, prompts, settings, model):
+        existing = self._extract_natural_image_prompt(output or "")
+        if existing:
+            return existing
+        sections = self._parse_sections(output or {}) if isinstance(output, dict) else self._parse_sections(output or "")
+        name = self._extract_name(output or "") or "the character"
+        description = self._clean_section_text(sections.get("description") or self._section(output or "", "Description"))
+        personality = self._clean_section_text(sections.get("personality") or self._section(output or "", "Personality"))
+        scenario = self._clean_section_text(sections.get("scenario") or self._section(output or "", "Scenario"))
+        positive = self._normalise_sd_prompt_items(prompts.get("positive") or "", max_items=90, max_chars=1400)
+        visual_style = self._image_visual_style_phrase(settings)
+        parts = [
+            f"Create a polished {visual_style} character-card portrait of {name}.",
+            "Single main character, centered composition, clean readable silhouette, strong face and outfit detail, high quality lighting, suitable as a roleplay character card portrait.",
+            self._natural_prompt_filter_safe_positive_close(settings),
+        ]
+        if description:
+            parts.append("Character appearance and identity: " + re.sub(r"\s+", " ", description)[:1600])
+        if positive:
+            parts.append("Visual prompt notes to follow: " + positive)
+        if personality:
+            parts.append("Mood/personality to express visually: " + re.sub(r"\s+", " ", personality)[:900])
+        if scenario:
+            parts.append("Optional setting/atmosphere: " + re.sub(r"\s+", " ", scenario)[:700])
+        return "\n\n".join(p for p in parts if p).strip()
+
+    def _build_api_image_prompt(self, output, prompts, settings, model):
+        style = self._api_image_prompt_style(settings, model)
+        positive = self._normalise_sd_prompt_items(prompts.get("positive") or "", max_items=120, max_chars=1800)
+        negative = self._normalise_sd_prompt_items(prompts.get("negative") or "", max_items=36, max_chars=800)
+        if style == "sd":
+            style_prefix = "anime style" if self._image_visual_style(settings) == "anime" else "realistic, cinematic portrait, lifelike detail"
+            positive = self._normalise_sd_prompt_items((style_prefix + ", " + positive).strip(", "), max_items=130, max_chars=1900)
+            if negative:
+                return f"{positive}\nNegative prompt: {negative}".strip(), style
+            return positive, style
+        return self._build_natural_api_image_prompt(output, prompts, settings, model), style
+
+    def _collect_image_blobs_from_response_value(self, value, out):
+        if value is None:
+            return
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return
+            if s.lower().startswith("data:image"):
+                try:
+                    b64 = s.split(",", 1)[1]
+                    out.append(base64.b64decode(re.sub(r"\s+", "", b64), validate=False))
+                except Exception:
+                    pass
+                return
+            if re.match(r"^https?://", s, re.I):
+                try:
+                    req = urllib.request.Request(s, method="GET")
+                    with self._urlopen_with_retries(req, self.settings, timeout=180, label="API image download") as resp:
+                        out.append(resp.read())
+                except Exception as e:
+                    self._log_event("api_image_url_download_failed", {"url": s[:500], "error": str(e)})
+                return
+            # Plain base64 image body.
+            compact = re.sub(r"\s+", "", s)
+            if len(compact) > 100 and re.match(r"^[A-Za-z0-9+/=_-]+$", compact):
+                try:
+                    out.append(base64.b64decode(compact + ("=" * (-len(compact) % 4)), validate=False))
+                except Exception:
+                    pass
+                return
+        elif isinstance(value, dict):
+            priority = ["b64_json", "image_base64", "base64", "b64", "data", "image", "url", "image_url", "output_image"]
+            used = set()
+            for key in priority:
+                if key in value:
+                    used.add(key)
+                    self._collect_image_blobs_from_response_value(value.get(key), out)
+            for key, child in value.items():
+                if key not in used:
+                    self._collect_image_blobs_from_response_value(child, out)
+        elif isinstance(value, list):
+            for child in value:
+                self._collect_image_blobs_from_response_value(child, out)
+
+    def _api_image_response_blobs(self, raw_bytes, content_type=""):
+        blobs = []
+        ct = str(content_type or "").lower()
+        if raw_bytes and ct.startswith("image/"):
+            return [raw_bytes]
+        try:
+            data = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+        except Exception:
+            # Some gateways return a raw image without a useful content type.
+            if raw_bytes.startswith(bytes([137, 80, 78, 71, 13, 10, 26, 10])) or raw_bytes.startswith(bytes([255, 216, 255])) or raw_bytes[:4] == b"RIFF":
+                return [raw_bytes]
+            return []
+        self._collect_image_blobs_from_response_value(data, blobs)
+        return blobs
+
+    def _save_api_generated_image_blob(self, raw, safe, stamp, idx):
+        path = GENERATED_IMAGES_DIR / f"{safe}_{stamp}_api_{idx}.png"
+        try:
+            with Image.open(io.BytesIO(raw)) as img:
+                img = img.convert("RGBA")
+                img.save(path, "PNG")
+            png_raw = path.read_bytes()
+        except Exception:
+            # Keep the raw bytes for debugging/export even if Pillow cannot decode it.
+            path.write_bytes(raw)
+            png_raw = raw
+        return {
+            "path": str(path),
+            "dataUrl": "data:image/png;base64," + base64.b64encode(png_raw).decode("ascii"),
+        }
+
+    def _parse_image_resolution_dimensions(self, resolution):
+        raw = str(resolution or "1024x1024").strip().lower()
+        m = re.match(r"^(\d+)\s*[x×]\s*(\d+)$", raw)
+        if not m:
+            return 1024, 1024
+        try:
+            return max(64, min(4096, int(m.group(1)))), max(64, min(4096, int(m.group(2))))
+        except Exception:
+            return 1024, 1024
+
+    def _api_image_generation_endpoints(self, base):
+        base = str(base or "").rstrip("/")
+        lowered = base.lower()
+        is_nanogpt = "nano-gpt.com" in lowered
+        if is_nanogpt:
+            # NanoGPT uses /api/v1 for model discovery but the documented
+            # OpenAI-compatible image generation path is /v1/images/generations.
+            if lowered.endswith("/api/v1"):
+                root = re.sub(r"/api/v1$", "/v1", base, flags=re.I)
+            elif lowered.endswith("/api"):
+                root = re.sub(r"/api$", "/v1", base, flags=re.I)
+            elif lowered.endswith("/v1"):
+                root = base
+            else:
+                root = base + "/v1"
+            return [root.rstrip("/") + "/images/generations"]
+        bases = [base] if base else []
+        candidates = []
+        for b in bases:
+            candidates.extend([
+                b + "/images/generations",
+                b + "/image/generations",
+                b + "/image/generate",
+                b + "/generate-image",
+                b + "/images/generate",
+            ])
+        out = []
+        seen = set()
+        for url in candidates:
+            if url not in seen:
+                seen.add(url)
+                out.append(url)
+        return out
+
+    def _api_image_generation_payloads(self, model, prompt, count, resolution, style="natural", base=""):
+        width, height = self._parse_image_resolution_dimensions(resolution)
+        prompt = str(prompt or "").strip()
+        model = str(model or "").strip()
+        count = self._clamp_int_value(count, default=1, minimum=1, maximum=20)
+        resolution = str(resolution or f"{width}x{height}").strip() or f"{width}x{height}"
+        aspect_ratio = f"{width}:{height}"
+        is_nanogpt = "nano-gpt.com" in str(base or "").lower()
+        if is_nanogpt:
+            # Keep NanoGPT requests exactly OpenAI-compatible. Extra native-style
+            # fields/routes can produce misleading 404/HTML errors and hide the
+            # real API validation message. Try the requested count, then a safe
+            # one-image fallback for models with fixed counts or max_images=1.
+            payloads = [
+                {"model": model, "prompt": prompt, "n": count, "size": resolution, "response_format": "b64_json"},
+            ]
+            if count != 1:
+                payloads.append({"model": model, "prompt": prompt, "n": 1, "size": resolution, "response_format": "b64_json"})
+        else:
+            payloads = [
+                {"model": model, "prompt": prompt, "n": count, "size": resolution, "response_format": "b64_json"},
+                {"model": model, "prompt": prompt, "n": count, "size": resolution},
+                {"model": model, "prompt": prompt, "num_images": count, "size": resolution},
+                {"model": model, "prompt": prompt, "num_images": count, "width": width, "height": height},
+                {"model": model, "prompt": prompt, "image_count": count, "resolution": resolution},
+                {"model": model, "prompt": prompt, "image_count": count, "width": width, "height": height},
+                {"model": model, "prompt": prompt, "num_outputs": count, "width": width, "height": height},
+                {"model": model, "prompt": prompt, "count": count, "width": width, "height": height},
+                {"model": model, "prompt": prompt, "aspect_ratio": aspect_ratio, "num_images": count},
+            ]
+        out = []
+        seen = set()
+        for payload in payloads:
+            key = json.dumps(payload, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                out.append(payload)
+        return out
+
+    def _clean_api_image_http_error_body(self, body):
+        body = str(body or "")
+        compact = re.sub(r"\s+", " ", body).strip()
+        if compact.lower().startswith("<!doctype html") or "<html" in compact.lower()[:200]:
+            return "HTML 404/page response"
+        return compact[:1000]
+
+    def _generate_api_image_model_images(self, output, merged_settings, prompts):
+        model = str(merged_settings.get("imageModel") or "").strip()
+        if not model:
+            return {"ok": False, "error": "Select an API Image Model in Image Generation settings first."}
+        base = self._image_api_base_url(merged_settings)
+        key = self._image_api_key(merged_settings)
+        if not base:
+            return {"ok": False, "error": "Enter an Image API Base URL or Text API Base URL first."}
+        if self._api_key_required_for_base(base) and not key:
+            return {"ok": False, "error": "Enter an Image API Key or Text API Key first."}
+        image_count = self._clamp_int_value(merged_settings.get("sdImageCount") or 4, default=4, minimum=1, maximum=20)
+        resolution = str(merged_settings.get("imageResolution") or "1024x1024").strip() or "1024x1024"
+        prompt, style = self._build_api_image_prompt(output, prompts, merged_settings, model)
+        if not prompt:
+            return {"ok": False, "error": "Could not build an API image prompt from the card."}
+        endpoints = self._api_image_generation_endpoints(base)
+        payloads = self._api_image_generation_payloads(model, prompt, image_count, resolution, style, base)
+        self._log_event("api_image_generation_start", {"model": model, "count": image_count, "resolution": resolution, "promptStyle": style, "base": base, "generationEndpointFirst": endpoints[0] if endpoints else ""})
+        last_error = ""
+        first_meaningful_error = ""
+        errors = []
+        blobs = []
+        for endpoint in endpoints:
+            for payload in payloads:
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), method="POST")
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Accept", "application/json, image/png, image/jpeg, image/webp")
+                if key:
+                    req.add_header("Authorization", f"Bearer {key}")
+                    req.add_header("x-api-key", key)
+                try:
+                    with self._urlopen_with_retries(req, merged_settings, timeout=900, label="API image generation") as resp:
+                        raw = resp.read()
+                        content_type = resp.headers.get("Content-Type", "") if getattr(resp, "headers", None) else ""
+                    blobs = self._api_image_response_blobs(raw, content_type)
+                    if blobs:
+                        break
+                    last_error = f"{endpoint}: API returned no parseable image data."
+                    errors.append(last_error)
+                    if not first_meaningful_error:
+                        first_meaningful_error = last_error
+                except urllib.error.HTTPError as e:
+                    body = self._clean_api_image_http_error_body(e.read().decode("utf-8", errors="replace"))
+                    last_error = f"{endpoint} HTTP {e.code}: {body}"
+                    errors.append(last_error)
+                    if e.code != 404 and body != "HTML 404/page response" and not first_meaningful_error:
+                        first_meaningful_error = last_error
+                    if e.code == 404:
+                        break
+                    continue
+                except Exception as e:
+                    last_error = str(e)
+                    errors.append(last_error)
+                    if not first_meaningful_error:
+                        first_meaningful_error = last_error
+                    continue
+            if blobs:
+                break
+        if not blobs:
+            shown_error = first_meaningful_error or last_error
+            self._log_event("api_image_generation_failed", {"model": model, "endpointsTried": endpoints, "payloadsTried": payloads, "errors": errors[-12:], "lastError": last_error, "shownError": shown_error})
+            return {"ok": False, "error": f"API image generation failed: {shown_error}. Tried: {', '.join(endpoints)}"}
+        safe_name = self._extract_name(output) or "character_card"
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", safe_name).strip("_") or "character_card"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        results = []
+        for idx, raw in enumerate(blobs[:image_count], start=1):
+            try:
+                results.append(self._save_api_generated_image_blob(raw, safe, stamp, idx))
+            except Exception as e:
+                return {"ok": False, "error": f"Could not save API image {idx}: {e}"}
+        return {"ok": True, "images": results, "provider": "api", "model": model, "prompt": prompt, "promptStyle": style, "resolution": resolution}
     def generate_sd_images(self, output, settings=None):
         """Generate four 1024x1024 candidate card images from Stable Diffusion Prompt.
 
@@ -11964,10 +12598,12 @@ class Api:
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or paste a card first so I can read the Stable Diffusion Prompt section."}
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
-        image_count = self._clamp_int_value(merged_settings.get("sdImageCount") or 4, default=4, minimum=1, maximum=16)
+        image_count = self._clamp_int_value(merged_settings.get("sdImageCount") or 4, default=4, minimum=1, maximum=20)
         self._log_event("sd_image_generation_start", {"count": image_count, "cancelStateReset": True})
         self.save_settings(merged_settings)
         prompts = self._extract_sd_prompts(output)
+        if str(merged_settings.get("imageGenerationProvider") or "sd").strip().lower() == "api":
+            return self._generate_api_image_model_images(output, merged_settings, prompts)
         if not prompts.get("positive"):
             return {"ok": False, "error": "No Positive Prompt found in the Stable Diffusion Prompt section."}
         base = (merged_settings.get("sdBaseUrl") or "http://127.0.0.1:7860").rstrip("/")
@@ -12135,7 +12771,7 @@ class Api:
         headings = []
         for sec in template.get("sections", []):
             title = str(sec.get("title") or "").strip()
-            if title and title.lower() != "stable diffusion prompt":
+            if title and title.lower() not in {"stable diffusion prompt", "natural english image prompt"}:
                 headings.append(re.escape(title))
         heading_alt = "|".join(headings) or r"Name|Description|Personality|Scenario|First Message|Example Dialogues|Tags"
         pattern = re.compile(
@@ -12198,7 +12834,7 @@ class Api:
             heading = self._canonical_heading(line)
             if heading:
                 current = heading
-            if current == "stable_diffusion":
+            if current in {"stable_diffusion", "natural_image_prompt"}:
                 continue
             lines.append(line)
         return self._clean_section_text("\n".join(lines))
@@ -12306,8 +12942,17 @@ class Api:
             out[emo] = {"positive": pos, "negative": neg}
         return out
 
-    def _build_emotion_prompts(self, output, emotions, settings):
+    def _build_emotion_prompts(self, output, emotions, settings, style="sd"):
         base = self._extract_character_visual_baseline(output)
+        if style == "natural":
+            natural_base = self._build_natural_image_prompt_body(output, settings=settings, model=(settings or {}).get("imageModel") or "")
+            prompts = {}
+            for emo in emotions:
+                prompts[emo] = {
+                    "prompt": (natural_base + f"\n\nKeep the same character identity, hairstyle, outfit, body type, age, and overall {self._image_visual_style_phrase(settings)} style. Express {emo} clearly through facial expression, body language, and subtle posing. Use a focused single-character portrait composition.").strip(),
+                    "negative": "",
+                }
+            return prompts
         try:
             return self._generate_emotion_prompts_via_llm(output, emotions, settings)
         except Exception:
@@ -12315,7 +12960,7 @@ class Api:
             for emo in emotions:
                 prompts[emo] = {
                     "positive": self._emotion_positive_fallback(base.get("positive", ""), emo),
-                    "negative": base.get("negative", "low quality, bad anatomy, extra fingers, extra limbs, blurry, watermark, text"),
+                    "negative": base.get("negative", self._default_sd_negative_prompt()),
                 }
             return prompts
 
@@ -12357,6 +13002,58 @@ class Api:
             b64 = b64.split(",", 1)[1]
         return base64.b64decode(b64)
 
+    def _generate_api_single_image(self, prompt, merged_settings, model, resolution, style, negative_prompt="", emotion_label="image"):
+        prompt_text = str(prompt or "").strip()
+        negative_text = str(negative_prompt or "").strip()
+        if style == "sd" and negative_text:
+            prompt_text = f"{prompt_text}\nNegative prompt: {negative_text}".strip()
+        # Natural-English image models are sensitive to filter-triggering negative lists.
+        # Keep natural prompts positive-only; do not append SD-style negative prompt words.
+        base = self._image_api_base_url(merged_settings)
+        endpoints = self._api_image_generation_endpoints(base)
+        payloads = self._api_image_generation_payloads(model, prompt_text, 1, resolution, style, base)
+        key = self._image_api_key(merged_settings)
+        last_error = ""
+        first_meaningful_error = ""
+        errors = []
+        for endpoint in endpoints:
+            for payload in payloads:
+                req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), method="POST")
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Accept", "application/json, image/png, image/jpeg, image/webp")
+                if key:
+                    req.add_header("Authorization", f"Bearer {key}")
+                    req.add_header("x-api-key", key)
+                try:
+                    with self._urlopen_with_retries(req, merged_settings, timeout=900, label="API image generation") as resp:
+                        raw = resp.read()
+                        content_type = resp.headers.get("Content-Type", "") if getattr(resp, "headers", None) else ""
+                    blobs = self._api_image_response_blobs(raw, content_type)
+                    if blobs:
+                        return blobs[0]
+                    last_error = f"{endpoint}: API returned no parseable image data."
+                    errors.append(last_error)
+                    if not first_meaningful_error:
+                        first_meaningful_error = last_error
+                except urllib.error.HTTPError as e:
+                    body = self._clean_api_image_http_error_body(e.read().decode("utf-8", errors="replace"))
+                    last_error = f"{endpoint} HTTP {e.code}: {body}"
+                    errors.append(last_error)
+                    if e.code != 404 and body != "HTML 404/page response" and not first_meaningful_error:
+                        first_meaningful_error = last_error
+                    if e.code == 404:
+                        break
+                    continue
+                except Exception as e:
+                    last_error = str(e)
+                    errors.append(last_error)
+                    if not first_meaningful_error:
+                        first_meaningful_error = last_error
+                    continue
+        shown_error = first_meaningful_error or last_error
+        self._log_event("api_single_image_generation_failed", {"model": model, "emotion": emotion_label, "endpointsTried": endpoints, "payloadsTried": payloads, "errors": errors[-12:], "lastError": last_error, "shownError": shown_error})
+        raise RuntimeError(f"API image generation failed for {emotion_label}: {shown_error}. Tried: {', '.join(endpoints)}")
+
     def generate_emotion_images(self, output, emotions=None, settings=None):
         self._reset_cancel()
         if not output or not output.strip():
@@ -12367,11 +13064,14 @@ class Api:
         emotions = [e for e in emotions if e in EMOTION_OPTIONS]
         if not emotions:
             return {"ok": False, "error": "Select at least one emotion first."}
-        self._emit_frontend_event("ccfEmotionProgress", {"phase": "prompts", "message": "Generating emotion prompts with AI…"})
-        prompts = self._build_emotion_prompts(output, emotions, merged_settings)
-        self._emit_frontend_event("ccfEmotionProgress", {"phase": "images", "message": "Generating emotion images with SD Forge / Automatic1111…"})
-        base = (merged_settings.get("sdBaseUrl") or "http://127.0.0.1:7860").rstrip("/")
-        url = base + "/sdapi/v1/txt2img"
+        provider = str(merged_settings.get("imageGenerationProvider") or "sd").strip().lower()
+        model = str(merged_settings.get("imageModel") or "").strip()
+        style = self._api_image_prompt_style(merged_settings, model) if provider == "api" else "sd"
+        self._emit_frontend_event("ccfEmotionProgress", {"phase": "prompts", "message": "Generating emotion prompts…"})
+        prompts = self._build_emotion_prompts(output, emotions, merged_settings, style=style)
+        image_backend_label = "API image model…" if provider == "api" else "SD Forge / Automatic1111…"
+        self._emit_frontend_event("ccfEmotionProgress", {"phase": "images", "message": f"Generating emotion images with {image_backend_label}"})
+        resolution = str(merged_settings.get("imageResolution") or "1024x1024").strip() or "1024x1024"
         name = self._extract_name(output) or "character_card"
         folder = self._extract_emotion_images_dir(name)
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -12383,20 +13083,22 @@ class Api:
                 self._emit_frontend_event("ccfEmotionProgress", {"phase": "images", "emotion": emo, "message": f"Generating {emo}.png…"})
                 emo_prompts = prompts.get(emo, {})
                 prompt_manifest[emo] = emo_prompts
-                raw = self._generate_sd_single_image(
-                    emo_prompts.get("positive", ""),
-                    emo_prompts.get("negative", "low quality, bad anatomy, extra fingers, extra limbs, blurry, watermark, text"),
-                    merged_settings,
-                    emo,
-                )
+                if provider == "api":
+                    prompt_value = emo_prompts.get("prompt", "") if style == "natural" else emo_prompts.get("positive", "")
+                    negative_value = emo_prompts.get("negative", self._default_sd_negative_prompt())
+                    raw = self._generate_api_single_image(prompt_value, merged_settings, model, resolution, style, negative_value, emo)
+                else:
+                    prompt_value = emo_prompts.get("positive", "")
+                    negative_value = emo_prompts.get("negative", self._default_sd_negative_prompt())
+                    raw = self._generate_sd_single_image(prompt_value, negative_value, merged_settings, emo)
                 file_path = folder / f"{emo}.png"
                 file_path.write_bytes(raw)
                 image_item = {
                     "emotion": emo,
                     "path": str(file_path),
                     "dataUrl": "data:image/png;base64," + base64.b64encode(raw).decode("ascii"),
-                    "prompt": emo_prompts.get("positive", ""),
-                    "negativePrompt": emo_prompts.get("negative", ""),
+                    "prompt": prompt_value,
+                    "negativePrompt": negative_value,
                 }
                 results.append(image_item)
                 self._emit_frontend_event("ccfEmotionImageGenerated", image_item)
@@ -12421,8 +13123,15 @@ class Api:
         self.save_settings(merged_settings)
         name = self._extract_name(output) or "character_card"
         folder = self._extract_emotion_images_dir(name)
+        provider = str(merged_settings.get("imageGenerationProvider") or "sd").strip().lower()
+        model = str(merged_settings.get("imageModel") or "").strip()
+        style = self._api_image_prompt_style(merged_settings, model) if provider == "api" else "sd"
+        resolution = str(merged_settings.get("imageResolution") or "1024x1024").strip() or "1024x1024"
         try:
-            raw = self._generate_sd_single_image(prompt, negative_prompt, merged_settings, emotion)
+            if provider == "api":
+                raw = self._generate_api_single_image(prompt, merged_settings, model, resolution, style, negative_prompt, emotion)
+            else:
+                raw = self._generate_sd_single_image(prompt, negative_prompt, merged_settings, emotion)
         except Exception as e:
             return {"ok": False, "error": str(e)}
         path = folder / f"{emotion}.png"
@@ -12583,7 +13292,7 @@ class Api:
         """Return the Front Porch install/data root used for non-DB assets.
 
         The database lives in <FrontPorchRoot>/KoboldManager, but current
-        Front Porch Beta stores group-private avatar folders at
+        Front Porch stores group-private avatar folders at
         <FrontPorchRoot>/groups/<group_id>/avatars, not under KoboldManager.
         Older CCF betas incorrectly wrote KoboldManager/groups, which left the
         DB rows valid-looking but gave Front Porch no member folders to load.
@@ -13378,7 +14087,7 @@ class Api:
     def _sqlite_insert_dynamic(self, cursor, table_name, values):
         """Insert a row using only columns present in the target DB.
 
-        Front Porch Rawhide changes quickly, so Group Card direct export must be
+        Front Porch Group Card schemas can change, so Group Card direct export must be
         tolerant: write known columns when present and supply generic values for
         NOT NULL/no-default columns so additive schema changes do not hard-crash.
         """
@@ -13655,18 +14364,21 @@ class Api:
         return diag
 
     def export_group_card_to_front_porch_beta(self, loaded, settings=None, target=None):
-        """Directly export a Front Porch Group Card project into Front Porch Beta.
+        """Directly export a Front Porch Group Card project into Stable or Beta.
 
-        Stable Front Porch does not support the post-v30/v33 group_members contract
-        yet, so this path is deliberately Beta-only.
+        Group chat support is now available in Stable Front Porch as well as Beta,
+        so the selected Front Porch target controls which database/folders receive
+        the group rows and avatar assets.
         """
-        selected_target = str(target or (settings or {}).get("frontPorchExportTarget") or self.settings.get("frontPorchExportTarget") or "beta").strip().lower()
-        if selected_target != "beta":
-            return {"ok": False, "error": "Front Porch Group Card direct export is Beta-only for now. Set the target to Beta or configure the Beta Front Porch data folder.", "target": selected_target}
-        merged_settings = {**self.settings, **(settings or {}), "frontPorchExportTarget": "beta"}
-        km, db, err, selected_target = self._front_porch_paths(merged_settings, target="beta")
+        selected_target = str(target or (settings or {}).get("frontPorchExportTarget") or self.settings.get("frontPorchExportTarget") or "stable").strip().lower()
+        if selected_target not in {"stable", "beta"}:
+            selected_target = "stable"
+        target_label = "Beta" if selected_target == "beta" else "Stable"
+        merged_settings = {**self.settings, **(settings or {}), "frontPorchExportTarget": selected_target}
+        km, db, err, selected_target = self._front_porch_paths(merged_settings, target=selected_target)
+        target_label = "Beta" if selected_target == "beta" else "Stable"
         if err:
-            return {"ok": False, "error": err, "target": "beta"}
+            return {"ok": False, "error": err, "target": selected_target}
         payload = self._load_group_payload_for_project(loaded)
         if not isinstance(payload, dict) or payload.get("spec") != "front_porch_group_card":
             return {"ok": False, "error": "This Group Card project is missing its fpa_group payload."}
@@ -13707,7 +14419,7 @@ class Api:
             cur = con.cursor()
             tables = {str(row[0]) for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "groups" not in tables or "group_members" not in tables:
-                raise ValueError("This Beta database does not expose the required groups/group_members tables yet.")
+                raise ValueError(f"This {target_label} database does not expose the required groups/group_members tables yet. Update Front Porch or choose a database with group chat support.")
             try:
                 groups_info = self._sqlite_table_info(cur, "groups")
                 self._log_event("front_porch_groups_schema", {
@@ -13729,7 +14441,7 @@ class Api:
                 self._log_event("front_porch_group_members_schema_error", {"db": str(db), "error": str(e)})
             now_ms = int(time.time() * 1000)
             now_sec = int(time.time())
-            # Front Porch-created groups in current Rawhide use a plain
+            # Front Porch-created groups in current Front Porch use a plain
             # group_<milliseconds> id.  The extra random suffix used in beta30
             # made valid group_members rows harder for some UI paths to resolve.
             group_id = f"group_{now_ms}"
@@ -13752,8 +14464,8 @@ class Api:
             asset_root = self._front_porch_asset_root_from_kobold_manager(km)
             chars_dir = km / "Characters"
             chars_dir.mkdir(parents=True, exist_ok=True)
-            # Important: Front Porch Beta keeps group avatar folders beside
-            # KoboldManager, e.g. FrontPorchAI-Beta/groups/<group_id>/avatars.
+            # Important: Front Porch keeps group avatar folders beside
+            # KoboldManager, e.g. FrontPorchAI/groups/<group_id>/avatars.
             # They are not stored in KoboldManager/groups.
             avatar_dir = asset_root / "groups" / group_id / "avatars"
             avatar_dir.mkdir(parents=True, exist_ok=True)
@@ -13915,7 +14627,7 @@ class Api:
                     "tags": json.dumps(data.get("tags") if isinstance(data.get("tags"), list) else [], ensure_ascii=False),
                     "avatar_filename": avatar_name,
                     # Schema drift guard: current Front Porch docs use avatar_filename,
-                    # but log/write common aliases if Rawhide changed the column name.
+                    # but log/write common aliases if Front Porch changed the column name.
                     # _sqlite_insert_dynamic only writes aliases that actually exist.
                     "avatar_path": avatar_name,
                     "avatar_file": avatar_name,
@@ -13964,7 +14676,7 @@ class Api:
                 # Match Front Porch-created groups: members come from
                 # group_members, while the source character links live inside
                 # realism/system-prompt state blobs.  Filling character_ids with
-                # private/member/source IDs can make some Rawhide UI paths treat
+                # private/member/source IDs can make some Front Porch UI paths treat
                 # the group as malformed.
                 "character_ids": json.dumps([], ensure_ascii=False),
                 "characterIds": json.dumps([], ensure_ascii=False),
@@ -14105,15 +14817,15 @@ class Api:
             except Exception as e:
                 self._log_event("front_porch_group_export_verify_error", {"groupId": group_id, "error": str(e)})
             con.close()
-            self._log_event("front_porch_group_export", {"name": payload.get("name"), "groupId": group_id, "target": "beta", "members": len(member_rows), "sourceCharacterIds": source_character_ids, "db": str(db), "avatarDir": str(avatar_dir), "backup": str(backup_path)})
-            return {"ok": True, "name": payload.get("name") or "Group Card", "groupId": group_id, "sessionId": session_id, "target": "beta", "targetLabel": "Beta", "database": str(db), "memberCount": len(member_rows), "memberCharacterIds": source_character_ids, "avatarDir": str(avatar_dir), "charactersDir": str(chars_dir), "backup": str(backup_path)}
+            self._log_event("front_porch_group_export", {"name": payload.get("name"), "groupId": group_id, "target": selected_target, "targetLabel": target_label, "members": len(member_rows), "sourceCharacterIds": source_character_ids, "db": str(db), "avatarDir": str(avatar_dir), "backup": str(backup_path)})
+            return {"ok": True, "name": payload.get("name") or "Group Card", "groupId": group_id, "sessionId": session_id, "target": selected_target, "targetLabel": target_label, "database": str(db), "memberCount": len(member_rows), "memberCharacterIds": source_character_ids, "avatarDir": str(avatar_dir), "charactersDir": str(chars_dir), "backup": str(backup_path)}
         except Exception as e:
             try:
                 if con:
                     con.rollback(); con.close()
             except Exception:
                 pass
-            return {"ok": False, "error": f"Front Porch Beta Group Card export failed: {e}. Database backup was created at: {backup_path}"}
+            return {"ok": False, "error": f"Front Porch {target_label} Group Card export failed: {e}. Database backup was created at: {backup_path}"}
 
     def export_front_porch_from_project(self, project_path, settings=None, target=None, *args):
         """Export a saved project directly into Front Porch AI.
@@ -14147,8 +14859,8 @@ class Api:
             if isinstance(settings, dict):
                 merged_settings = {**merged_settings, **settings}
             if target:
-                merged_settings["frontPorchExportTarget"] = str(target or "beta").strip().lower()
-            return self.export_group_card_to_front_porch_beta(loaded, merged_settings, target=merged_settings.get("frontPorchExportTarget") or target or "beta")
+                merged_settings["frontPorchExportTarget"] = str(target or merged_settings.get("frontPorchExportTarget") or "stable").strip().lower()
+            return self.export_group_card_to_front_porch_beta(loaded, merged_settings, target=merged_settings.get("frontPorchExportTarget") or target or "stable")
         # Current app settings win over older settings saved inside the character workspace,
         # otherwise a saved project with a blank Front Porch folder can mask the value the user just entered.
         merged_settings = {**(loaded.get("settings") or {}), **self.settings}
@@ -14240,7 +14952,7 @@ class Api:
                         continue
                     # Stop if the next real line is another heading.
                     next_heading = value.strip("#*` ").strip()
-                    if re.fullmatch(r"(?i)(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt)", next_heading):
+                    if re.fullmatch(r"(?i)(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt|natural english image prompt)", next_heading):
                         break
                     name = self._clean_character_name_value(value)
                     if name and not self._is_generic_character_name(name):
@@ -14305,6 +15017,12 @@ class Api:
             "state tracking": "state_tracking",
             "stable diffusion prompt": "stable_diffusion",
             "stable diffusion": "stable_diffusion",
+            "natural english image prompt": "natural_image_prompt",
+            "natural image prompt": "natural_image_prompt",
+            "natural prompt": "natural_image_prompt",
+            "natural english image prompt": "natural_image_prompt",
+            "natural image prompt": "natural_image_prompt",
+            "natural prompt": "natural_image_prompt",
             "creator notes": "creator_notes",
             "creator note": "creator_notes",
             "post history instructions": "post_history_instructions",
@@ -14354,7 +15072,7 @@ class Api:
         if re.fullmatch(r"(?is)(?:leave blank|blank|none|n/a|not required|no special behavioral rules required|no special rules required)[.\s]*", value):
             return ""
         # Safety: if a model accidentally put later sections here, trim them.
-        for marker in ["State Tracking", "--- STATE TRACKING ---", "Stable Diffusion Prompt"]:
+        for marker in ["State Tracking", "--- STATE TRACKING ---", "Stable Diffusion Prompt", "Natural English Image Prompt"]:
             idx = value.lower().find(marker.lower())
             if idx > 0:
                 value = value[:idx].strip()
@@ -14627,7 +15345,7 @@ class Api:
             personality_parts.append(personality_core)
 
         extension_sections = {}
-        core_ids = {"name", "description", "personality", "scenario", "first_message", "alternate_first_messages", "example_dialogues", "lorebook", "tags", "system_prompt", "state_tracking", "stable_diffusion"}
+        core_ids = {"name", "description", "personality", "scenario", "first_message", "alternate_first_messages", "example_dialogues", "lorebook", "tags", "system_prompt", "state_tracking", "stable_diffusion", "natural_image_prompt"}
         for section in template.get("sections", []):
             if not section.get("enabled", True):
                 continue
@@ -14718,6 +15436,7 @@ class Api:
             "front_porch_realism_engine": data.get("extensions", {}).get("front_porch", {}).get("realism_engine", {}),
             "state_tracking": data.get("extensions", {}).get("state_tracking_raw", ""),
             "stable_diffusion_prompt": self._clean_section_text(self._section(output, "Stable Diffusion Prompt")),
+            "natural_image_prompt": self._clean_section_text(self._section(output, "Natural English Image Prompt")),
             "tags": data.get("tags", []),
             "raw_card": output,
             "sillytavern_chara_card_v2": card_v2,

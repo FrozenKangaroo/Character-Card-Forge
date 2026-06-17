@@ -47,8 +47,15 @@ let browserPendingMovePaths = [];
 let browserPendingGroupCardPaths = [];
 let browserMoveTargetFolderId = "";
 let browserExpandedMoveFolders = new Set();
+let browserRenderLimit = 160;
+const BROWSER_RENDER_STEP = 160;
+let browserRenderTimer = null;
+let browserLastVisibleMatchCount = 0;
+let browserLastDisplayedCount = 0;
+let browserLastFolderCount = 0;
 let sdModelCatalog = [];
 let sdCurrentServerModel = "";
+let apiImageModelCatalog = [];
 let recentModels = [];
 let appVersion = "unknown";
 let modelTokenFetchTimer = null;
@@ -888,7 +895,18 @@ function makeBlankOutputTab(name = 'Character') {
 function groupCardWorkspaceMetaFromState(state = {}) {
   const workspace = (state && typeof state.workspace === 'object') ? state.workspace : {};
   const payload = (state.groupPayload && typeof state.groupPayload === 'object') ? state.groupPayload : ((workspace.groupPayload && typeof workspace.groupPayload === 'object') ? workspace.groupPayload : null);
-  const isGroupCard = !!(state.isGroupCard || workspace.isGroupCard || state.frontend === 'front_porch_group' || workspace.frontend === 'front_porch_group' || state.exportFormat === 'fpa_group_png' || workspace.exportFormat === 'fpa_group_png' || state.groupCardPath || workspace.groupCardPath || payload?.spec === 'front_porch_group_card');
+  const groupPath = String(state.groupCardPath || workspace.groupCardPath || state.groupJsonPath || workspace.groupJsonPath || '').trim();
+  const exportFormat = String(state.exportFormat || workspace.exportFormat || '').toLowerCase();
+  const frontend = String(state.frontend || workspace.frontend || '').toLowerCase();
+  // Be conservative for old single-card projects. A stale bare isGroupCard flag is
+  // not enough to make a workspace a Front Porch group card; it must have a real
+  // fpa_group payload or a concrete group export marker/path.
+  const isGroupCard = !!(
+    payload?.spec === 'front_porch_group_card' ||
+    exportFormat === 'fpa_group_png' || exportFormat === 'fpa_group_json' || exportFormat === 'group_png' || exportFormat === 'group_json' ||
+    frontend === 'front_porch_group' ||
+    /\.group\.(png|json)$/i.test(groupPath)
+  );
   if (!isGroupCard) return {};
   return {
     isGroupCard: true,
@@ -905,7 +923,15 @@ function groupCardWorkspaceMetaFromState(state = {}) {
 function activeOutputTabIsGroupCard() {
   captureActiveOutputTab();
   const tab = characterOutputTabs[activeOutputTabIndex] || {};
-  return !!(tab.isGroupCard || tab.groupCardPath || tab.groupPayload?.spec === 'front_porch_group_card' || tab.frontend === 'front_porch_group' || tab.exportFormat === 'fpa_group_png');
+  const groupPath = String(tab.groupCardPath || tab.groupJsonPath || '').trim();
+  const exportFormat = String(tab.exportFormat || '').toLowerCase();
+  const frontend = String(tab.frontend || '').toLowerCase();
+  return !!(
+    tab.groupPayload?.spec === 'front_porch_group_card' ||
+    frontend === 'front_porch_group' ||
+    exportFormat === 'fpa_group_png' || exportFormat === 'fpa_group_json' || exportFormat === 'group_png' || exportFormat === 'group_json' ||
+    /\.group\.(png|json)$/i.test(groupPath)
+  );
 }
 
 function refreshWorkspaceTabScrollButtons(targetId = '') {
@@ -1579,7 +1605,7 @@ function getStableDiffusionSectionText() {
   const match = text.match(/(^|\n)\s*-{0,}\s*(?:stable diffusion prompt|stable diffusion)\s*:?\s*\n([\s\S]*)$/i);
   if (!match) return '';
   let section = (match[2] || '').trim();
-  const stop = section.search(/\n\s*-{3,}\s*\n\s*(?:name|description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking)\s*:?\s*\n/i);
+  const stop = section.search(/\n\s*-{3,}\s*\n\s*(?:name|description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|natural english image prompt|natural image prompt|natural prompt)\s*:?\s*\n/i);
   if (stop > 0) section = section.slice(0, stop).trim();
   return section;
 }
@@ -1599,27 +1625,52 @@ function hasStableDiffusionPrompt() {
   return cleaned.length > 20 && cleaned.includes(',');
 }
 
+function getNaturalPromptSectionText() {
+  const text = getOutputText();
+  const match = text.match(/(^|\n)\s*-{0,}\s*(?:natural english image prompt|natural image prompt|natural prompt)\s*:?\s*\n([\s\S]*)$/i);
+  if (!match) return '';
+  let section = (match[2] || '').trim();
+  const stop = section.search(/\n\s*-{3,}\s*\n\s*(?:name|description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt)\s*:?\s*\n/i);
+  if (stop > 0) section = section.slice(0, stop).trim();
+  return section;
+}
+
+function hasNaturalImagePrompt() {
+  return getNaturalPromptSectionText().length > 20;
+}
+
 function updateImportedCardToolsHint() {
   const hint = $('#importedCardToolsHint');
   if (!hint) return;
   if (!hasOutput()) {
-    hint.textContent = 'Load or import a card first. If it does not already include a Stable Diffusion Prompt, use one of the buttons above to generate and save it.';
+    hint.textContent = 'Load or import a card first. If it does not already include image prompt sections, use the buttons above to generate and save them.';
     return;
   }
-  if (hasStableDiffusionPrompt()) {
-    hint.textContent = 'This card already has a Stable Diffusion Prompt. You can still regenerate it from the current card image or full text output if you want a new one.';
+  const hasSd = hasStableDiffusionPrompt();
+  const hasNatural = hasNaturalImagePrompt();
+  if (hasSd && hasNatural) {
+    hint.textContent = 'This card already has both a Stable Diffusion Prompt and a Natural English Image Prompt. You can still regenerate either one if you want a fresh version.';
     return;
   }
   const hasImage = !!($('#cardImagePath')?.value || '').trim();
-  hint.textContent = hasImage
-    ? 'This card does not currently have a Stable Diffusion Prompt. Use Vision → SD Prompt to infer one from the current card image, or Full Text → SD Prompt to build one from the loaded metadata.'
-    : 'This card does not currently have a Stable Diffusion Prompt. Use Full Text → SD Prompt to build one from the loaded metadata, or choose a card image first and then use Vision → SD Prompt.';
+  if (!hasSd && !hasNatural) {
+    hint.textContent = hasImage
+      ? 'This card does not currently have image prompt sections. Use Vision → SD Prompt, Full Text → SD Prompt, and/or Full Text → Natural Prompt to build them from the loaded card.'
+      : 'This card does not currently have image prompt sections. Use Full Text → SD Prompt and/or Full Text → Natural Prompt to build them from the loaded card, or choose a card image first and then use Vision → SD Prompt.';
+    return;
+  }
+  if (!hasSd) {
+    hint.textContent = 'This card already has a Natural English Image Prompt, but it is missing a Stable Diffusion Prompt. Use Vision → SD Prompt or Full Text → SD Prompt if you need one.';
+    return;
+  }
+  hint.textContent = 'This card already has a Stable Diffusion Prompt, but it is missing a Natural English Image Prompt. Use Full Text → Natural Prompt to create one.';
 }
+
 const AI_QUEUE_METHODS = new Set([
   'ai_builder_randomize_preset', 'ai_builder_suggest', 'ai_transfer_to_builders',
   'generate_idea', 'generateIdea', 'generateIdeaFromOptions',
   'analyze_vision_image',
-  'generate_sd_prompt_from_output', 'generate_sd_prompt_from_vision',
+  'generate_sd_prompt_from_output', 'generate_sd_prompt_from_vision', 'generate_natural_prompt_from_output',
   'generate_relationship_matrix',
   'ai_suggest_tag_cleanup',
   'regenerate_browser_description_for_project', 'ensure_card_rating_details_for_project',
@@ -1632,7 +1683,7 @@ const AI_QUEUE_METHODS = new Set([
 
 function looksLikeAiTaskText(value) {
   const task = String(value || '').toLowerCase();
-  return /\b(ai|generation|generating|q&a|vision|stable diffusion|sd forge|sd images|emotion image|tag cleanup|description|revision|revise|suggestion|random theme|transfer to builders|backup text model|model|relationship matrix|idea generator)\b/.test(task);
+  return /\b(ai|generation|generating|q&a|vision|stable diffusion|natural prompt|sd forge|sd images|emotion image|tag cleanup|description|revision|revise|suggestion|random theme|transfer to builders|backup text model|model|relationship matrix|idea generator)\b/.test(task);
 }
 
 function humanizeAiMethodName(name) {
@@ -1654,6 +1705,7 @@ function humanizeAiMethodName(name) {
     generate_relationship_matrix: 'Relationship Matrix',
     generate_sd_prompt_from_output: 'Full Text → SD Prompt',
     generate_sd_prompt_from_vision: 'Vision → SD Prompt',
+    generate_natural_prompt_from_output: 'Full Text → Natural Prompt',
     ai_suggest_tag_cleanup: 'AI Tag Cleanup',
     regenerate_browser_description_for_project: 'AI Browser Analysis',
     ensure_card_rating_details_for_project: 'Rating Detail Repair',
@@ -1872,7 +1924,7 @@ function isAiActionElement(el) {
   const aiIds = new Set([
     'generateBtn','generateIdeaBtn','reviseBtn','makeVariationBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
-    'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
+    'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','generateNaturalPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
   if (aiIds.has(id)) return true;
   return /(?:^|)(ai|suggest|analyze|generate|revise|random)(?:|$)/i.test(id) && !/export|copy|load|select|clear|save|delete|folder|refresh|zip/i.test(id);
@@ -2346,7 +2398,14 @@ function hydrateSettings() {
   refreshMobileServerStatus(false);
   const ideaRandomMax = $('#ideaGeneratorRandomMaxChoices'); if (ideaRandomMax) ideaRandomMax.value = Math.max(1, Math.min(20, Number(settings.ideaGeneratorRandomMaxChoices || DEFAULT_IDEA_RANDOM_MAX_CHOICES)));
   $('#sdBaseUrl').value = settings.sdBaseUrl || 'http://127.0.0.1:7860';
+  const imageProviderSelect = $('#imageGenerationProvider'); if (imageProviderSelect) imageProviderSelect.value = settings.imageGenerationProvider || 'sd';
+  const imageApiBaseUrl = $('#imageApiBaseUrl'); if (imageApiBaseUrl) imageApiBaseUrl.value = settings.imageApiBaseUrl || '';
+  const imageApiKey = $('#imageApiKey'); if (imageApiKey) imageApiKey.value = settings.imageApiKey || '';
   renderSdModelSelect(sdModelCatalog, settings.sdModel || '', sdCurrentServerModel || '');
+  renderApiImageModelSelect(apiImageModelCatalog, settings.imageModel || '');
+  const imageResolution = $('#imageResolution'); if (imageResolution) imageResolution.value = settings.imageResolution || '1024x1024';
+  const imagePromptMode = $('#imagePromptMode'); if (imagePromptMode) imagePromptMode.value = settings.imagePromptMode || 'auto';
+  const imageVisualStyle = $('#imageVisualStyle'); if (imageVisualStyle) imageVisualStyle.value = settings.imageVisualStyle || 'anime';
   $('#sdSteps').value = settings.sdSteps ?? 28;
   $('#sdCfgScale').value = settings.sdCfgScale ?? 7;
   $('#sdSampler').value = settings.sdSampler || 'Euler a';
@@ -2358,6 +2417,8 @@ function hydrateSettings() {
   $('#exportFormat').value = exportFormat;
   $('#cardImagePath').value = settings.cardImagePath || '';
   if ($('#sdImageCount')) $('#sdImageCount').value = settings.sdImageCount || 4;
+  if ($('#sdImageCountSettings')) $('#sdImageCountSettings').value = settings.sdImageCount || 4;
+  updateImageGenerationProviderHint();
   if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = settings.exportDestinationFolder || '';
   updateCardImagePreview();
   $('#altCount').value = settings.alternateFirstMessages ?? 2;
@@ -2401,7 +2462,7 @@ function isGenericOutputName(value) {
 function extractOutputNameForTab(output) {
   const text = String(output || '');
   const lines = text.split(/\r?\n/);
-  const stopHeadings = /^(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt)$/i;
+  const stopHeadings = /^(description|personality|scenario|first message|alternative first messages|example dialogues|lorebook entries|tags|state tracking|stable diffusion prompt|natural english image prompt|natural image prompt|natural prompt)$/i;
 
   for (let i = 0; i < lines.length; i += 1) {
     const raw = String(lines[i] || '').trim();
@@ -2579,6 +2640,77 @@ async function fetchStableDiffusionModels() {
     setStatus(String(e?.message || e), 'error');
   } finally {
     setBusy('');
+  }
+}
+
+function renderApiImageModelSelect(models = [], selectedValue = '') {
+  const select = $('#imageModel');
+  if (!select) return;
+  const previous = String(selectedValue || select.value || settings?.imageModel || '').trim();
+  apiImageModelCatalog = Array.isArray(models) ? models.slice() : [];
+  select.innerHTML = '';
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = apiImageModelCatalog.length ? 'Select API image model' : 'Enter/fetch API image model';
+  select.appendChild(defaultOpt);
+  const seen = new Set(['']);
+  apiImageModelCatalog.forEach(item => {
+    const value = String(item?.value || item?.id || '').trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = String(item?.displayName || item?.name || value).trim() || value;
+    opt.title = String(item?.description || item?.id || value).trim();
+    select.appendChild(opt);
+  });
+  if (previous && !seen.has(previous)) {
+    const opt = document.createElement('option');
+    opt.value = previous;
+    opt.textContent = `${previous} [saved/custom]`;
+    select.appendChild(opt);
+  }
+  select.value = previous;
+}
+
+async function fetchApiImageModels() {
+  const localSettings = collectSettings();
+  const base = String(localSettings.imageApiBaseUrl || localSettings.apiBaseUrl || '').trim();
+  if (!base) {
+    setStatus('Enter an Image API Base URL or Text API Base URL first.', 'error');
+    return;
+  }
+  try {
+    setBusy('FETCHING API IMAGE MODELS — querying model metadata…');
+    setStatus('Fetching API image models…', '');
+    const res = await window.pywebview.api.fetch_api_image_models(localSettings);
+    if (!res.ok) throw new Error(res.error || 'Could not fetch API image models.');
+    renderApiImageModelSelect(res.models || [], res.selectedModel || localSettings.imageModel || '');
+    if (res.defaultResolution && $('#imageResolution') && !$('#imageResolution').value.trim()) $('#imageResolution').value = res.defaultResolution;
+    settings = collectSettings();
+    await window.pywebview.api.save_settings(settings);
+    const count = Array.isArray(res.models) ? res.models.length : 0;
+    setStatus(`Fetched ${count} API image model${count === 1 ? '' : 's'}.`, 'ok');
+  } catch (e) {
+    setStatus(String(e?.message || e), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function updateImageGenerationProviderHint() {
+  const hint = $('#imageGenerationProviderHint');
+  if (!hint) return;
+  const provider = ($('#imageGenerationProvider')?.value || settings?.imageGenerationProvider || 'sd');
+  const count = Number(($('#sdImageCount')?.value || $('#sdImageCountSettings')?.value || settings?.sdImageCount || 4));
+  if (provider === 'api') {
+    const model = ($('#imageModel')?.value || settings?.imageModel || '').trim() || 'no API image model selected';
+    const resolution = ($('#imageResolution')?.value || settings?.imageResolution || '1024x1024').trim();
+    const mode = ($('#imagePromptMode')?.value || settings?.imagePromptMode || 'auto');
+    hint.textContent = `Using API image model: ${model} • ${resolution} • prompt style: ${mode} • ${count} image${count === 1 ? '' : 's'}.`;
+  } else {
+    const model = ($('#sdModel')?.value || settings?.sdModel || '').trim();
+    hint.textContent = `Using local SD Forge / Automatic1111${model ? ` model: ${model}` : ''} • ${count} image${count === 1 ? '' : 's'}.`;
   }
 }
 
@@ -2918,12 +3050,19 @@ function collectSettings() {
     nsfwBrowserMode: ($('#nsfwBrowserMode') ? $('#nsfwBrowserMode').value : 'show'),
     nsfwTags: ($('#nsfwTags') ? $('#nsfwTags').value.trim() : 'NSFW'),
     ideaGeneratorRandomMaxChoices: Math.max(1, Math.min(20, Number(($('#ideaGeneratorRandomMaxChoices') ? $('#ideaGeneratorRandomMaxChoices').value : DEFAULT_IDEA_RANDOM_MAX_CHOICES) || DEFAULT_IDEA_RANDOM_MAX_CHOICES))),
+    imageGenerationProvider: ($('#imageGenerationProvider') ? $('#imageGenerationProvider').value : 'sd') || 'sd',
     sdBaseUrl: $('#sdBaseUrl').value.trim() || 'http://127.0.0.1:7860',
     sdModel: ($('#sdModel') ? $('#sdModel').value.trim() : ''),
+    imageApiBaseUrl: ($('#imageApiBaseUrl') ? $('#imageApiBaseUrl').value.trim() : ''),
+    imageApiKey: ($('#imageApiKey') ? $('#imageApiKey').value.trim() : ''),
+    imageModel: ($('#imageModel') ? $('#imageModel').value.trim() : ''),
+    imageResolution: ($('#imageResolution') ? $('#imageResolution').value.trim() : '1024x1024') || '1024x1024',
+    imagePromptMode: ($('#imagePromptMode') ? $('#imagePromptMode').value : 'auto') || 'auto',
+    imageVisualStyle: ($('#imageVisualStyle') ? $('#imageVisualStyle').value : 'anime') || 'anime',
     sdSteps: Number($('#sdSteps').value || 28),
     sdCfgScale: Number($('#sdCfgScale').value || 7),
     sdSampler: $('#sdSampler').value.trim() || 'Euler a',
-    sdImageCount: Math.max(1, Math.min(16, Number(($('#sdImageCount') ? $('#sdImageCount').value : 4) || 4))),
+    sdImageCount: Math.max(1, Math.min(20, Number(($('#sdImageCount') ? $('#sdImageCount').value : ($('#sdImageCountSettings') ? $('#sdImageCountSettings').value : 4)) || 4))),
     mode: $('#modeSelect').value,
     cardMode: selectedCardMode,
     multiCharacterCount: Number($('#multiCharacterCount').value || 2),
@@ -3147,7 +3286,7 @@ function manualGuidePages() {
     { id: 'first', title: 'First Message(s)', hint: 'Main first message plus optional alternative openings.', panels: ['sectionsFirst'], sectionIds: ['first_message', 'alternate_first_messages'] },
     { id: 'examples', title: 'Example Dialogues', hint: 'Example dialogue and lorebook-style supporting entries if your template has them.', panels: ['sectionsExamples'], sectionIds: ['example_dialogues', 'lorebook'] },
     { id: 'tagsSystem', title: 'Tags and System Prompt', hint: 'Tags plus optional custom system prompt / behavior rules.', panels: ['sectionsTagsSystem'], sectionIds: ['tags', 'system_prompt'] },
-    { id: 'stateSd', title: 'State Tracking and Stable Diffusion Prompt', hint: 'Optional Front Porch state values and image-generation prompt fields.', panels: ['sectionsStateSd'], sectionIds: ['state_tracking', 'stable_diffusion'] },
+    { id: 'stateSd', title: 'State Tracking and Image Prompts', hint: 'Optional Front Porch state values plus Stable Diffusion and natural-language image prompt fields.', panels: ['sectionsStateSd'], sectionIds: ['state_tracking', 'stable_diffusion', 'natural_image_prompt'] },
   ];
 }
 
@@ -4432,13 +4571,13 @@ function bindActions() {
   $('#browserShowSubfolders')?.addEventListener('change', (e) => setShowSubfolders(e.currentTarget.checked));
   $('#browserShowSubfoldersModal')?.addEventListener('change', (e) => setShowSubfolders(e.currentTarget.checked));
   $('#browserFolderSelect')?.addEventListener('change', (e) => { setBrowserCurrentFolder(e.target.value || '', `Opened ${browserFolderPathLabel(e.target.value || '')}.`); });
-  $('#browserFolderScope')?.addEventListener('change', (e) => { browserFolderScope = e.target.value || 'global'; renderCharacterBrowser(); });
-  $('#browserSortMode')?.addEventListener('change', (e) => { setBrowserFolderSortMode(e.target.value || 'date_desc'); renderCharacterBrowser(); });
-  $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; renderCharacterBrowser(); });
+  $('#browserFolderScope')?.addEventListener('change', (e) => { browserFolderScope = e.target.value || 'global'; resetBrowserRenderWindow(); renderCharacterBrowser(); });
+  $('#browserSortMode')?.addEventListener('change', (e) => { setBrowserFolderSortMode(e.target.value || 'date_desc'); resetBrowserRenderWindow(); renderCharacterBrowser(); });
+  $('#browserSearchInput')?.addEventListener('input', (e) => { browserSearchTerm = e.target.value || ''; scheduleCharacterBrowserRender(true, 90); });
   $('#browserFilterBtn')?.addEventListener('click', openBrowserFilterModal);
   $('#closeBrowserFilterModalBtn')?.addEventListener('click', closeBrowserFilterModal);
   $('#browserFilterModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserFilterModal') closeBrowserFilterModal(); });
-  $('#browserClearFiltersBtn')?.addEventListener('click', () => { browserIncludeTags.clear(); browserExcludeTags.clear(); renderCharacterBrowser(); });
+  $('#browserClearFiltersBtn')?.addEventListener('click', () => { browserIncludeTags.clear(); browserExcludeTags.clear(); resetBrowserRenderWindow(); renderCharacterBrowser(); });
   $('#browserTagSortMode')?.addEventListener('change', (e) => { browserTagSortMode = e.target.value || 'alpha'; renderBrowserFilterPanel(); });
   $('#browserTagSearchInput')?.addEventListener('input', (e) => { browserTagSearchTerm = e.target.value || ''; renderBrowserTagSearchDropdown(); });
   $('#browserTagSearchInput')?.addEventListener('keydown', (e) => {
@@ -4525,8 +4664,16 @@ function bindActions() {
   $('#selectImageBtn')?.addEventListener('click', selectCardImage);
   $('#cardImageUrlBtn')?.addEventListener('click', importCardImageUrl);
   $('#generateImagesBtn')?.addEventListener('click', generateSdImages);
+  $('#fetchApiImageModelsBtn')?.addEventListener('click', fetchApiImageModels);
+  $('#imageGenerationProvider')?.addEventListener('change', () => { settings = collectSettings(); if ($('#sdImageCount')) $('#sdImageCount').value = settings.sdImageCount || 4; window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
+  $('#imageApiBaseUrl')?.addEventListener('input', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); });
+  $('#imageApiKey')?.addEventListener('input', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); });
+  $('#imageModel')?.addEventListener('change', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
+  $('#imageResolution')?.addEventListener('input', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
+  $('#imagePromptMode')?.addEventListener('change', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
   $('#generateSdPromptFromVisionBtn')?.addEventListener('click', generateSdPromptFromLoadedVision);
   $('#generateSdPromptFromOutputBtn')?.addEventListener('click', generateSdPromptFromLoadedOutput);
+  $('#generateNaturalPromptFromOutputBtn')?.addEventListener('click', generateNaturalPromptFromLoadedOutput);
   $('#generateEmotionImagesBtn').addEventListener('click', generateEmotionImages);
   $('#zipEmotionImagesBtn').addEventListener('click', createEmotionZip);
   $('#selectAllEmotionsBtn').addEventListener('click', () => { $$('#emotionOptions input').forEach(el => el.checked = true); });
@@ -4535,7 +4682,8 @@ function bindActions() {
   $('#cardImagePath')?.addEventListener('input', () => { settings = collectSettings(); if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].cardImagePath = $('#cardImagePath').value.trim(); updateCardImagePreview(); updateAvailability(); });
   $('#quickImportPath')?.addEventListener('input', () => { syncQuickImportUrlFromInput(); updateQuickImportSelected(); });
   $('#quickImportPath')?.addEventListener('paste', () => { setTimeout(() => { syncQuickImportUrlFromInput(); updateQuickImportSelected(); }, 0); });
-  $('#sdImageCount')?.addEventListener('input', () => { settings = collectSettings(); window.pywebview?.api?.save_settings(settings); });
+  $('#sdImageCount')?.addEventListener('input', () => { if ($('#sdImageCountSettings')) $('#sdImageCountSettings').value = $('#sdImageCount').value; settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
+  $('#sdImageCountSettings')?.addEventListener('input', () => { if ($('#sdImageCount')) $('#sdImageCount').value = $('#sdImageCountSettings').value; settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
   $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
   $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
   $('#attachConceptUrlBtn')?.addEventListener('click', attachConceptUrl);
@@ -6438,6 +6586,26 @@ async function generateSdPromptFromLoadedOutput() {
   }
 }
 
+
+async function generateNaturalPromptFromLoadedOutput() {
+  if (isInterfaceLocked()) return;
+  if (!hasOutput()) { setStatus('Load or generate a card first.', 'error'); return; }
+  settings = collectSettings();
+  setBusy('GENERATING NATURAL ENGLISH IMAGE PROMPT FROM FULL TEXT OUTPUT…');
+  try {
+    const res = await window.pywebview.api.generate_natural_prompt_from_output($('#outputText').value, settings);
+    if (!res.ok) throw new Error(res.error || 'Could not generate Natural English Image Prompt.');
+    $('#outputText').value = res.output || $('#outputText').value;
+    updateImportedCardToolsHint();
+    await saveCurrentWorkspace('silent');
+    setStatus('Generated Natural English Image Prompt from Full Text Output and saved it to the current card.', 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
 async function generateSdPromptFromLoadedVision() {
   if (isInterfaceLocked()) return;
   if (!hasOutput()) { setStatus('Load or generate a card first.', 'error'); return; }
@@ -6573,6 +6741,9 @@ function relationshipCanonicalSection(line) {
     'system prompt': 'system_prompt',
     'state tracking': 'state_tracking',
     'stable diffusion prompt': 'stable_diffusion',
+    'natural english image prompt': 'natural_image_prompt',
+    'natural image prompt': 'natural_image_prompt',
+    'natural prompt': 'natural_image_prompt',
     'stable diffusion': 'stable_diffusion',
     'creator notes': 'creator_notes',
     'post history instructions': 'post_history_instructions',
@@ -7119,7 +7290,8 @@ async function saveCurrentWorkspace(reason='autosave') {
         const activeSaved = saved[activeOutputTabIndex] || saved[0];
         setStatus(`Saved ${saved.length} split character workspace${saved.length === 1 ? '' : 's'} to the Character Browser${activeSaved?.folder ? `, including ${activeSaved.folder}` : ''}.`, 'ok');
       }
-      await refreshCharacterBrowser(false);
+      saved.forEach(item => upsertBrowserCardFromSaveResponse(item));
+      if (browserTabIsVisible()) renderCharacterBrowser();
       if (String(reason || '').includes('group_card')) return saved;
       return saved[activeOutputTabIndex] || saved[0] || null;
     }
@@ -7132,12 +7304,69 @@ async function saveCurrentWorkspace(reason='autosave') {
       characterOutputTabs[activeOutputTabIndex].workspaceProjectPath = res.projectPath || characterOutputTabs[activeOutputTabIndex].workspaceProjectPath || '';
     }
     if (reason !== 'silent') setStatus(`Workspace saved to ${res.folder}`, 'ok');
-    await refreshCharacterBrowser(false);
+    upsertBrowserCardFromSaveResponse(res);
     return res;
   } catch (err) {
     setStatus(`Workspace autosave failed: ${err.message || err}`, 'error');
     return null;
   }
+}
+
+
+function browserTabIsVisible() {
+  return !!$('#browser')?.classList.contains('active');
+}
+
+function resetBrowserRenderWindow() {
+  browserRenderLimit = BROWSER_RENDER_STEP;
+}
+
+function scheduleCharacterBrowserRender(resetLimit=false, delay=80) {
+  if (resetLimit) resetBrowserRenderWindow();
+  if (browserRenderTimer) clearTimeout(browserRenderTimer);
+  browserRenderTimer = setTimeout(() => {
+    browserRenderTimer = null;
+    renderCharacterBrowser();
+  }, delay);
+}
+
+function updateBrowserFilterButtonLight() {
+  const count = browserIncludeTags.size + browserExcludeTags.size;
+  const filterBtn = $('#browserFilterBtn');
+  if (filterBtn) {
+    filterBtn.classList.toggle('has-filters', count > 0 || getBrowserFolderSortMode() !== 'date_desc');
+    filterBtn.title = count ? `Sort and filter cards — ${count} active tag filter${count === 1 ? '' : 's'}` : 'Sort and filter cards';
+  }
+  const summary = $('#browserFilterSummary');
+  if (summary && !browserFilterPanelOpen) {
+    const inc = [...browserIncludeTags].sort((a,b) => a.localeCompare(b)).map(t => `+${browserTagDisplayForKey(t)}`);
+    const exc = [...browserExcludeTags].sort((a,b) => a.localeCompare(b)).map(t => `−${browserTagDisplayForKey(t)}`);
+    summary.textContent = [...inc, ...exc].join('   ') || 'No tag filters active.';
+  }
+}
+
+function upsertBrowserCardFromSaveResponse(res) {
+  const card = res?.browserCard;
+  if (!card || !card.projectPath) {
+    browserNeedsRefresh = true;
+    return false;
+  }
+  const key = String(card.projectPath || '');
+  const idx = characterBrowserCards.findIndex(c => String(c.projectPath || '') === key);
+  if (idx >= 0) characterBrowserCards[idx] = { ...characterBrowserCards[idx], ...card };
+  else characterBrowserCards.unshift(card);
+  if (selectedCharacterProjectPath && selectedCharacterProjectPath === key) {
+    selectedCharacterProjectPath = key;
+  }
+  browserHasLoadedOnce = true;
+  browserNeedsRefresh = false;
+  if (browserTabIsVisible()) {
+    renderCharacterBrowser();
+    if (selectedCharacterProjectPath) selectCharacterBrowserCard(selectedCharacterProjectPath);
+  } else {
+    browserNeedsRefresh = !browserHasLoadedOnce;
+  }
+  return true;
 }
 
 async function refreshCharacterBrowser(showStatus=true, options={}) {
@@ -7149,6 +7378,7 @@ async function refreshCharacterBrowser(showStatus=true, options={}) {
   try {
     const res = await window.pywebview.api.list_character_library();
     if (!res.ok) throw new Error(res.error || 'Could not load character browser.');
+    resetBrowserRenderWindow();
     characterBrowserCards = res.cards || [];
     const browserValidProjectPaths = new Set(characterBrowserCards.map(card => card.projectPath).filter(Boolean));
     browserCardGroups = normaliseBrowserCardGroups(browserCardGroups || [], browserValidProjectPaths);
@@ -7538,6 +7768,7 @@ function browserFolderPathParts(folderId) {
 }
 
 function setBrowserCurrentFolder(folderId, message = '') {
+  resetBrowserRenderWindow();
   browserCurrentFolderId = normaliseFolderId(folderId);
   browserSortMode = getBrowserFolderSortMode(browserCurrentFolderId);
   const folderSelect = $('#browserFolderSelect');
@@ -7752,7 +7983,7 @@ async function exportSelectedCharactersToFrontPorchBatch(pathsOverride=null) {
     const card = characterBrowserCards.find(c => c.projectPath === path) || {};
     if (await projectLooksLikeFrontPorchGroupCard(path, card)) { containsGroupCard = true; break; }
   }
-  const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: containsGroupCard ? 'group-batch' : 'batch', forceBeta: containsGroupCard });
+  const targets = await chooseFrontPorchExportTargets({ count: paths.length, mode: containsGroupCard ? 'group-batch' : 'batch' });
   if (!targets || !targets.length) return;
 
   if (!frontPorchBothFoldersConfigured(settings)) {
@@ -10030,23 +10261,34 @@ function renderBrowserTokenDetails(card) {
 }
 
 function renderCharacterBrowser() {
+  if (browserRenderTimer) { clearTimeout(browserRenderTimer); browserRenderTimer = null; }
   const grid = $('#characterGrid');
   if (!grid) return;
   renderBrowserFolderControls();
   renderBrowserBreadcrumb();
-  renderBrowserFilterPanel();
+  if (browserFilterPanelOpen) renderBrowserFilterPanel();
+  else updateBrowserFilterButtonLight();
   const visibleCards = getVisibleBrowserCards();
-  const displayCards = displayBrowserCardsWithGroups(visibleCards);
-  renderBrowserLetterStrip(displayCards);
+  const allDisplayCards = displayBrowserCardsWithGroups(visibleCards);
+  browserLastVisibleMatchCount = visibleCards.length;
+  browserLastDisplayedCount = allDisplayCards.length;
+  browserRenderLimit = Math.max(BROWSER_RENDER_STEP, Math.min(browserRenderLimit || BROWSER_RENDER_STEP, allDisplayCards.length || BROWSER_RENDER_STEP));
+  const displayCards = allDisplayCards.slice(0, browserRenderLimit);
+  const moreCardsRemaining = allDisplayCards.length > displayCards.length;
+  renderBrowserLetterStrip(allDisplayCards);
   const countEl = $('#browserResultCount');
   const scopedTotal = browserScopeCards().length;
-  if (countEl) countEl.textContent = `${displayCards.length} shown / ${visibleCards.length} matched / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
+  if (countEl) {
+    const shownText = moreCardsRemaining ? `${displayCards.length} shown now / ${allDisplayCards.length} renderable` : `${displayCards.length} shown`;
+    countEl.textContent = `${shownText} / ${visibleCards.length} matched / ${scopedTotal} in scope (${characterBrowserCards.length} total)`;
+  }
   const visibleFolders = getVisibleBrowserFolders(visibleCards);
+  browserLastFolderCount = visibleFolders.length;
   if (!characterBrowserCards.length && !visibleFolders.length) {
     grid.innerHTML = '<div class="empty">No saved characters yet. Generate a card first.</div>';
     return;
   }
-  if (!displayCards.length && !visibleFolders.length) {
+  if (!allDisplayCards.length && !visibleFolders.length) {
     grid.innerHTML = '<div class="empty">No characters or folders match the current search/filter.</div>';
     return;
   }
@@ -10075,7 +10317,7 @@ function renderCharacterBrowser() {
     <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass} ${groupClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}" data-group-id="${escapeAttr(group?.id || '')}" draggable="true">
       ${browserGroupBadgeHtml(card)}
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
-      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
+      <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" loading="lazy" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
       <div class="character-tile-summary-source ${String(card.browserDescriptionSource || '').toLowerCase() === 'ai' ? 'ai-source' : 'extracted-source'}">${escapeHtml(descriptionSourceLabel(card.browserDescriptionSource))}</div>
       <div class="character-tile-summary">${escapeHtml(card.browserDescription || card.outputPreview || '')}</div>
@@ -10085,7 +10327,14 @@ function renderCharacterBrowser() {
       ${browserTokenBadgeHtml(card)}
     </div>
   `}).join('');
-  grid.innerHTML = folderHtml + cardHtml;
+  const moreHtml = moreCardsRemaining
+    ? `<button type="button" id="browserShowMoreBtn" class="browser-show-more-card">Show next ${Math.min(BROWSER_RENDER_STEP, allDisplayCards.length - displayCards.length)} card${Math.min(BROWSER_RENDER_STEP, allDisplayCards.length - displayCards.length) === 1 ? '' : 's'} (${allDisplayCards.length - displayCards.length} remaining)</button>`
+    : '';
+  grid.innerHTML = folderHtml + cardHtml + moreHtml;
+  $('#browserShowMoreBtn')?.addEventListener('click', () => {
+    browserRenderLimit = Math.min(allDisplayCards.length, (browserRenderLimit || BROWSER_RENDER_STEP) + BROWSER_RENDER_STEP);
+    renderCharacterBrowser();
+  });
   $$('.browser-group-toggle', grid).forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.preventDefault();
@@ -10502,14 +10751,13 @@ function openFrontPorchExportTargetModal({ count = 1, mode = 'single', forceBeta
   const stableBtn = $('#frontPorchExportStableBtn');
   const betaBtn = $('#frontPorchExportBetaBtn');
   const bothBtn = $('#frontPorchExportBothBtn');
-  if (stableBtn) stableBtn.classList.toggle('hidden', !!forceBeta);
-  if (bothBtn) bothBtn.classList.toggle('hidden', !!forceBeta);
-  if (betaBtn) betaBtn.textContent = forceBeta ? 'Export to Front Porch AI Beta' : 'Export to Front Porch AI Beta';
+  if (stableBtn) stableBtn.classList.remove('hidden');
+  if (bothBtn) bothBtn.classList.remove('hidden');
+  if (betaBtn) betaBtn.textContent = 'Export to Front Porch AI Beta';
   if (summary) {
-    const itemLabel = count === 1 ? (forceBeta ? 'this group card' : 'this character') : `${count} selected ${forceBeta ? 'card(s)' : 'characters'}`;
-    summary.textContent = forceBeta
-      ? `Front Porch Group Cards are only supported by Beta for now. Export ${itemLabel} to the Beta data folder.`
-      : `Both Stable and Beta Front Porch data folders are configured. Choose where to export ${itemLabel}.`;
+    const isGroup = String(mode || '').includes('group');
+    const itemLabel = count === 1 ? (isGroup ? 'this group card' : 'this character') : `${count} selected ${isGroup ? 'card(s)' : 'characters'}`;
+    summary.textContent = `Both Stable and Beta Front Porch data folders are configured. Choose where to export ${itemLabel}. Group Cards are supported in Stable and Beta.`;
   }
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
@@ -10550,7 +10798,7 @@ function textLooksLikeFrontPorchGroupPreview(text = '') {
 async function projectLooksLikeFrontPorchGroupCard(projectPath, browserCard = null) {
   // Load the saved project first and classify from authoritative project fields.
   // Browser cache can be stale after switching between group cards and normal cards,
-  // so it must not be allowed to force Beta-only export for normal single cards.
+  // so it must not be allowed to force group-card export for normal single cards.
   let loadedOk = false;
   try {
     if (projectPath && window.pywebview?.api?.load_character_project) {
@@ -10585,14 +10833,8 @@ async function chooseFrontPorchExportTargets({ count = 1, mode = 'single', force
   settings = collectSettings();
   const hasStable = !!String(settings.frontPorchStableDataFolder || '').trim();
   const hasBeta = !!String(settings.frontPorchBetaDataFolder || '').trim();
-  if (forceBeta) {
-    if (hasBeta) return ['beta'];
-    setStatus('Front Porch Group Cards can only be exported to Beta for now. Set the Beta Front Porch Data Folder in Settings first.', 'error');
-    switchToSettingsTab();
-    return null;
-  }
   if (hasStable && hasBeta) {
-    return await openFrontPorchExportTargetModal({ count, mode, forceBeta });
+    return await openFrontPorchExportTargetModal({ count, mode, forceBeta: false });
   }
   if (hasStable) return ['stable'];
   if (hasBeta) return ['beta'];
@@ -10611,14 +10853,11 @@ async function exportSelectedCharacterToFrontPorch() {
   settings = collectSettings();
   const selectedCard = characterBrowserCards.find(c => c.projectPath === selectedCharacterProjectPath) || {};
   const selectedLooksGroup = await projectLooksLikeFrontPorchGroupCard(selectedCharacterProjectPath, selectedCard);
-  const targets = await chooseFrontPorchExportTargets({ count: 1, mode: selectedLooksGroup ? 'group' : 'single', forceBeta: selectedLooksGroup });
+  const targets = await chooseFrontPorchExportTargets({ count: 1, mode: selectedLooksGroup ? 'group' : 'single' });
   if (!targets || !targets.length) return;
 
-  if (selectedLooksGroup) {
-    setStatus('Front Porch Group Card export is Beta-only for now.', 'warn');
-  }
 
-  if (!frontPorchBothFoldersConfigured(settings) || selectedLooksGroup) {
+  if (!frontPorchBothFoldersConfigured(settings)) {
     const label = frontPorchTargetInfo(targets[0], settings).label;
     const ok = confirm(`Export this saved character directly into ${label}?
 
@@ -11812,16 +12051,19 @@ async function handleCardImageFileSelected(event) {
 async function generateSdImages() {
   settings = collectSettings();
   await window.pywebview.api.save_settings(settings);
-  if (!hasStableDiffusionPrompt()) { setStatus('No Stable Diffusion prompt found. Add a Positive Prompt line or raw comma-separated tags under Stable Diffusion Prompt.', 'error'); return; }
-  const imageCount = Math.max(1, Math.min(16, Number(settings.sdImageCount || 4)));
-  setBusy(`GENERATING ${imageCount} SD IMAGE${imageCount === 1 ? '' : 'S'} — SD Forge / Automatic1111 is working…`);
-  setStatus(`Generating ${imageCount} image${imageCount === 1 ? '' : 's'} in SD Forge / Automatic1111 at 1024×1024…`, '');
+  updateImageGenerationProviderHint();
+  const provider = settings.imageGenerationProvider === 'api' ? 'API image model' : 'SD Forge / Automatic1111';
+  if (settings.imageGenerationProvider !== 'api' && !hasStableDiffusionPrompt()) { setStatus('No Stable Diffusion prompt found. Add a Positive Prompt line or raw comma-separated tags under Stable Diffusion Prompt.', 'error'); return; }
+  const imageCount = Math.max(1, Math.min(20, Number(settings.sdImageCount || 4)));
+  setBusy(`GENERATING ${imageCount} IMAGE${imageCount === 1 ? '' : 'S'} — ${provider} is working…`);
+  setStatus(`Generating ${imageCount} image${imageCount === 1 ? '' : 's'} with ${provider}…`, '');
   try {
     const res = await window.pywebview.api.generate_sd_images($('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Image generation failed.');
     if (characterOutputTabs[activeOutputTabIndex]) characterOutputTabs[activeOutputTabIndex].generatedImages = res.images || [];
     renderGeneratedImages(res.images || []);
-    setStatus(`Generated ${res.images?.length || imageCount} image candidate${(res.images?.length || imageCount) === 1 ? '' : 's'}. Select the one you like, delete rejects, or regenerate.`, 'ok');
+    const source = res.provider === 'api' ? `API model ${res.model || settings.imageModel || ''}`.trim() : 'SD Forge / Automatic1111';
+    setStatus(`Generated ${res.images?.length || imageCount} image candidate${(res.images?.length || imageCount) === 1 ? '' : 's'} with ${source}. Select the one you like, delete rejects, or regenerate.`, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -12241,9 +12483,13 @@ function openExportModal() {
   if (isInterfaceLocked()) return;
   const modal = $('#exportCardModal');
   if (!modal) { exportCard(); return; }
-  if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = settings?.exportDestinationFolder || '';
+  // Make the dialog visible immediately, then fill slower optional fields on the
+  // next frame so large browser/cache work cannot make the click feel ignored.
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
+  requestAnimationFrame(() => {
+    if ($('#exportDestinationFolder')) $('#exportDestinationFolder').value = settings?.exportDestinationFolder || '';
+  });
 }
 
 function closeExportModal() {
