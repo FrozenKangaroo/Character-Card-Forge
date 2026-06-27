@@ -404,6 +404,15 @@
               <label>Beta Front Porch Data Folder<input id="frontPorchBetaDataFolder" placeholder="Beta Front Porch → Settings folder" /></label>
             </div>
           </div>
+          <div class="card wide"><div class="card-title"><div><h3>Front Porch Character Manager</h3><p>Scan a Stable or Beta Front Porch database, review installed characters, and delete selected characters after confirmation.</p></div><div class="actions"><button id="frontPorchCharacterScanBtn" type="button" class="primary">Scan Characters</button><button id="frontPorchCharacterDeleteBtn" type="button" class="danger-ghost">Delete Selected</button></div></div>
+            <div class="settings-grid">
+              <label>Database<select id="frontPorchCharacterTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
+              <label>Filter Characters<input id="frontPorchCharacterFilter" placeholder="Type to filter by name or tag" /></label>
+              <label class="toggle-inline setting-toggle"><input id="frontPorchCharacterSelectAll" type="checkbox" /> Select all visible characters</label>
+              <p id="frontPorchCharacterStatus" class="wide-setting small muted">Scan a Front Porch database to list characters.</p>
+            </div>
+            <div id="frontPorchCharacterList" class="front-porch-character-list"></div>
+          </div>
         </div>
 
         <div id="settings-data-browser" class="subtab-panel" data-subtab-panel="settings">
@@ -780,6 +789,63 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
     </div>
   </div>
 
+  <div id="browserVariationModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card browser-group-card-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Make AI Variation</h3>
+          <p id="browserVariationSummary">Create a new AI variation from the selected browser card(s).</p>
+        </div>
+        <button id="closeBrowserVariationModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="browser-group-card-form">
+        <p class="small muted">All fields are optional, but you must fill out at least one field before generating the variation.</p>
+        <div class="grid two browser-group-card-settings">
+          <label>Variation Name
+            <input id="browserVariationName" placeholder="Optional name for the new variation" />
+          </label>
+          <label>Time Passed
+            <input id="browserVariationTimePassed" placeholder="Example: 2 years later" />
+          </label>
+        </div>
+        <div class="grid two browser-group-card-settings">
+          <label>Relationship to {{user}}
+            <input id="browserVariationRelationship" placeholder="Example: married to {{user}}" />
+          </label>
+          <div></div>
+        </div>
+        <label>Instructions
+          <textarea id="browserVariationInstructions" rows="5" placeholder="General instructions for the variation. Example: Make her more domestic, more secure, and more comfortable with intimacy."></textarea>
+        </label>
+        <div class="grid two browser-group-card-settings">
+          <label>Personality Changes / Emphasis
+            <textarea id="browserVariationPersonality" rows="4" placeholder="Optional personality changes or traits to emphasise."></textarea>
+          </label>
+          <label>Description / Appearance / Background
+            <textarea id="browserVariationDescription" rows="4" placeholder="Optional appearance, age, outfit, lifestyle, or backstory changes."></textarea>
+          </label>
+        </div>
+        <div class="grid two browser-group-card-settings">
+          <label>Sexual Traits
+            <textarea id="browserVariationSexualTraits" rows="4" placeholder="Optional sexual traits, dynamics, or intimacy changes."></textarea>
+          </label>
+          <label>Scenario / Situation
+            <textarea id="browserVariationScenario" rows="4" placeholder="Optional scenario, setting, or current life-situation changes."></textarea>
+          </label>
+        </div>
+        <div class="grid two browser-group-card-settings">
+          <label>First Message / Tone
+            <textarea id="browserVariationFirstMessage" rows="4" placeholder="Optional first-message direction or overall tone changes."></textarea>
+          </label>
+          <label>Extra Tags / Themes
+            <textarea id="browserVariationTags" rows="4" placeholder="Optional extra tags, themes, roles, kinks, or things to add/remove/emphasise."></textarea>
+          </label>
+        </div>
+      </div>
+      <div class="actions modal-actions"><button id="cancelBrowserVariationBtn" type="button" class="danger-ghost">Cancel</button><button id="createBrowserVariationBtn" type="button" class="primary">Create Variation</button></div>
+    </div>
+  </div>
+
   <div id="browserMoveModal" class="modal-backdrop hidden" aria-hidden="true">
     <div class="modal-card browser-move-modal-card">
       <div class="modal-head">
@@ -951,7 +1017,27 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
         <label class="toggle-inline"><input type="radio" name="quickImportSdMode" value="vision" /> Vision → SD Prompt using the imported/current image.</label>
         <label class="toggle-inline"><input type="radio" name="quickImportSdMode" value="full_text" /> Full Text → SD Prompt using the imported card text.</label>
       </div>
-      <div class="actions modal-actions"><button id="clearQuickImportSourceBtn" type="button" class="danger-ghost">Clear</button><button id="runQuickImportBtn" type="button" class="primary">Import</button></div>
+      <div class="actions modal-actions"><button id="quickImportFrontPorchBtn" type="button">Import from Front Porch…</button><button id="clearQuickImportSourceBtn" type="button" class="danger-ghost">Clear</button><button id="runQuickImportBtn" type="button" class="primary">Import</button></div>
+    </div>
+  </div>
+
+  <div id="frontPorchImportModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Import from Front Porch</h3>
+          <p>Select a card from Stable or Beta Front Porch and load it into Character Card Forge.</p>
+        </div>
+        <button id="closeFrontPorchImportModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="settings-grid">
+        <label>Front Porch Source<select id="frontPorchImportTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
+        <label>Filter Characters<input id="frontPorchImportFilter" placeholder="Type to filter by name or tag" /></label>
+      </div>
+      <div class="actions"><button id="refreshFrontPorchImportBtn" type="button" class="primary">Scan Characters</button></div>
+      <p id="frontPorchImportStatus" class="small muted">Choose Stable or Beta, then scan.</p>
+      <div id="frontPorchImportList" class="front-porch-character-list"></div>
+      <div class="actions modal-actions"><button id="importSelectedFrontPorchBtn" type="button" class="primary">Import Selected Card</button></div>
     </div>
   </div>
 
@@ -994,6 +1080,6 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.10"></script>
+  <script src="app.js?v=1.0.11"></script>
 </body>
 </html>

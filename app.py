@@ -29,6 +29,7 @@ import webbrowser
 import http.server
 import socketserver
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.dont_write_bytecode = True
 
@@ -792,8 +793,12 @@ class Api:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _library_connect(self):
-        conn = sqlite3.connect(str(LIBRARY_DB_FILE))
+        conn = sqlite3.connect(str(LIBRARY_DB_FILE), timeout=30)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+        except Exception:
+            pass
         return conn
 
     def _init_library_db(self):
@@ -1179,8 +1184,50 @@ class Api:
                     rows = []
         return rows
 
+    def _workspace_asset_file_path_from_row(self, row, kind="generated", reason="workspace_asset_restore"):
+        """Return a readable file path for an image asset row without base64 serialising it.
+
+        Loading a character workspace used to convert every generated/emotion image
+        BLOB in the SQLite asset cache into a data: URL and send all of that through
+        pywebview. A few cards with image candidates could turn a simple Browser
+        open into a multi-minute UI lock. Restore blobs to cached files instead and
+        let the frontend lazy-load small previews only when it needs to draw them.
+        """
+        try:
+            source_path = str((row or {}).get("source_path") or "").strip()
+            if source_path:
+                local = self._ensure_local_card_image_path(source_path, kind if kind in {"card", "generated", "emotion"} else "generated", f"{reason}_source")
+                if local:
+                    return local
+            blob = (row or {}).get("data_blob")
+            if not blob:
+                return ""
+            mime = str((row or {}).get("mime_type") or "image/png").strip() or "image/png"
+            filename = Path(str((row or {}).get("filename") or (row or {}).get("asset_key") or kind or "image")).name
+            stem = self._safe_slug(Path(filename).stem or str((row or {}).get("asset_key") or kind or "image")) or "image"
+            ext = Path(filename).suffix.lower()
+            if not ext or len(ext) > 8:
+                ext = self._extension_from_mime(mime, "image") or ".png"
+            root = CARD_IMAGES_DIR / "restored" if kind == "card" else GENERATED_IMAGES_DIR / "restored"
+            _safe_mkdir(root)
+            digest = hashlib.sha256(blob).hexdigest()[:20]
+            path = root / f"{stem}_{digest}{ext}"
+            if not path.exists() or path.stat().st_size != len(blob):
+                path.write_bytes(blob)
+            return str(path)
+        except Exception as e:
+            try:
+                self._log_event("workspace_asset_file_restore_failed", {"kind": kind, "reason": reason, "error": str(e)})
+            except Exception:
+                pass
+            return ""
+
     def _hydrate_workspace_from_db_assets(self, project_path, loaded):
-        """Merge SQLite workspace assets into a loaded project, with old file JSON as fallback."""
+        """Merge SQLite workspace assets into a loaded project, with old file JSON as fallback.
+
+        This deliberately returns file paths, not large data URLs, for generated and
+        emotion images. The frontend lazy-loads preview thumbnails from those paths.
+        """
         try:
             rows = self._load_workspace_assets_from_db(project_path)
         except Exception:
@@ -1191,6 +1238,7 @@ class Api:
         emotions = []
         attachments_by_idx = {}
         tabs = loaded.get("characterTabs") if isinstance(loaded.get("characterTabs"), list) else []
+        restored_files = 0
         for r in rows:
             key = r.get("asset_key") or ""
             atype = r.get("asset_type") or ""
@@ -1198,33 +1246,36 @@ class Api:
                 meta = json.loads(r.get("metadata_json") or "{}")
             except Exception:
                 meta = {}
-            data_url = self._blob_to_data_url(r.get("mime_type"), r.get("data_blob"))
-            if atype == "image" and key == "selected_card_image" and data_url:
-                loaded["imageDataUrl"] = data_url
-                # Prefer a real readable path. Older saves can keep only a generated-image
-                # path/filename that was later cleaned, while the actual selected image
-                # bytes are safely stored in SQLite workspace_assets.
+            if atype == "image" and key == "selected_card_image" and r.get("data_blob"):
+                # One selected card image is enough for preview/export. Do not also
+                # send imageDataUrl through pywebview during workspace load.
                 source_path = str(r.get("source_path") or "").strip()
                 local_image = self._ensure_local_card_image_path(source_path, "card", "hydrate_selected_card_source") if source_path else ""
                 if not local_image:
-                    local_image = self._ensure_local_card_image_path(data_url, "card", "hydrate_selected_card_asset")
+                    local_image = self._workspace_asset_file_path_from_row(r, "card", "hydrate_selected_card_asset")
                 if local_image:
                     loaded["imagePath"] = local_image
                     loaded["cardImagePath"] = local_image
+                    restored_files += 1
                     if isinstance(loaded.get("settings"), dict):
                         loaded["settings"]["cardImagePath"] = local_image
                 else:
-                    # Keep the original source path if present; old project fallback still works.
                     loaded["imagePath"] = loaded.get("imagePath") or source_path or ""
-            elif atype == "generated_image" and data_url:
+            elif atype == "generated_image" and r.get("data_blob"):
                 item = dict(meta or {})
-                item["dataUrl"] = data_url
-                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                local = self._workspace_asset_file_path_from_row(r, "generated", "hydrate_generated_asset")
+                item.pop("dataUrl", None)
+                item["path"] = local or item.get("path") or r.get("source_path") or r.get("filename") or ""
+                if local:
+                    restored_files += 1
                 generated.append(item)
-            elif atype == "emotion_image" and data_url:
+            elif atype == "emotion_image" and r.get("data_blob"):
                 item = dict(meta or {})
-                item["dataUrl"] = data_url
-                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                local = self._workspace_asset_file_path_from_row(r, "emotion", "hydrate_emotion_asset")
+                item.pop("dataUrl", None)
+                item["path"] = local or item.get("path") or r.get("source_path") or r.get("filename") or ""
+                if local:
+                    restored_files += 1
                 emotions.append(item)
             elif atype == "attachment_text":
                 try:
@@ -1237,13 +1288,16 @@ class Api:
                 item["extractedText"] = text
                 item["preview"] = item.get("preview") or text[:1000]
                 attachments_by_idx[idx] = item
-            elif atype in {"tab_generated_image", "tab_emotion_image"} and data_url:
+            elif atype in {"tab_generated_image", "tab_emotion_image"} and r.get("data_blob"):
                 t_idx = int(meta.get("tabIndex") or 0)
                 while len(tabs) <= t_idx:
                     tabs.append({"name": f"Character {len(tabs)+1}", "output":"", "qaAnswers":"", "emotionImages":[], "generatedImages":[], "cardImagePath":""})
                 item = dict(meta or {})
-                item["dataUrl"] = data_url
-                item["path"] = item.get("path") or r.get("source_path") or r.get("filename") or ""
+                local = self._workspace_asset_file_path_from_row(r, "emotion" if atype == "tab_emotion_image" else "generated", "hydrate_tab_image_asset")
+                item.pop("dataUrl", None)
+                item["path"] = local or item.get("path") or r.get("source_path") or r.get("filename") or ""
+                if local:
+                    restored_files += 1
                 if atype == "tab_generated_image":
                     tabs[t_idx].setdefault("generatedImages", []).append(item)
                 else:
@@ -1256,6 +1310,67 @@ class Api:
             loaded["conceptAttachments"] = [attachments_by_idx[i] for i in sorted(attachments_by_idx)]
         if tabs:
             loaded["characterTabs"] = tabs
+        try:
+            self._log_event("workspace_assets_hydrated_lightweight", {"project": str(project_path), "rows": len(rows), "generated": len(generated), "emotions": len(emotions), "tabs": len(tabs), "restoredFiles": restored_files})
+        except Exception:
+            pass
+        return loaded
+
+    def _lighten_loaded_workspace_image_payloads(self, loaded, reason="load_character_project"):
+        """Replace embedded generated/emotion image data URLs with local file paths.
+
+        Saved projects from older builds can contain base64 image previews inside
+        generatedImages/emotionImages. Returning those through pywebview makes
+        Browser -> Load Workspace painfully slow. Keep the image recoverable as a
+        local cached path and let the UI lazy-load thumbnails on demand.
+        """
+        if not isinstance(loaded, dict):
+            return loaded
+        changed = 0
+        def lighten_list(images, kind, label):
+            nonlocal changed
+            if not isinstance(images, list):
+                return images
+            out = []
+            for idx, item in enumerate(images):
+                if not isinstance(item, dict):
+                    out.append(item)
+                    continue
+                next_item = dict(item)
+                data_url = next_item.get("dataUrl") or next_item.get("data_url") or ""
+                if data_url:
+                    local = self._ensure_local_card_image_path(data_url, kind, f"{reason}_{label}_{idx}")
+                    if local:
+                        next_item["path"] = local
+                    next_item.pop("dataUrl", None)
+                    next_item.pop("data_url", None)
+                    changed += 1
+                out.append(next_item)
+            return out
+        for key, kind in (("generatedImages", "generated"), ("emotionImages", "emotion")):
+            if isinstance(loaded.get(key), list):
+                loaded[key] = lighten_list(loaded.get(key), kind, key)
+        workspace = loaded.get("workspace") if isinstance(loaded.get("workspace"), dict) else None
+        if workspace is not None:
+            for key, kind in (("generatedImages", "generated"), ("emotionImages", "emotion")):
+                if isinstance(workspace.get(key), list):
+                    workspace[key] = lighten_list(workspace.get(key), kind, "workspace_" + key)
+            loaded["workspace"] = workspace
+        tabs = loaded.get("characterTabs") if isinstance(loaded.get("characterTabs"), list) else []
+        for t_idx, tab in enumerate(tabs):
+            if not isinstance(tab, dict):
+                continue
+            if isinstance(tab.get("generatedImages"), list):
+                tab["generatedImages"] = lighten_list(tab.get("generatedImages"), "generated", f"tab_{t_idx}_generated")
+            if isinstance(tab.get("emotionImages"), list):
+                tab["emotionImages"] = lighten_list(tab.get("emotionImages"), "emotion", f"tab_{t_idx}_emotion")
+        if tabs:
+            loaded["characterTabs"] = tabs
+        if changed:
+            try:
+                self._log_event("loaded_workspace_image_payloads_lightened", {"project": str(loaded.get("projectPath") or loaded.get("sourcePath") or ""), "count": changed, "reason": reason})
+            except Exception:
+                pass
         return loaded
 
     def _materialize_loaded_project_card_image(self, loaded, project_path="", reason="load_project"):
@@ -1422,15 +1537,16 @@ class Api:
                     and int(extra_fast.get("tokenTotal") or 0) > 0
                     and int(extra_fast.get("tokenBreakdownVersion") or 0) >= 3
                 )
-                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 5
-                if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok:
+                thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
+                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 7
+                if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok and thumb_ok:
                     return self._browser_card_from_db_row(row)
             except Exception:
                 pass
         project_hash = self._hash_file(path)
         if row and not force and str(row.get("project_hash") or "") == project_hash:
             # Older cache rows may not have stat metadata. Fall back to file hashes once,
-            # then refresh/upsert with browserIndexVersion 5 for future instant loads.
+            # then refresh/upsert with browserIndexVersion 7 for future instant loads.
             card_png_path = str(row.get("card_png_path") or "")
             image_path = str(row.get("image_path") or "")
             card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
@@ -1449,10 +1565,11 @@ class Api:
             needs_browser_index_refresh = True
             try:
                 extra_for_index = json.loads(row.get("metadata_json") or "{}")
-                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 5
+                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 7
             except Exception:
                 needs_browser_index_refresh = True
-            if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh:
+            thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
+            if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh and thumb_ok:
                 return self._browser_card_from_db_row(row)
 
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1492,6 +1609,7 @@ class Api:
         if not tags:
             tags = self._extract_tags_from_output(output, project.get("template") or self.template)
         token_counts = self._card_browser_token_counts(output)
+        browser_thumb = self._browser_preview_reference(thumb_source or image_path, folder)
         old_assignment = self._get_virtual_folder_assignment(path, folder, name, project.get("virtualFolderId") or "")
         if row:
             virtual_folder_id = self._library_upsert_card(path, folder, name, None, path.stat().st_mtime, {
@@ -1501,7 +1619,7 @@ class Api:
                 "cardPngHash": self._hash_file(card_png) if card_png else "",
                 "imagePath": str(image_path or ""),
                 "imageHash": self._hash_file(image_path) if image_path else "",
-                "thumbnail": self._image_data_url(thumb_source or image_path),
+                "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
                 "browserDescription": browser_description,
                 "browserDescriptionSource": browser_description_source,
                 "tags": tags,
@@ -1516,7 +1634,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 5,
+                    "browserIndexVersion": 7,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1536,7 +1654,7 @@ class Api:
                 "cardPngHash": self._hash_file(card_png) if card_png else "",
                 "imagePath": str(image_path or ""),
                 "imageHash": self._hash_file(image_path) if image_path else "",
-                "thumbnail": self._image_data_url(thumb_source or image_path),
+                "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
                 "browserDescription": browser_description,
                 "browserDescriptionSource": browser_description_source,
                 "tags": tags,
@@ -1551,7 +1669,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 5,
+                    "browserIndexVersion": 7,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1577,7 +1695,7 @@ class Api:
                     "cardPngHash": self._hash_file(card_png) if card_png else "",
                     "imagePath": str(image_path or ""),
                     "imageHash": self._hash_file(image_path) if image_path else "",
-                    "thumbnail": self._image_data_url(thumb_source or image_path),
+                    "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
                     "browserDescription": browser_description,
                     "browserDescriptionSource": browser_description_source,
                     "tags": tags,
@@ -1592,7 +1710,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 5,
+                    "browserIndexVersion": 7,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -5891,6 +6009,8 @@ class Api:
         prompt = "\n".join([
             "Revise the existing fictional character card according to the user's follow-up request.",
             "Return the complete revised card, not a diff or commentary.",
+            "Do not add a wrapper title such as '# Revised Character Card'.",
+            "Use the existing/plain section headings only. Do not convert the card to Markdown # or ## headings.",
             "Keep the same section order and do not add disabled sections.",
             ("Card mode: SPLIT CARDS. Revise only the currently focused character card. Keep other original characters as lorebook/background references, not co-protagonists." if merged_settings.get("cardMode") == "split_cards" else ("Card mode: MULTI-CHARACTER SINGLE CARD. Preserve all primary characters inside one {{char}} card; do not split into multiple cards or multi-chat." if merged_settings.get("cardMode") == "multi" else "Card mode: SINGLE CHARACTER CARD.")),
             "Preserve good content unless the follow-up request changes it.",
@@ -7608,6 +7728,103 @@ class Api:
         except Exception:
             return ""
 
+    def _image_file_data_url(self, path, mime=None):
+        try:
+            p = Path(str(path or ""))
+            if not p.exists() or p.is_dir():
+                return ""
+            suffix = p.suffix.lower()
+            detected = mime or {
+                ".webp": "image/webp",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+            }.get(suffix, "image/png")
+            return "data:" + detected + ";base64," + base64.b64encode(p.read_bytes()).decode("ascii")
+        except Exception:
+            return ""
+
+    def _thumbnail_reference_exists(self, value):
+        try:
+            text = str(value or "").strip()
+            if not text:
+                return False
+            # The Browser UI can always render data URLs. file:// thumbnails from
+            # beta6 were fast but unreliable in pywebview, so treat them as stale.
+            if text.startswith("data:"):
+                return True
+            if text.startswith("file://"):
+                return False
+            return Path(text).exists()
+        except Exception:
+            return False
+
+    def _browser_preview_reference(self, source_path, project_folder, max_size=(320, 420), quality=48):
+        """Return a browser-safe lightweight thumbnail data URL.
+
+        The WebP file is cached beside the project for speed, but the value sent to
+        the frontend is a data URL. That avoids broken file:// images in pywebview
+        while still keeping Browser payloads far smaller than full PNG thumbnails.
+        """
+        preview_path = None
+        try:
+            folder = Path(str(project_folder or "")).resolve()
+            if folder.exists():
+                cache_dir = folder / ".ccf_browser_cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                preview_path = cache_dir / "browser_thumb.webp"
+        except Exception:
+            preview_path = None
+
+        try:
+            src = Path(str(source_path or "")).resolve()
+            if src.exists() and not src.is_dir() and preview_path is not None:
+                src_stat = src.stat()
+                needs_refresh = True
+                if preview_path.exists():
+                    try:
+                        prev_stat = preview_path.stat()
+                        needs_refresh = not (
+                            prev_stat.st_size > 0
+                            and int(getattr(prev_stat, "st_mtime_ns", int(prev_stat.st_mtime * 1_000_000_000))) >= int(getattr(src_stat, "st_mtime_ns", int(src_stat.st_mtime * 1_000_000_000)))
+                        )
+                    except Exception:
+                        needs_refresh = True
+                if needs_refresh:
+                    with Image.open(src) as img:
+                        if img.mode not in ("RGB", "RGBA"):
+                            img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+                        img.thumbnail(max_size, Image.LANCZOS)
+                        if img.mode == "RGBA":
+                            img.save(preview_path, format="WEBP", quality=int(quality), method=6, lossless=False)
+                        else:
+                            img.convert("RGB").save(preview_path, format="WEBP", quality=int(quality), method=6)
+                if preview_path.exists() and preview_path.stat().st_size > 0:
+                    data_url = self._image_file_data_url(preview_path, "image/webp")
+                    if data_url:
+                        return data_url
+                # If WebP support is missing in the runtime Pillow build, still return
+                # a small preview instead of a broken Browser image.
+                fallback = self._image_data_url(src, max_size=max_size)
+                if fallback:
+                    return fallback
+        except Exception:
+            pass
+
+        # If the original image cannot be found but an earlier cached WebP exists,
+        # keep using it instead of breaking existing Browser tiles.
+        try:
+            if preview_path is not None and preview_path.exists() and preview_path.stat().st_size > 0:
+                data_url = self._image_file_data_url(preview_path, "image/webp")
+                if data_url:
+                    return data_url
+        except Exception:
+            pass
+        try:
+            return self._image_data_url(source_path, max_size=max_size)
+        except Exception:
+            return ""
+
     def image_preview_data_url(self, path):
         try:
             # Resolve the same sources export uses: file:// URLs, managed card-image
@@ -8686,6 +8903,8 @@ class Api:
             prompt = "\n".join([
                 "Revise this fictional AI character card by applying the improvement suggestions from its AI Card Rating.",
                 "Return the COMPLETE revised character card only, not a diff, not commentary, and not markdown fences.",
+                "Do not add a wrapper title such as '# Revised Character Card'.",
+                "Use the existing/plain section headings only. Do not convert the card to Markdown # or ## headings.",
                 "SAFETY / PRESERVATION RULES:",
                 "- Do not remove or contradict existing facts.",
                 "- Do not change names, ages, relationships, setting, backstory, kinks, boundaries, or roleplay premise unless the rating notes explicitly demand it.",
@@ -9437,6 +9656,24 @@ class Api:
             n += 1
         return candidate
 
+    def _variation_requested_name(self, instructions):
+        try:
+            text = str(instructions or "")
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line or ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key in {"variation name", "name", "new name", "card name"} and value:
+                    cleaned = re.sub(r"\s+", " ", value).strip(" -")
+                    if cleaned:
+                        return cleaned[:120]
+        except Exception:
+            pass
+        return ""
+
     def _variation_suffix_from_instructions(self, instructions):
         text = re.sub(r"\{\{user\}\}", "user", str(instructions or ""), flags=re.I)
         lower = text.lower()
@@ -9616,8 +9853,12 @@ class Api:
             concept = workspace.get("concept") or ""
             merged_settings = self._normalise_settings({**self.settings, **(settings or workspace.get("settings") or {})})
             original_name = self._extract_name(output) or workspace.get("name") or "Character"
-            suffix = self._variation_suffix_from_instructions(instructions)
-            suggested_name = self._unique_character_variant_name(original_name, suffix)
+            explicit_name = self._variation_requested_name(instructions)
+            if explicit_name:
+                suggested_name = explicit_name
+            else:
+                suffix = self._variation_suffix_from_instructions(instructions)
+                suggested_name = self._unique_character_variant_name(original_name, suffix)
             prompt = self._variation_followup_prompt(original_name, suggested_name, instructions)
             revised = self.revise_card(output, prompt, concept, template, merged_settings)
             if not revised.get("ok"):
@@ -9849,6 +10090,12 @@ class Api:
         output = workspace.get("output") or ""
         if not output.strip():
             return {"ok": False, "error": "Nothing to save yet. Generate or load a card first."}
+        output_template = workspace.get("template") or self.template
+        normalised_output = self._normalise_card_output_for_save(output, output_template)
+        if normalised_output and normalised_output != output:
+            self._log_event("workspace_output_normalised_on_save", {"changed": True, "name": str(workspace.get("name") or "")[:120]})
+            output = normalised_output
+            workspace["output"] = output
         extracted_name = self._extract_name(output) or "Character Card"
         workspace_name = workspace.get("name") or ""
         safe_name = extracted_name if self._is_generic_character_name(workspace_name) else self._clean_character_name_value(workspace_name)
@@ -10111,7 +10358,8 @@ class Api:
         """Return Character Browser cards from the SQLite cache.
 
         Disk scan only discovers project files and checks hashes. Full JSON/image parsing
-        happens only when hashes changed or a card is new.
+        happens only when hashes changed or a card is new. Projects are refreshed in
+        parallel so large libraries open faster.
         """
         cards = []
         if not EXPORT_DIR.exists():
@@ -10126,14 +10374,24 @@ class Api:
             if project_path and Path(project_path).exists():
                 project_files.append(Path(project_path))
 
-        for project_path in project_files:
-            try:
-                seen_paths.add(str(project_path.resolve()))
-                card = self._refresh_library_cache_for_project(project_path, force=False)
-                if card:
-                    cards.append(card)
-            except Exception as e:
-                self._log_event("character_library_card_error", {"project": str(project_path), "error": str(e)})
+        seen_paths = {str(p.resolve()) for p in project_files}
+        max_workers = max(2, min(8, (os.cpu_count() or 4), len(project_files) or 1))
+        future_map = {}
+        if project_files:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ccf-browser") as executor:
+                for index, project_path in enumerate(project_files):
+                    future = executor.submit(self._refresh_library_cache_for_project, project_path, False)
+                    future_map[future] = (index, project_path)
+                ordered_cards = {}
+                for future in as_completed(future_map):
+                    index, project_path = future_map[future]
+                    try:
+                        card = future.result()
+                        if card:
+                            ordered_cards[index] = card
+                    except Exception as e:
+                        self._log_event("character_library_card_error", {"project": str(project_path), "error": str(e)})
+                cards = [ordered_cards[i] for i in sorted(ordered_cards.keys())]
 
         # Mark DB rows whose physical project vanished as deleted, rather than
         # showing stale cards from the cache.
@@ -10153,10 +10411,12 @@ class Api:
         return {"ok": True, "cards": cards, "folders": folders, "dbPath": str(LIBRARY_DB_FILE)}
 
     def load_character_project(self, project_path):
+        started_at = time.time()
         try:
-            # Quick real-file check before opening. If the project/card/image changed
-            # outside the app, refresh the SQLite cache first.
-            self._refresh_library_cache_for_project(project_path, force=False)
+            # Do not refresh/re-index the Character Browser cache here. The Browser
+            # card was already produced by list_character_library(), and doing hash /
+            # thumbnail / token work again during "Load Workspace" can make the UI
+            # sit on LOADING CHARACTER WORKSPACE for minutes on image-heavy cards.
             path = Path(project_path)
             payload = json.loads(path.read_text(encoding="utf-8"))
             res = self._load_project_payload(payload)
@@ -10240,6 +10500,9 @@ class Api:
             # generated-image basenames, or non-blank saved card PNGs.
             res = self._materialize_loaded_project_card_image(res, str(path), "load_character_project")
             res["projectPath"] = str(path)
+            # Keep workspace loads light: selected image remains a real file path,
+            # generated/emotion previews are lazy-loaded by the frontend.
+            res = self._lighten_loaded_workspace_image_payloads(res, "load_character_project")
 
             # Always provide a single, fully hydrated tab for Character Browser loading.
             # This prevents the frontend from opening a tab shell with only Concept data.
@@ -10283,6 +10546,7 @@ class Api:
                     "generatedCount": len(res.get("generatedImages") or []) if isinstance(res.get("generatedImages"), list) else 0,
                     "tabCount": len(res.get("characterTabs") or []) if isinstance(res.get("characterTabs"), list) else 0,
                     "sidecars": restored_from_sidecar,
+                    "durationMs": int((time.time() - started_at) * 1000),
                 })
             except Exception:
                 pass
@@ -12754,12 +13018,186 @@ class Api:
         new_output, count = re.subn(r"(?im)^(\s*Name\s*[:：-]\s*)(.+)$", repl, output, count=1)
         return new_output if count else output
 
+    def _section_title_for_id(self, section_id, template=None):
+        section_id = str(section_id or "").strip()
+        for sec in (template or self.template or DEFAULT_TEMPLATE).get("sections", []):
+            if str(sec.get("id") or "").strip() == section_id:
+                title = str(sec.get("title") or "").strip()
+                if title:
+                    return title
+        defaults = {
+            "name": "Name", "description": "Description", "personality": "Personality",
+            "sexual_traits": "Sexual Traits", "background": "Background", "scenario": "Scenario",
+            "first_message": "First Message", "alternate_first_messages": "Alternative First Messages",
+            "example_dialogues": "Example Dialogues", "lorebook": "Lorebook Entries",
+            "tags": "Tags", "system_prompt": "Custom System Prompt", "state_tracking": "State Tracking",
+            "stable_diffusion": "Stable Diffusion Prompt", "natural_image_prompt": "Natural English Image Prompt",
+        }
+        return defaults.get(section_id, section_id.replace("_", " ").title())
+
+    def _normalise_generated_card_headings(self, output, template=None):
+        """Convert model-added markdown section headers into CCF's plain section format.
+
+        Some models return cards headed with '# Revised Character Card' and
+        '## Name' / '## Stable Diffusion Prompt'. The backend can usually parse
+        those, but the UI image-prompt checks historically expected plain section
+        headings. Normalising here keeps revision output consistent and prevents
+        image generation controls from being disabled by harmless markdown '#'.
+        """
+        text = str(output or "")
+        if not text.strip():
+            return text
+        tmpl = template or self.template or DEFAULT_TEMPLATE
+        wrapper_keys = {
+            "revised character card", "revised card", "character card",
+            "generated character card", "final character card", "updated character card",
+        }
+        out = []
+        for raw_line in text.splitlines():
+            raw = raw_line.rstrip()
+            norm = self._norm_heading_key(raw)
+            try:
+                heading = self._canonical_heading_with_template(raw, tmpl)
+            except Exception:
+                heading = None
+            if norm in wrapper_keys and not heading:
+                continue
+            if heading:
+                # Avoid duplicate dividers when the model already used the CCF divider style.
+                while out and not out[-1].strip():
+                    out.pop()
+                if out and self._looks_like_divider_line(out[-1]):
+                    out.pop()
+                if out:
+                    out.append("")
+                out.append("------------------------------------------------")
+                out.append(self._section_title_for_id(heading, tmpl))
+                out.append("")
+                continue
+            out.append(raw)
+        cleaned = "\n".join(out).strip()
+        # Collapse excessive blank lines introduced by normalisation without
+        # touching intentional paragraph breaks too aggressively.
+        cleaned = re.sub(r"(?im)^\s*#{2,6}\s*(Alternative First Message\s+\d+)\s*$", r"\1", cleaned)
+        cleaned = re.sub(r"\n{4,}", "\n\n\n", cleaned)
+        return cleaned
+
+    def _normalise_state_tracking_body(self, value):
+        """Store State Tracking in CCF's plain key/value format.
+
+        Some models revise the whole card as Markdown and turn state fields into
+        bullets ("- Starting Emotion: ...").  Parsing can tolerate that, but saved
+        workspace text and Front Porch exports should stay in the app's canonical
+        field format so later UI checks do not misread the section.
+        """
+        text = self._clean_section_text(value or "")
+        if not text:
+            return ""
+        label_map = {
+            "starting_emotion": "Starting Emotion",
+            "emotion": "Starting Emotion",
+            "character_emotion": "Starting Emotion",
+            "current_objective": "Current Objective",
+            "objective": "Current Objective",
+            "current_task": "Current Objective",
+            "short_term_bond": "Short-Term Bond",
+            "short-term_bond": "Short-Term Bond",
+            "short term bond": "Short-Term Bond",
+            "long_term_bond": "Long-Term Bond",
+            "long-term_bond": "Long-Term Bond",
+            "long term bond": "Long-Term Bond",
+            "trust_level": "Trust Level",
+            "trust level": "Trust Level",
+            "time_of_day": "Time of Day",
+            "time of day": "Time of Day",
+            "day_of_week": "Day of Week",
+            "day of week": "Day of Week",
+            "weekday": "Day of Week",
+            "starting_weekday": "Day of Week",
+            "starting_day_of_week": "Day of Week",
+            "day_number": "Day Number",
+            "day number": "Day Number",
+            "day_count": "Day Number",
+            "emotion_intensity": "Emotion Intensity",
+            "emotion intensity": "Emotion Intensity",
+        }
+        order = [
+            "Starting Emotion", "Current Objective", "Short-Term Bond", "Long-Term Bond",
+            "Trust Level", "Time of Day", "Day of Week", "Day Number", "Emotion Intensity",
+        ]
+        values = {}
+        extras = []
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            stripped = re.sub(r"^\s*[-*•]+\s*", "", stripped).strip()
+            stripped = re.sub(r"^\s*\d+[.)]\s*", "", stripped).strip()
+            if not stripped or ":" not in stripped:
+                extras.append(stripped)
+                continue
+            key, val = stripped.split(":", 1)
+            key_norm = re.sub(r"\s+", "_", key.strip().lower().replace("-", "_"))
+            key_loose = re.sub(r"\s+", " ", key.strip().lower().replace("_", " ").replace("-", " ")).strip()
+            label = label_map.get(key_norm) or label_map.get(key_loose)
+            if label:
+                values[label] = val.strip()
+            else:
+                # Unknown state fields are still valid user data; just remove the bullet.
+                clean_key = key.strip().strip("-*• ")
+                extras.append(f"{clean_key}: {val.strip()}".strip())
+        lines = [f"{label}: {values[label]}" for label in order if values.get(label)]
+        for extra in extras:
+            if extra and extra not in lines:
+                lines.append(extra)
+        return "\n".join(lines).strip()
+
+    def _normalise_tags_body(self, value):
+        text = self._clean_section_text(value or "")
+        if not text:
+            return ""
+        pieces = []
+        for raw_line in text.splitlines():
+            line = re.sub(r"^\s*[-*•]+\s*", "", raw_line.strip())
+            if line:
+                pieces.extend(re.split(r"[,;]+", line))
+        tags = self._clean_character_tags(pieces)
+        return ", ".join(tags) if tags else text.strip()
+
+    def _normalise_structured_section_bodies(self, output, template=None):
+        text = str(output or "")
+        tmpl = template or self.template or DEFAULT_TEMPLATE
+        parsed = self._parse_sections(text, tmpl)
+        state = parsed.get("state_tracking") or self._section(text, "State Tracking")
+        if state:
+            cleaned_state = self._normalise_state_tracking_body(state)
+            if cleaned_state and cleaned_state.strip() != state.strip():
+                text = self._replace_section_body(text, "state_tracking", cleaned_state, template=tmpl, title_fallback="State Tracking")
+        tags = parsed.get("tags") or self._section(text, "Tags")
+        if tags:
+            cleaned_tags = self._normalise_tags_body(tags)
+            if cleaned_tags and cleaned_tags.strip() != tags.strip():
+                text = self._replace_section_body(text, "tags", cleaned_tags, template=tmpl, title_fallback="Tags")
+        return text.strip()
+
+    def _normalise_card_output_for_save(self, output, template=None):
+        """Canonicalise card text before saving/exporting.
+
+        The editor should never persist model-added Markdown wrappers or '#'
+        section headings as the project source of truth.  Keep the content, but
+        store sections using CCF divider headings and clean key/value sections.
+        """
+        text = self._clean_generated_output(output or "")
+        text = self._normalise_structured_section_bodies(text, template or self.template)
+        return text.strip()
+
     def _clean_generated_output(self, output):
         """Final output cleanup for known prompt/template leakage without removing features."""
         if not output:
             return output
-        text = self._clean_name_section(str(output))
         template = self.template or DEFAULT_TEMPLATE
+        text = self._normalise_generated_card_headings(self._clean_name_section(str(output)), template)
+        text = self._normalise_structured_section_bodies(text, template)
         parsed = self._parse_sections(text, template)
         sd_body = parsed.get("stable_diffusion") or self._section(text, "Stable Diffusion Prompt")
         if not sd_body:
@@ -12767,20 +13205,8 @@ class Api:
         cleaned_sd = self._strip_sd_prompt_guidance(sd_body)
         if cleaned_sd.strip() == sd_body.strip():
             return text
-        # Replace the body between Stable Diffusion Prompt heading and the next known heading/divider.
-        headings = []
-        for sec in template.get("sections", []):
-            title = str(sec.get("title") or "").strip()
-            if title and title.lower() not in {"stable diffusion prompt", "natural english image prompt"}:
-                headings.append(re.escape(title))
-        heading_alt = "|".join(headings) or r"Name|Description|Personality|Scenario|First Message|Example Dialogues|Tags"
-        pattern = re.compile(
-            r"(?is)(^|\n)(\s*-{0,}\s*Stable\s+Diffusion\s+Prompt\s*:?\s*\n)(.*?)(?=\n\s*-{3,}\s*\n\s*(?:" + heading_alt + r")\s*:?\s*\n|\n\s*(?:" + heading_alt + r")\s*:?\s*\n|\Z)"
-        )
-        def repl(m):
-            return m.group(1) + m.group(2) + cleaned_sd.strip() + "\n"
-        new_text, count = pattern.subn(repl, text, count=1)
-        return new_text if count else text
+        new_text = self._replace_section_body(text, "stable_diffusion", cleaned_sd.strip(), template=template, title_fallback="Stable Diffusion Prompt")
+        return new_text if new_text else text
 
     def _extract_sd_prompts(self, output):
         section = self._clean_section_text(self._section(output, "Stable Diffusion Prompt"))
@@ -13270,6 +13696,330 @@ class Api:
             return payload
         except Exception as e:
             return {"ok": False, "error": f"Could not inspect Front Porch folder: {e}", "target": selected_target}
+
+
+    def _front_porch_json_value(self, value, default=None):
+        if default is None:
+            default = []
+        if value is None:
+            return copy.deepcopy(default)
+        if isinstance(value, (list, dict)):
+            return value
+        s = str(value or "").strip()
+        if not s:
+            return copy.deepcopy(default)
+        try:
+            parsed = json.loads(s)
+            return parsed
+        except Exception:
+            if isinstance(default, list):
+                return [item.strip() for item in re.split(r"[,\n]", s) if item.strip()]
+            return copy.deepcopy(default)
+
+    def _front_porch_character_image_path(self, km, image_path):
+        raw = str(image_path or "").strip()
+        if not raw:
+            return ""
+        p = Path(raw).expanduser()
+        if p.is_absolute() and p.exists():
+            return str(p)
+        chars_dir = Path(km) / "Characters"
+        candidates = [chars_dir / raw, Path(km) / raw]
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return str(candidate)
+            except Exception:
+                pass
+        return str(candidates[0])
+
+    def _front_porch_session_state_tracking_text(self, cursor, character_id):
+        try:
+            columns = self._sqlite_table_columns(cursor, "sessions")
+            if not columns or "character_id" not in columns:
+                return ""
+            select_cols = [c for c in [
+                "character_emotion", "emotion_intensity", "affection_score", "long_term_score",
+                "trust_level", "time_of_day", "day_count", "start_day_of_week", "realism_enabled",
+                "nsfw_cooldown_enabled", "passage_of_time_enabled", "chaos_mode_enabled"
+            ] if c in columns]
+            if not select_cols:
+                return ""
+            order_col = "updated_at" if "updated_at" in columns else ("created_at" if "created_at" in columns else "id")
+            q = ", ".join(select_cols)
+            row = cursor.execute(f"SELECT {q} FROM sessions WHERE character_id = ? AND (deleted_at IS NULL OR deleted_at = 0 OR deleted_at = '') ORDER BY {order_col} DESC LIMIT 1", (character_id,)).fetchone() if "deleted_at" in columns else cursor.execute(f"SELECT {q} FROM sessions WHERE character_id = ? ORDER BY {order_col} DESC LIMIT 1", (character_id,)).fetchone()
+            if not row:
+                return ""
+            data = {select_cols[i]: row[i] for i in range(len(select_cols))}
+            lines = []
+            if data.get("character_emotion") not in (None, ""):
+                lines.append(f"Starting Emotion: {data.get('character_emotion')}")
+            if data.get("affection_score") not in (None, ""):
+                lines.append(f"Short-Term Bond: {data.get('affection_score')}")
+            if data.get("long_term_score") not in (None, ""):
+                lines.append(f"Long-Term Bond: {data.get('long_term_score')}")
+            if data.get("trust_level") not in (None, ""):
+                lines.append(f"Trust Level: {data.get('trust_level')}")
+            if data.get("time_of_day") not in (None, ""):
+                lines.append(f"Time of Day: {data.get('time_of_day')}")
+            if data.get("start_day_of_week") not in (None, ""):
+                lines.append(f"Day of Week: {data.get('start_day_of_week')}")
+            if data.get("day_count") not in (None, ""):
+                lines.append(f"Day Number: {data.get('day_count')}")
+            if data.get("emotion_intensity") not in (None, ""):
+                lines.append(f"Emotion Intensity: {data.get('emotion_intensity')}")
+            return "\n".join(lines).strip()
+        except Exception as e:
+            self._log_event("front_porch_session_state_read_failed", {"characterId": character_id, "error": str(e)})
+            return ""
+
+    def _front_porch_character_payload_from_row(self, cursor, row, km):
+        data = dict(row or {})
+        character_id = str(data.get("id") or "")
+        alt = self._front_porch_json_value(data.get("alternate_greetings"), [])
+        if not isinstance(alt, list):
+            alt = []
+        tags = self._front_porch_json_value(data.get("tags"), [])
+        if not isinstance(tags, list):
+            tags = []
+        lorebook = self._front_porch_json_value(data.get("lorebook"), {"entries": []})
+        if not isinstance(lorebook, dict):
+            lorebook = {"entries": []}
+        extensions = {}
+        state_text = self._front_porch_session_state_tracking_text(cursor, character_id)
+        if state_text:
+            extensions["state_tracking"] = state_text
+        card_data = {
+            "name": str(data.get("name") or "Character"),
+            "description": str(data.get("description") or ""),
+            "personality": str(data.get("personality") or ""),
+            "scenario": str(data.get("scenario") or ""),
+            "first_mes": str(data.get("first_message") or data.get("first_mes") or ""),
+            "mes_example": str(data.get("mes_example") or ""),
+            "system_prompt": str(data.get("system_prompt") or ""),
+            "post_history_instructions": str(data.get("post_history_instructions") or ""),
+            "alternate_greetings": [str(x) for x in alt if str(x).strip()],
+            "tags": [str(x) for x in tags if str(x).strip()],
+            "character_book": lorebook,
+            "extensions": extensions,
+        }
+        return {"spec": "chara_card_v2", "spec_version": "2.0", "data": card_data}
+
+    def list_front_porch_characters(self, settings=None, target=None, *args):
+        if target is None and args:
+            target = args[0]
+        if isinstance(settings, dict) and not target:
+            target = settings.get("frontPorchExportTarget")
+        km, db, err, selected_target = self._front_porch_paths(settings, target=target)
+        if err:
+            return {"ok": False, "error": err, "target": selected_target, "characters": []}
+        con = None
+        try:
+            con = sqlite3.connect(str(db))
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            tables = {str(r[0]) for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "characters" not in tables:
+                return {"ok": False, "error": f"{db.name} does not contain a characters table.", "target": selected_target, "characters": []}
+            cols = self._sqlite_table_columns(cur, "characters")
+            wanted = [c for c in ["id", "name", "image_path", "tags", "created_at", "updated_at", "deleted_at", "folder_id"] if c in cols]
+            if not wanted:
+                return {"ok": False, "error": "Characters table exists but has no readable columns.", "target": selected_target, "characters": []}
+            where = ""
+            if "deleted_at" in cols:
+                where = " WHERE deleted_at IS NULL OR deleted_at = 0 OR deleted_at = ''"
+            order = "updated_at" if "updated_at" in cols else ("created_at" if "created_at" in cols else "name")
+            rows = cur.execute(f"SELECT {', '.join(wanted)} FROM characters{where} ORDER BY {order} DESC").fetchall()
+            sessions_cols = self._sqlite_table_columns(cur, "sessions") if "sessions" in tables else set()
+            avatar_cols = self._sqlite_table_columns(cur, "avatar_images") if "avatar_images" in tables else set()
+            group_refs = {}
+            gm_cols = self._sqlite_table_columns(cur, "group_members") if "group_members" in tables else set()
+            for ref_col in ["character_id", "source_character_id", "original_character_id"]:
+                if ref_col in gm_cols:
+                    try:
+                        for cid, count in cur.execute(f"SELECT {ref_col}, COUNT(*) FROM group_members WHERE {ref_col} IS NOT NULL AND {ref_col} != '' GROUP BY {ref_col}").fetchall():
+                            group_refs[str(cid)] = group_refs.get(str(cid), 0) + int(count or 0)
+                    except Exception:
+                        pass
+            out = []
+            for row in rows:
+                item = {k: row[k] for k in row.keys()}
+                cid = str(item.get("id") or "")
+                item["target"] = selected_target
+                item["targetLabel"] = "Beta" if selected_target == "beta" else "Stable"
+                item["imageFile"] = self._front_porch_character_image_path(km, item.get("image_path"))
+                item["tagsList"] = self._front_porch_json_value(item.get("tags"), []) if "tags" in item else []
+                item["sessionCount"] = 0
+                item["avatarCount"] = 0
+                item["groupReferenceCount"] = group_refs.get(cid, 0)
+                if "sessions" in tables and "character_id" in sessions_cols:
+                    try:
+                        item["sessionCount"] = int(cur.execute("SELECT COUNT(*) FROM sessions WHERE character_id = ?", (cid,)).fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                if "avatar_images" in tables and "character_id" in avatar_cols:
+                    try:
+                        item["avatarCount"] = int(cur.execute("SELECT COUNT(*) FROM avatar_images WHERE character_id = ?", (cid,)).fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                out.append(item)
+            con.close()
+            self._log_event("front_porch_characters_listed", {"target": selected_target, "db": str(db), "count": len(out)})
+            return {"ok": True, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "koboldManager": str(km), "count": len(out), "characters": out}
+        except Exception as e:
+            try:
+                con.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Could not list Front Porch characters: {e}", "target": selected_target, "characters": []}
+
+    def load_front_porch_character(self, character_id, settings=None, target=None, *args):
+        if target is None and args:
+            target = args[0]
+        character_id = str(character_id or "").strip()
+        if not character_id:
+            return {"ok": False, "error": "Select a Front Porch character to import."}
+        km, db, err, selected_target = self._front_porch_paths(settings, target=target)
+        if err:
+            return {"ok": False, "error": err, "target": selected_target}
+        con = None
+        try:
+            con = sqlite3.connect(str(db))
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cols = self._sqlite_table_columns(cur, "characters")
+            if not cols:
+                return {"ok": False, "error": f"{db.name} does not contain a readable characters table."}
+            wanted = [c for c in ["id", "name", "description", "personality", "scenario", "first_message", "first_mes", "mes_example", "system_prompt", "post_history_instructions", "alternate_greetings", "tags", "image_path", "lorebook", "created_at", "updated_at", "deleted_at"] if c in cols]
+            row = cur.execute(f"SELECT {', '.join(wanted)} FROM characters WHERE id = ? LIMIT 1", (character_id,)).fetchone()
+            if not row:
+                return {"ok": False, "error": "Front Porch character was not found. Refresh the list and try again."}
+            row_dict = {k: row[k] for k in row.keys()}
+            payload = self._front_porch_character_payload_from_row(cur, row_dict, km)
+            output = self._build_raw_card_from_chara_v2(payload)
+            image_path = self._front_porch_character_image_path(km, row_dict.get("image_path"))
+            con.close()
+            name = (payload.get("data") or {}).get("name") or "Character"
+            self._log_event("front_porch_character_loaded", {"target": selected_target, "db": str(db), "id": character_id, "name": name, "image": image_path})
+            return {"ok": True, "loadedType": f"front_porch_{selected_target}", "concept": "", "output": output, "settings": self.settings, "template": self.template, "imagePath": image_path, "sourcePath": str(db), "frontPorchCharacterId": character_id, "name": name, "message": f"Loaded {name} from {('Beta' if selected_target == 'beta' else 'Stable')} Front Porch."}
+        except Exception as e:
+            try:
+                con.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Could not import Front Porch character: {e}", "target": selected_target}
+
+    def delete_front_porch_characters(self, character_ids, settings=None, target=None, *args):
+        if target is None and args:
+            target = args[0]
+        if isinstance(character_ids, str):
+            character_ids = [character_ids]
+        ids = [str(x or "").strip() for x in (character_ids or []) if str(x or "").strip()]
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {"ok": False, "error": "Select at least one Front Porch character to delete."}
+        km, db, err, selected_target = self._front_porch_paths(settings, target=target)
+        if err:
+            return {"ok": False, "error": err, "target": selected_target}
+        con = None
+        try:
+            backup_path = self._create_front_porch_db_backup(db, km, reason="character_delete", keep=10)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create capped database backup before delete: {e}"}
+        try:
+            con = sqlite3.connect(str(db))
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            tables = {str(r[0]) for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "characters" not in tables:
+                return {"ok": False, "error": f"{db.name} does not contain a characters table."}
+            char_cols = self._sqlite_table_columns(cur, "characters")
+            sel_cols = [c for c in ["id", "name", "image_path"] if c in char_cols]
+            qmarks = ",".join(["?"] * len(ids))
+            rows = cur.execute(f"SELECT {', '.join(sel_cols)} FROM characters WHERE id IN ({qmarks})", ids).fetchall()
+            found = [{k: r[k] for k in r.keys()} for r in rows]
+            found_ids = [str(r.get("id") or "") for r in found]
+            if not found_ids:
+                return {"ok": False, "error": "None of the selected characters were found. Refresh the list and try again."}
+            qmarks_found = ",".join(["?"] * len(found_ids))
+            session_ids = []
+            if "sessions" in tables:
+                session_cols = self._sqlite_table_columns(cur, "sessions")
+                if "character_id" in session_cols:
+                    try:
+                        session_ids = [str(r[0]) for r in cur.execute(f"SELECT id FROM sessions WHERE character_id IN ({qmarks_found})", found_ids).fetchall() if str(r[0]).strip()]
+                    except Exception:
+                        session_ids = []
+            deleted_messages = 0
+            if session_ids and "messages" in tables:
+                qm = ",".join(["?"] * len(session_ids))
+                try:
+                    deleted_messages = cur.execute(f"DELETE FROM messages WHERE session_id IN ({qm})", session_ids).rowcount or 0
+                except Exception:
+                    deleted_messages = 0
+            deleted_sessions = 0
+            if session_ids and "sessions" in tables:
+                qm = ",".join(["?"] * len(session_ids))
+                try:
+                    deleted_sessions = cur.execute(f"DELETE FROM sessions WHERE id IN ({qm})", session_ids).rowcount or 0
+                except Exception:
+                    deleted_sessions = 0
+            deleted_avatars = 0
+            if "avatar_images" in tables:
+                av_cols = self._sqlite_table_columns(cur, "avatar_images")
+                if "character_id" in av_cols:
+                    try:
+                        deleted_avatars = cur.execute(f"DELETE FROM avatar_images WHERE character_id IN ({qmarks_found})", found_ids).rowcount or 0
+                    except Exception:
+                        deleted_avatars = 0
+            deleted_group_members = 0
+            if "group_members" in tables:
+                gm_cols = self._sqlite_table_columns(cur, "group_members")
+                for ref_col in ["character_id", "source_character_id", "original_character_id"]:
+                    if ref_col in gm_cols:
+                        try:
+                            deleted_group_members += cur.execute(f"DELETE FROM group_members WHERE {ref_col} IN ({qmarks_found})", found_ids).rowcount or 0
+                        except Exception:
+                            pass
+            deleted_characters = cur.execute(f"DELETE FROM characters WHERE id IN ({qmarks_found})", found_ids).rowcount or 0
+            now = int(time.time())
+            if "sync_meta" in tables:
+                try:
+                    cur.execute("UPDATE sync_meta SET version = version + 1, last_modified_at = ? WHERE id = 1", (now,))
+                except Exception:
+                    pass
+            con.commit()
+            con.close()
+            chars_dir = Path(km) / "Characters"
+            deleted_files = 0
+            deleted_dirs = 0
+            file_errors = []
+            for row in found:
+                try:
+                    img = self._front_porch_character_image_path(km, row.get("image_path"))
+                    if img:
+                        ip = Path(img)
+                        if ip.exists() and ip.is_file() and chars_dir in [ip.parent, *ip.parents]:
+                            ip.unlink()
+                            deleted_files += 1
+                except Exception as e:
+                    file_errors.append(str(e))
+                try:
+                    avatar_dir = self._front_porch_avatar_dir(chars_dir, row.get("name") or "")
+                    if avatar_dir.exists() and avatar_dir.is_dir():
+                        shutil.rmtree(avatar_dir)
+                        deleted_dirs += 1
+                except Exception as e:
+                    file_errors.append(str(e))
+            payload = {"ok": True, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "backup": str(backup_path), "requested": len(ids), "deletedCharacters": deleted_characters, "deletedSessions": deleted_sessions, "deletedMessages": deleted_messages, "deletedAvatarRows": deleted_avatars, "deletedGroupMemberRows": deleted_group_members, "deletedImageFiles": deleted_files, "deletedAvatarFolders": deleted_dirs, "fileErrors": file_errors[:10]}
+            self._log_event("front_porch_characters_deleted", payload)
+            return payload
+        except Exception as e:
+            try:
+                con.rollback(); con.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Could not delete Front Porch character(s): {e}. Database backup was created at: {backup_path}", "target": selected_target}
 
     def _safe_front_porch_character_folder(self, name):
         """Match Front Porch AI's character/avatar directory slug.
@@ -13901,6 +14651,7 @@ class Api:
     def export_to_front_porch(self, output, image_path=None, settings=None, project_path=None):
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or load a character first."}
+        output = self._normalise_card_output_for_save(output, self.template)
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
         km, db, err, selected_target = self._front_porch_paths(merged_settings)
         if err:
@@ -14888,6 +15639,8 @@ class Api:
     def export_card(self, output, frontend=None, export_format=None, image_path=None, concept="", template=None, settings=None):
         if not output or not output.strip():
             return {"ok": False, "error": "Nothing to export."}
+        template = template or self.template
+        output = self._normalise_card_output_for_save(output, template)
         frontend = "front_porch"
         export_format = export_format or "chara_v2_png"
         if export_format == "frontend_json":
@@ -14904,7 +15657,6 @@ class Api:
                 return {"ok": False, "error": "The selected export folder is not writable."}
         else:
             export_folder = self._character_export_dir(safe_name)
-        template = template or self.template
 
         if export_format == "chara_v2_png":
             payload = self._to_chara_card_v2(output, safe_name)

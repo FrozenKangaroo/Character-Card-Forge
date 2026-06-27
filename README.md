@@ -1,4 +1,26 @@
-## v1.0.10
+## v1.0.11-beta5
+
+- Optimised Character Browser → Load Workspace so it no longer re-indexes the Browser cache before opening a selected card.
+- Workspace asset hydration now restores generated/emotion image BLOBs to local cached files instead of serialising every image as a huge data URL through pywebview.
+- Generated image and emotion image panels now lazy-load small previews from file paths after the workspace opens.
+- Added a 20-second workspace-load watchdog that unlocks the interface and records a debug event if a backend load takes unusually long.
+- Added backend timing/debug events for lightweight workspace image hydration and slow project loads.
+
+## v1.0.11-beta4
+
+- Added a Front Porch Character Manager in Settings. Scan Stable or Beta Front Porch databases, review installed characters, multi-select rows, and delete selected characters after a warning/confirmation.
+- Front Porch character deletion now creates a capped database backup first, then removes character rows, sessions, messages, avatar rows, card PNGs, and avatar folders where possible.
+- Added Import from Front Porch to the Import Card modal. You can scan Stable or Beta Front Porch, select a card, and import it into Character Card Forge / Character Browser.
+
+## v1.0.11-beta2
+
+- Fixed revision output that came back with Markdown wrapper headings such as `# Revised Character Card` / `## Name`.
+- CCF now strips the wrapper title and normalises known card section headings back into the app's standard section format.
+- Image prompt detection now understands Markdown `#` / `##` section headings as well as plain CCF headings.
+- Generate Images is no longer disabled for API image models just because the Stable Diffusion Prompt section is missing; natural-prompt API mode can proceed from the Natural English prompt or current card text.
+- Revision prompts now explicitly tell the AI not to add wrapper titles or convert the card into Markdown headings.
+
+## v1.0.11-beta1
 
 - Stable public release of the v1.0.10 cycle.
 - Group Card export now supports both stable and beta Front Porch AI builds now that Group Chat is available in stable.
