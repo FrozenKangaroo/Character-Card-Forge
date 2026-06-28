@@ -4,12 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Character Card Forge</title>
+  <link rel="icon" type="image/png" href="icon.png" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><div class="logo">CC</div><div><h1>Character Card Forge</h1><p>AI-driven card builder</p></div></div>
+      <div class="brand"><div class="logo"><img src="icon.png" alt="Character Card Forge" /></div><div><h1>Character Card Forge</h1><p>AI-driven card builder</p></div></div>
       <nav>
         <button class="nav active" data-tab="concept">Concept</button>
         <button class="nav" data-tab="manual">Guided Manual</button>
@@ -58,9 +59,9 @@
         </div>
         <div id="concept-description" class="subtab-panel" data-subtab-panel="concept">
           <div class="card wide vision-card">
-            <div class="card-title"><div><h3>Vision</h3><p>Drop or click a reference image, or paste a local image path / URL below. Analyze opens options for character-only or full-card analysis and can send the result to Main Concept or Builders.</p></div><div class="actions vision-actions"><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
-            <label id="visionDropZone" class="drop-zone" for="visionFileInput">Drop a vision reference image here or click to browse</label>
-            <label>Vision Image Path<input id="visionImagePath" placeholder="Paste a local image path or image URL, or click/drop an image above." /></label>
+            <div class="card-title"><div><h3>Vision</h3><p>Drop or click a reference image or animated GIF, or paste a local image/GIF path / URL below. Analyze opens options for character-only or full-card analysis and can send the result to Main Concept or Builders.</p></div><div class="actions vision-actions"><button id="analyzeVisionBtn" type="button" class="primary" disabled title="Select a vision image first.">Analyze</button><button id="clearVisionBtn" type="button" class="danger-ghost">Clear</button></div></div>
+            <label id="visionDropZone" class="drop-zone" for="visionFileInput">Drop a vision reference image or animated GIF here or click to browse</label>
+            <label>Vision Image Path<input id="visionImagePath" placeholder="Paste a local image/GIF path or URL, or click/drop an image above." /></label>
             <textarea id="visionDescription" class="vision-description" placeholder="Vision analysis output appears here. Use Analyze to choose where to send the result."></textarea>
           </div>
         </div>
@@ -457,7 +458,7 @@
       </section>
 
       <section id="browser" class="tab">
-        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Use the filter icon beside Live Search for sorting and tag filters. Right-click a card or folder for actions.</p></div><div class="actions"><button id="refreshCharactersBtn" type="button" class="browser-icon-btn" title="Refresh Character Browser" aria-label="Refresh Character Browser"><span aria-hidden="true">↻</span><span class="sr-only">Refresh</span></button></div></div>
+        <div class="page-head"><div><h2>Character Browser</h2><p>Browse autosaved characters. Use the filter icon beside Live Search for sorting and tag filters. Right-click a card or folder for actions.</p></div><div class="actions"><button id="browserMassFrontPorchImportBtn" type="button">Mass Import from Front Porch…</button><button id="refreshCharactersBtn" type="button" class="browser-icon-btn" title="Refresh Character Browser" aria-label="Refresh Character Browser"><span aria-hidden="true">↻</span><span class="sr-only">Refresh</span></button></div></div>
         <div class="browser-command-card card">
           <div class="browser-command-primary browser-command-primary-clean">
             <label class="browser-search-field">Live Search
@@ -577,6 +578,47 @@
   </div>
   <template id="sectionTemplate"><div class="section-card card" data-section-id=""><div class="section-top"><input class="section-enabled" type="checkbox" /><input class="section-title" /><button class="move-up">↑</button><button class="move-down">↓</button><button class="add-field">Add Field</button><button class="delete-section danger-ghost">Delete</button></div><textarea class="section-desc" placeholder="Section instructions / description"></textarea><div class="fields"></div></div></template>
   <template id="fieldTemplate"><div class="field-row" data-field-id=""><input class="field-enabled" type="checkbox" /><input class="field-label" placeholder="Field label" /><input class="field-hint" placeholder="Hint / rule" /><button class="field-up">↑</button><button class="field-down">↓</button><button class="delete-field danger-ghost">×</button></div></template>
+  <div id="welcomeModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card welcome-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Welcome to Character Card Forge</h3>
+          <p>Start a new AI character card, import an existing card, or connect to Front Porch.</p>
+        </div>
+        <button id="closeWelcomeModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <div class="welcome-grid">
+        <div class="welcome-panel">
+          <h4>Create</h4>
+          <ul>
+            <li>Use <strong>Main Concept</strong>, <strong>Guided Manual</strong>, or the builder tabs to generate a card.</li>
+            <li>Use <strong>Vision</strong> with PNG/JPG/WebP/GIF references; GIFs can be analysed from a chosen still frame.</li>
+            <li>Generate Stable Diffusion or Natural English image prompts, then create card and emotion images.</li>
+          </ul>
+        </div>
+        <div class="welcome-panel">
+          <h4>Organise</h4>
+          <ul>
+            <li>The <strong>Character Browser</strong> uses cached WebP previews and parallel refresh for larger libraries.</li>
+            <li>Use virtual folders, tag filters, ratings, browser descriptions, duplicate/grouping tools, and AI variations.</li>
+            <li>Make Front Porch group cards from browser selections or grouped characters.</li>
+          </ul>
+        </div>
+        <div class="welcome-panel">
+          <h4>Import / Export</h4>
+          <ul>
+            <li>Import PNG/JSON/Markdown cards, or mass-import Stable/Beta Front Porch cards.</li>
+            <li>Export to Chara V2 PNG/JSON, Markdown, or directly to Front Porch.</li>
+            <li>CCF adds Front Porch link metadata and warns about likely duplicates before export.</li>
+          </ul>
+        </div>
+      </div>
+      <p class="small muted">This welcome appears only when no Character Browser cards exist, unless you dismiss it.</p>
+      <label class="toggle-inline"><input id="dontShowWelcomeAgain" type="checkbox" /> Do not show this welcome again</label>
+      <div class="actions modal-actions"><button id="welcomeImportBtn" type="button">Import Card…</button><button id="welcomeFrontPorchImportBtn" type="button">Mass Import from Front Porch…</button><button id="welcomeStartBtn" type="button" class="primary">Start a Card</button></div>
+    </div>
+  </div>
+
   <div id="aiQueueModal" class="modal-backdrop hidden" aria-hidden="true">
     <div class="modal-card ai-queue-modal-card">
       <div class="modal-head">
@@ -627,6 +669,22 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
           <legend>Analysis Type</legend>
           <label class="toggle-inline"><input type="radio" name="visionAnalysisType" value="character" checked /> Character description only</label>
           <label class="toggle-inline"><input type="radio" name="visionAnalysisType" value="full_card" /> Full card / scene concept</label>
+        </fieldset>
+        <fieldset id="visionGifFrameFieldset">
+          <legend>Animated GIF Frame</legend>
+          <label>Frame choice
+            <select id="visionGifFrameMode">
+              <option value="auto" selected>Auto-pick best frame</option>
+              <option value="first">First frame</option>
+              <option value="middle">Middle frame</option>
+              <option value="last">Last frame</option>
+              <option value="manual">Specific frame number</option>
+            </select>
+          </label>
+          <label id="visionGifFrameIndexWrap" class="hidden">Frame number
+            <input id="visionGifFrameIndex" type="number" min="1" step="1" placeholder="1 = first frame" />
+          </label>
+          <p class="small muted">GIFs are converted to a single still frame before being sent to the vision model, avoiding wasted context from multiple frames.</p>
         </fieldset>
         <fieldset>
           <legend>Send Result To</legend>
@@ -1041,6 +1099,31 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
     </div>
   </div>
 
+  <div id="browserFrontPorchMassImportModal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-card import-modal-card">
+      <div class="modal-head">
+        <div>
+          <h3>Mass Import from Front Porch</h3>
+          <p>Import multiple Stable or Beta Front Porch cards directly into the Character Browser.</p>
+        </div>
+        <button id="closeBrowserFrontPorchMassImportModalBtn" type="button" class="danger-ghost">Close</button>
+      </div>
+      <p class="small muted">Warning: importing a lot of cards can take a while. CCF copies card images, saves project bundles, and refreshes the Character Browser cache after import.</p>
+      <div class="settings-grid">
+        <label>Front Porch Source<select id="browserFrontPorchMassTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
+        <label>Import View<select id="browserFrontPorchMassMode"><option value="new_only" selected>New cards only</option><option value="selected">Selected cards / show all</option></select></label>
+        <label>Name Filter<input id="browserFrontPorchMassNameFilter" placeholder="Filter by character name" /></label>
+        <label>Tag Filter<input id="browserFrontPorchMassTagFilter" placeholder="Filter by tag, comma separated" /></label>
+        <label>Metadata/Text Filter<input id="browserFrontPorchMassMetaFilter" placeholder="Filter id, image path, match reason, sessions, avatars" /></label>
+        <label>Image Filter<select id="browserFrontPorchMassImageFilter"><option value="any">Any image state</option><option value="with_image">Has image</option><option value="missing_image">Missing image</option></select></label>
+      </div>
+      <div class="actions"><button id="scanBrowserFrontPorchMassImportBtn" type="button" class="primary">Scan Front Porch</button><button id="browserFrontPorchMassSelectVisibleBtn" type="button">Select Visible</button><button id="browserFrontPorchMassClearSelectionBtn" type="button" class="danger-ghost">Clear Selection</button></div>
+      <p id="browserFrontPorchMassStatus" class="small muted">Choose Stable or Beta, then scan. New-only mode hides cards that CCF can confidently link to an existing Character Browser card.</p>
+      <div id="browserFrontPorchMassList" class="front-porch-character-list"></div>
+      <div class="actions modal-actions"><button id="cancelBrowserFrontPorchMassImportBtn" type="button" class="danger-ghost">Cancel</button><button id="importBrowserFrontPorchMassSelectedBtn" type="button" class="primary">Import Selected</button></div>
+    </div>
+  </div>
+
   <div id="exportCardModal" class="modal-backdrop hidden" aria-hidden="true">
     <div class="modal-card import-modal-card">
       <div class="modal-head">
@@ -1073,13 +1156,13 @@ What embarrassing tech habit do you hide from {{user}}?"></textarea></label>
   </div>
 
   <input id="conceptImportFileInput" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" hidden />
-  <input id="visionFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" aria-hidden="true" tabindex="-1" />
+  <input id="visionFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,image/png,image/jpeg,image/webp,image/gif" aria-hidden="true" tabindex="-1" />
   <input id="cardImageFileInput" class="ccf-file-input-hidden" type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" aria-hidden="true" tabindex="-1" />
   <input id="savedFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="quickImportFileInput" class="ccf-file-input-hidden" type="file" accept=".json,.png,.jpg,.jpeg,.webp,.md,.txt,application/json,image/png,image/jpeg,image/webp,text/markdown,text/plain" aria-hidden="true" tabindex="-1" />
   <input id="builderCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptCardFileInput" type="file" accept=".json,.png,.md,.txt,application/json,image/png,text/markdown,text/plain" hidden />
   <input id="conceptAttachmentInput" class="ccf-file-input-hidden" type="file" accept=".txt,.srt,.vtt,.md,.pdf,text/plain,text/markdown,application/pdf" multiple aria-hidden="true" tabindex="-1" />
-  <script src="app.js?v=1.0.11"></script>
+  <script src="app.js?v=1.0.12"></script>
 </body>
 </html>

@@ -67,6 +67,8 @@ let quickImportUrlValue = "";
 let frontPorchCharacterRows = [];
 let frontPorchImportRows = [];
 let selectedFrontPorchImportId = "";
+let browserFrontPorchMassRows = [];
+let browserFrontPorchMassSelectedIds = new Set();
 let cardImagePreviewToken = 0;
 let currentLoadedType = "";
 let characterOutputTabs = [];
@@ -114,16 +116,26 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 
 const NEW_USER_TIPS = [
-  'Start with Main Concept, then use Transfer to Builders when you want the structured fields filled for you.',
-  'Use Lite or Compact Lite when your text model has a small context window. It keeps the card focused instead of trying to write a whole visual novel.',
-  'Concept Attachments are best for scripts, transcripts, subtitles, and notes you want the AI to learn from before generating.',
-  'Character Browser uses SQLite caching, so refreshing should stay quick unless saved card files actually changed.',
-  'Virtual folders only organize the browser. They do not move your physical saved card folders on disk.',
-  'Use AI Browser Analysis when the card description is only physical appearance and you want a useful scenario summary, quality rating, and NSFW-tag detection.',
+  'Start with Main Concept for a quick card, or use Guided Manual when you want more control without writing the whole card by hand.',
+  'Transfer to Builders can turn a rough concept into structured Character, Personality, and Scene Builder fields.',
+  'Vision supports PNG, JPG, WebP, and animated GIF. GIFs are converted to one selected frame so the model does not waste context on the whole animation.',
+  'Concept Attachments are best for scripts, transcripts, subtitles, PDFs, and notes you want the AI to learn from before generating.',
+  'Use Q&A sections to force the model to answer hidden motives, contradictions, relationship dynamics, and scenario details before writing the card.',
+  'Natural English Image Prompt is useful for API image models; Stable Diffusion Prompt is better for local SD/Forge workflows.',
+  'Image Visual Style lets you steer image prompts toward anime or realistic output without rewriting the whole card.',
+  'Generated card images and emotion images stay attached to the workspace; Browser thumbnails use small cached previews for speed.',
+  'Character Browser uses SQLite caching, parallel refresh, and WebP previews, so large image-heavy libraries should open faster after the first refresh.',
+  'Virtual folders only organise the Character Browser. They do not move physical saved card folders on disk.',
   'Tag filters are faceted: active filters shrink the tag list to tags that still exist in the current result set.',
-  'Merge Tags is display-only unless you choose a rename action. It is safe for cleaning up noisy tag lists.',
-  'Fetch SD Models in Settings before image generation if you switch between anime, Pony, or realistic checkpoints.',
+  'AI Browser Analysis can create better browser descriptions, quality ratings, and NSFW detection for older or imported cards.',
+  'Make AI Variation from the Browser to create future routes, alternate relationships, changed personalities, or named variants without overwriting the original.',
+  'Browser groups let you keep related variants together, then create Front Porch group cards from selected cards.',
+  'Front Porch exports now check for likely existing characters using CCF link metadata, names, and core card fields before writing.',
+  'Mass Import from Front Porch can pull many Stable or Beta Front Porch cards into CCF with filters and new-only mode.',
+  'Front Porch Character Manager in Settings can scan Stable/Beta databases and delete selected characters after confirmation and backup.',
+  'Export PNG embeds Chara V2 data; Export JSON is useful for debugging and imports; Markdown is best for readable backup copies.',
   'The Output / Editor tab autosaves after edits, so the browser cache and latest card stay in sync.',
+  'Mobile Server can expose generation tools to another device when enabled in Settings.',
 ];
 
 function showRandomTip(forceDifferent = false) {
@@ -136,6 +148,52 @@ function showRandomTip(forceDifferent = false) {
     while (next === current && guard++ < 8) next = NEW_USER_TIPS[Math.floor(Math.random() * NEW_USER_TIPS.length)];
   }
   tipText.textContent = next;
+}
+
+const WELCOME_MODAL_STORAGE_KEY = 'ccf_welcome_dismissed_v1';
+
+function activateMainTab(tabName) {
+  const btn = $(`.nav[data-tab="${tabName}"]`);
+  if (btn) btn.click();
+}
+
+function openWelcomeModal() {
+  const modal = $('#welcomeModal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeWelcomeModal(persist = false) {
+  const modal = $('#welcomeModal');
+  if (!modal) return;
+  if (persist || $('#dontShowWelcomeAgain')?.checked) {
+    try { localStorage.setItem(WELCOME_MODAL_STORAGE_KEY, '1'); } catch (_) {}
+  }
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function maybeShowFirstRunWelcome() {
+  try {
+    if (localStorage.getItem(WELCOME_MODAL_STORAGE_KEY) === '1') return;
+  } catch (_) {}
+  try {
+    let cards = characterBrowserCards;
+    if (!browserHasLoadedOnce) {
+      const res = await window.pywebview.api.list_character_library();
+      if (!res?.ok) return;
+      cards = Array.isArray(res.cards) ? res.cards : [];
+      characterBrowserCards = cards;
+      if (Array.isArray(res.folders)) {
+        browserVirtualFolders = res.folders;
+        if (settings) settings.browserVirtualFolders = res.folders;
+      }
+      browserHasLoadedOnce = true;
+      browserNeedsRefresh = false;
+    }
+    if (!cards.length) openWelcomeModal();
+  } catch (_) {}
 }
 
 function updateAppVersionDisplay() {
@@ -2005,6 +2063,46 @@ function hasVisionImageSelected() {
   return getVisionImagePath().length > 0;
 }
 
+function isGifVisionPath(path = getVisionImagePath()) {
+  const value = String(path || '').trim().toLowerCase();
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      const url = new URL(value);
+      return url.pathname.toLowerCase().endsWith('.gif');
+    }
+  } catch (_) {}
+  return /\.gif(?:[?#].*)?$/i.test(value);
+}
+
+function updateVisionGifControls() {
+  const isGif = isGifVisionPath();
+  const fieldset = $('#visionGifFrameFieldset');
+  if (fieldset) fieldset.classList.toggle('hidden', !isGif);
+  const mode = $('#visionGifFrameMode')?.value || 'auto';
+  const wrap = $('#visionGifFrameIndexWrap');
+  if (wrap) wrap.classList.toggle('hidden', !isGif || mode !== 'manual');
+}
+
+function collectVisionGifFrameOptions() {
+  const mode = ($('#visionGifFrameMode')?.value || 'auto').trim() || 'auto';
+  const rawIndex = ($('#visionGifFrameIndex')?.value || '').trim();
+  let frameIndex = null;
+  if (rawIndex) {
+    const parsed = parseInt(rawIndex, 10);
+    if (Number.isFinite(parsed) && parsed > 0) frameIndex = parsed - 1;
+  }
+  return { gifFrameMode: mode, gifFrameIndex: frameIndex };
+}
+
+function visionGifFrameStatus(res) {
+  const info = res?.gifFrameInfo || null;
+  if (!info) return '';
+  const number = info.frameNumber || ((info.frameIndex || 0) + 1);
+  const count = info.frameCount || '?';
+  const mode = info.mode || 'auto';
+  return ` Used GIF frame ${number}/${count} (${mode}).`;
+}
+
 function setVisionImagePath(path) {
   const value = String(path || '').trim();
   currentVisionImagePath = value;
@@ -2026,6 +2124,7 @@ function setVisionImagePath(path) {
     fullCardAnalyze.disabled = isInterfaceLocked() ? true : !value;
     fullCardAnalyze.title = value ? '' : 'Select a vision image first.';
   }
+  updateVisionGifControls();
 }
 
 function preventDragDefaults(event) {
@@ -2392,6 +2491,7 @@ async function init() {
   renderConceptAttachments();
   showRandomTip();
   bindActions();
+  setTimeout(maybeShowFirstRunWelcome, 900);
   disableFrontPorchGroupCardCreationUi();
   setTimeout(() => { populateBuilderPresets(); populateAiRandomThemes(); ensureBuilderPresetDropdowns(); updateAiRandomThemeCustom(); }, 0);
   setTimeout(ensureBuilderPresetDropdowns, 250);
@@ -4416,6 +4516,11 @@ function saveTemplateDebounced() {
 function bindActions() {
   $('#newCardBtn').addEventListener('click', addConceptWorkspaceTab);
   $('#nextTipBtn')?.addEventListener('click', () => showRandomTip(true));
+  $('#closeWelcomeModalBtn')?.addEventListener('click', () => closeWelcomeModal(false));
+  $('#welcomeModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'welcomeModal') closeWelcomeModal(false); });
+  $('#welcomeStartBtn')?.addEventListener('click', () => { closeWelcomeModal(false); activateMainTab('concept'); });
+  $('#welcomeImportBtn')?.addEventListener('click', () => { closeWelcomeModal(false); openQuickImportModal(); });
+  $('#welcomeFrontPorchImportBtn')?.addEventListener('click', () => { closeWelcomeModal(false); activateMainTab('browser'); setTimeout(openBrowserFrontPorchMassImportModal, 150); });
   $('#closeUpdateAvailableModalBtn')?.addEventListener('click', closeUpdateAvailableModal);
   $('#remindLaterUpdateBtn')?.addEventListener('click', closeUpdateAvailableModal);
   $('#openUpdateReleaseBtn')?.addEventListener('click', openUpdateReleasePage);
@@ -4556,12 +4661,13 @@ function bindActions() {
   $$('.multi-builder-character-label').forEach(el => el.addEventListener('input', () => { if (!isMultiBuilderMode()) return; $$('.multi-builder-character-label').forEach(other => { if (other !== el) other.value = el.value; }); multiBuilderStates[multiBuilderSelectedIndex] = { ...(multiBuilderStates[multiBuilderSelectedIndex] || {}), ...readBuilderDomState(), multiCharacterName: el.value || '' }; updateMultiBuilderSelectors(false); }));
   $('#selectVisionImageBtn')?.addEventListener('click', openVisionImagePicker);
   $('#visionImageUrlBtn')?.addEventListener('click', () => selectVisionImageUrl({ analyze: false }));
-  $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateAvailability(); });
+  $('#visionImagePath').addEventListener('input', () => { currentVisionImagePath = $('#visionImagePath').value.trim(); if (settings) settings.visionImagePath = currentVisionImagePath; updateVisionGifControls(); updateAvailability(); });
   $('#analyzeVisionBtn').addEventListener('click', openVisionAnalyzeOptionsModal);
   $('#analyzeFullCardBtn')?.addEventListener('click', analyzeFullCardToMainConcept);
   $('#closeVisionAnalyzeOptionsModalBtn')?.addEventListener('click', closeVisionAnalyzeOptionsModal);
   $('#cancelVisionAnalyzeOptionsBtn')?.addEventListener('click', closeVisionAnalyzeOptionsModal);
   $('#startVisionAnalyzeOptionsBtn')?.addEventListener('click', startVisionAnalyzeFromModal);
+  $('#visionGifFrameMode')?.addEventListener('change', updateVisionGifControls);
   $('#visionAnalyzeOptionsModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'visionAnalyzeOptionsModal') closeVisionAnalyzeOptionsModal(); });
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
   $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
@@ -4654,7 +4760,7 @@ function bindActions() {
     runBrowserFolderContextAction(btn.dataset.browserFolderAction || '');
   });
   document.addEventListener('click', (e) => { if (!e.target?.closest?.('#browserCardContextMenu') && !e.target?.closest?.('#browserFolderContextMenu')) { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); } });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); closeBrowserGroupCardModal(); closeBrowserVariationModal(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); closeBrowserGroupCardModal(); closeBrowserVariationModal(); closeBrowserFrontPorchMassImportModal(); } });
   window.addEventListener('scroll', () => { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); }, true);
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserImproveFromRatingBtn')?.addEventListener('click', generateRatingImprovementPreview);
@@ -4711,6 +4817,17 @@ function bindActions() {
   $('#frontPorchImportTarget')?.addEventListener('change', () => { frontPorchImportRows = []; selectedFrontPorchImportId = ''; renderFrontPorchImportList(); const s = $('#frontPorchImportStatus'); if (s) s.textContent = 'Target changed. Scan characters again.'; });
   $('#frontPorchImportList')?.addEventListener('change', (e) => { const input = e.target?.closest?.('input[name="frontPorchImportCharacter"]'); if (input) selectedFrontPorchImportId = input.value || ''; });
   $('#frontPorchImportModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'frontPorchImportModal') closeFrontPorchImportModal(); });
+  $('#browserMassFrontPorchImportBtn')?.addEventListener('click', openBrowserFrontPorchMassImportModal);
+  $('#closeBrowserFrontPorchMassImportModalBtn')?.addEventListener('click', closeBrowserFrontPorchMassImportModal);
+  $('#cancelBrowserFrontPorchMassImportBtn')?.addEventListener('click', closeBrowserFrontPorchMassImportModal);
+  $('#scanBrowserFrontPorchMassImportBtn')?.addEventListener('click', scanBrowserFrontPorchMassImport);
+  $('#browserFrontPorchMassSelectVisibleBtn')?.addEventListener('click', selectVisibleBrowserFrontPorchMassImportRows);
+  $('#browserFrontPorchMassClearSelectionBtn')?.addEventListener('click', clearBrowserFrontPorchMassImportSelection);
+  $('#importBrowserFrontPorchMassSelectedBtn')?.addEventListener('click', importSelectedBrowserFrontPorchMassRows);
+  $('#browserFrontPorchMassList')?.addEventListener('change', (e) => { const input = e.target?.closest?.('.browser-front-porch-mass-checkbox'); if (input) { if (input.checked) browserFrontPorchMassSelectedIds.add(input.value); else browserFrontPorchMassSelectedIds.delete(input.value); renderBrowserFrontPorchMassImportList(); } });
+  ['browserFrontPorchMassNameFilter','browserFrontPorchMassTagFilter','browserFrontPorchMassMetaFilter','browserFrontPorchMassImageFilter','browserFrontPorchMassMode'].forEach(id => { $('#' + id)?.addEventListener('input', renderBrowserFrontPorchMassImportList); $('#' + id)?.addEventListener('change', renderBrowserFrontPorchMassImportList); });
+  $('#browserFrontPorchMassTarget')?.addEventListener('change', () => { browserFrontPorchMassRows = []; browserFrontPorchMassSelectedIds = new Set(); renderBrowserFrontPorchMassImportList(); const s = $('#browserFrontPorchMassStatus'); if (s) s.textContent = 'Target changed. Scan Front Porch again.'; });
+  $('#browserFrontPorchMassImportModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserFrontPorchMassImportModal') closeBrowserFrontPorchMassImportModal(); });
   $('#openCardImageModalBtn')?.addEventListener('click', openCardImageModal);
   $('#closeCardImageModalBtn')?.addEventListener('click', closeCardImageModal);
   $('#applyCardImagePathBtn')?.addEventListener('click', applyCardImageModalPath);
@@ -5474,7 +5591,7 @@ async function selectVisionImage(options = {}) {
     setVisionImagePath(res.path);
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    setStatus('Selected vision image: ' + res.path, 'ok');
+    setStatus((/\.gif$/i.test(res.path || '') ? 'Selected animated GIF vision source: ' : 'Selected vision image: ') + res.path, 'ok');
   } catch (err) {
     if (fallbackToBrowserInput) {
       shouldOpenBrowserFallback = true;
@@ -5511,7 +5628,7 @@ async function importVisionPaths(paths) {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     updateAvailability();
-    setStatus('Selected vision image: ' + res.path, 'ok');
+    setStatus((/\.gif$/i.test(res.path || '') ? 'Selected animated GIF vision source: ' : 'Selected vision image: ') + res.path, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -5533,7 +5650,7 @@ async function importVisionFiles(files) {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     updateAvailability();
-    setStatus('Selected vision image: ' + res.path, 'ok');
+    setStatus((/\.gif$/i.test(res.path || '') ? 'Selected animated GIF vision source: ' : 'Selected vision image: ') + res.path, 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -5577,6 +5694,7 @@ function openVisionAnalyzeOptionsModal() {
     analyzeVisionImage();
     return;
   }
+  updateVisionGifControls();
   modal.classList.remove('hidden');
   modal.setAttribute('aria-hidden', 'false');
   $('#visionAnalyzeCustomInstructions')?.focus();
@@ -5593,8 +5711,9 @@ async function startVisionAnalyzeFromModal() {
   const analysisType = getCheckedRadioValue('visionAnalysisType', 'character');
   const target = getCheckedRadioValue('visionAnalysisTarget', 'concept');
   const customInstructions = String($('#visionAnalyzeCustomInstructions')?.value || '').trim();
+  const gifOptions = collectVisionGifFrameOptions();
   closeVisionAnalyzeOptionsModal();
-  await runVisionAnalysisWithOptions({ analysisType, target, customInstructions });
+  await runVisionAnalysisWithOptions({ analysisType, target, customInstructions, ...gifOptions });
 }
 
 function writeVisionAnalysisToConcept(text, { analysisType = 'character' } = {}) {
@@ -5651,7 +5770,7 @@ async function transferTextToBuilders(mainConcept, characterDescription, options
   }
 }
 
-async function runVisionAnalysisWithOptions({ analysisType = 'character', target = 'concept', customInstructions = '' } = {}) {
+async function runVisionAnalysisWithOptions({ analysisType = 'character', target = 'concept', customInstructions = '', gifFrameMode = 'auto', gifFrameIndex = null } = {}) {
   const visionPath = getVisionImagePath();
   if (!visionPath) {
     setStatus('Select a vision image before analyzing.', 'error');
@@ -5675,7 +5794,7 @@ async function runVisionAnalysisWithOptions({ analysisType = 'character', target
   setBusy(fullCard ? 'ANALYZING FULL CARD WITH VISION MODEL…' : 'ANALYZING IMAGE WITH VISION MODEL…');
   try {
     const mode = fullCard ? 'full_card' : 'character';
-    const res = await window.pywebview.api.analyze_vision_image(visionPath, settings, mode, customInstructions || '');
+    const res = await window.pywebview.api.analyze_vision_image(visionPath, settings, mode, customInstructions || '', gifFrameMode || 'auto', gifFrameIndex);
     if (!res.ok) throw new Error(res.error || 'Vision analysis failed.');
     const resultText = String(res.concept || res.description || '').trim();
     if (!resultText) throw new Error('Vision model returned an empty result. Try a different vision model or add custom instructions.');
@@ -5693,7 +5812,7 @@ async function runVisionAnalysisWithOptions({ analysisType = 'character', target
     } else {
       writeVisionAnalysisToConcept(resultText, { analysisType: fullCard ? 'full_card' : 'character' });
       updateAvailability();
-      setStatus(res.retryUsed ? 'Vision analysis succeeded after a SFW retry. Main Concept updated.' : 'Vision analysis complete. Main Concept updated.', 'ok');
+      setStatus((res.retryUsed ? 'Vision analysis succeeded after a SFW retry. Main Concept updated.' : 'Vision analysis complete. Main Concept updated.') + visionGifFrameStatus(res), 'ok');
     }
   } catch (err) {
     setStatus(err.message || String(err), 'error');
@@ -5738,7 +5857,7 @@ async function analyzeVisionImage() {
     if (res.imagePath) setVisionImagePath(res.imagePath);
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
-    setStatus(res.retryUsed ? 'Vision model refused once, then succeeded with a SFW retry. Description ready.' : 'Vision description ready. It will be included when generating/revising the card.', 'ok');
+    setStatus((res.retryUsed ? 'Vision model refused once, then succeeded with a SFW retry. Description ready.' : 'Vision description ready. It will be included when generating/revising the card.') + visionGifFrameStatus(res), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -5786,7 +5905,7 @@ async function analyzeFullCardToMainConcept() {
     settings = collectSettings();
     await window.pywebview.api.save_settings(settings);
     updateAvailability();
-    setStatus(res.retryUsed ? 'Full-card analysis succeeded after a SFW retry. Main Concept updated.' : 'Full-card analysis complete. Main Concept updated.', 'ok');
+    setStatus((res.retryUsed ? 'Full-card analysis succeeded after a SFW retry. Main Concept updated.' : 'Full-card analysis complete. Main Concept updated.') + visionGifFrameStatus(res), 'ok');
   } catch (err) {
     setStatus(err.message || String(err), 'error');
   } finally {
@@ -8097,7 +8216,11 @@ A capped CCF database backup is saved in KoboldManager/backups, with only the la
       setBusy(`BATCH EXPORTING TO ${info.label.toUpperCase()}…`);
       for (const path of paths) {
         try {
-          const res = await exportFrontPorchProjectToTarget(path, target, originalSettings);
+          const card = characterBrowserCards.find(c => c.projectPath === path) || {};
+          const isGroup = await projectLooksLikeFrontPorchGroupCard(path, card);
+          const duplicateChoice = await resolveFrontPorchDuplicateExportChoice(path, target, originalSettings, isGroup);
+          if (duplicateChoice?.cancelled) { failed += 1; targetFailed += 1; continue; }
+          const res = await exportFrontPorchProjectToTarget(path, target, originalSettings, duplicateChoice);
           if (res.ok) { ok += 1; targetOk += 1; }
           else {
             failed += 1; targetFailed += 1;
@@ -11039,10 +11162,54 @@ async function chooseFrontPorchExportTargets({ count = 1, mode = 'single', force
   return null;
 }
 
-async function exportFrontPorchProjectToTarget(projectPath, target, baseSettings = null) {
+async function exportFrontPorchProjectToTarget(projectPath, target, baseSettings = null, duplicateOptions = null) {
   const targetSettings = frontPorchSettingsForTarget(target, baseSettings);
+  if (duplicateOptions && typeof duplicateOptions === 'object') {
+    targetSettings.frontPorchDuplicateOverride = !!duplicateOptions.override;
+    targetSettings.frontPorchExportNameOverride = String(duplicateOptions.nameOverride || '').trim();
+  } else {
+    delete targetSettings.frontPorchDuplicateOverride;
+    delete targetSettings.frontPorchExportNameOverride;
+  }
   await window.pywebview.api.save_settings(targetSettings);
   return await window.pywebview.api.export_front_porch_from_project(projectPath, targetSettings, target);
+}
+
+function formatFrontPorchDuplicateMatches(check) {
+  const matches = Array.isArray(check?.matches) ? check.matches : [];
+  const lines = [];
+  lines.push(`CCF found ${matches.length} possible existing Front Porch character${matches.length === 1 ? '' : 's'} for "${check?.name || 'this card'}".`);
+  lines.push('');
+  matches.slice(0, 5).forEach((match, index) => {
+    const reasons = Array.isArray(match.reasons) && match.reasons.length ? match.reasons.join(', ') : 'possible match';
+    lines.push(`${index + 1}. ${match.name || match.id || 'Unnamed'} — ${reasons}`);
+  });
+  if (matches.length > 5) lines.push(`...and ${matches.length - 5} more.`);
+  lines.push('');
+  lines.push('Export anyway?');
+  return lines.join('\n');
+}
+
+async function resolveFrontPorchDuplicateExportChoice(projectPath, target, baseSettings, isGroup = false) {
+  if (isGroup) return { cancelled: false, override: false, nameOverride: '' };
+  const targetSettings = frontPorchSettingsForTarget(target, baseSettings);
+  try {
+    const check = await window.pywebview.api.check_front_porch_export_conflicts(projectPath, targetSettings, target);
+    if (!check?.ok) {
+      setStatus(check?.error || 'Could not check Front Porch for existing characters.', 'error');
+      return { cancelled: true };
+    }
+    if (!Array.isArray(check.matches) || !check.matches.length) {
+      return { cancelled: false, override: false, nameOverride: '' };
+    }
+    const exportAnyway = confirm(formatFrontPorchDuplicateMatches(check));
+    if (!exportAnyway) return { cancelled: true };
+    const rename = prompt('Optional: enter a different Front Porch name for this export. Leave blank to keep the current name.', '');
+    return { cancelled: false, override: true, nameOverride: String(rename || '').trim() };
+  } catch (err) {
+    setStatus(err?.message || String(err), 'error');
+    return { cancelled: true };
+  }
 }
 
 async function exportSelectedCharacterToFrontPorch() {
@@ -11069,7 +11236,9 @@ This will write to the selected Front Porch SQLite database and copy the charact
     for (const target of targets) {
       const info = frontPorchTargetInfo(target, originalSettings);
       setBusy(`EXPORTING TO ${info.label.toUpperCase()}…`);
-      const res = await exportFrontPorchProjectToTarget(selectedCharacterProjectPath, target, originalSettings);
+      const duplicateChoice = await resolveFrontPorchDuplicateExportChoice(selectedCharacterProjectPath, target, originalSettings, selectedLooksGroup);
+      if (duplicateChoice?.cancelled) { results.push(`${info.label}: skipped`); continue; }
+      const res = await exportFrontPorchProjectToTarget(selectedCharacterProjectPath, target, originalSettings, duplicateChoice);
       if (!res.ok) throw new Error(res.error || `${info.label} export failed.`);
       if (res.groupId) results.push(`${res.targetLabel || info.label}: ${res.name} — group ${res.groupId} — members: ${res.memberCount}. DB: ${res.database}. Backup: ${res.backup}`);
       else results.push(`${res.targetLabel || info.label}: ${res.name} — DB: ${res.database} — emotions: ${res.emotionImages}. Backup: ${res.backup}`);
@@ -12581,16 +12750,21 @@ function frontPorchCharacterRowHtml(row, { mode = 'manage', checked = false } = 
   const name = String(row?.name || 'Unnamed Character');
   const tags = Array.isArray(row?.tagsList) ? row.tagsList.slice(0, 6).filter(Boolean) : [];
   const updated = frontPorchCharacterTimestamp(row?.updated_at || row?.created_at);
+  const statusBits = [];
+  if (row?.ccfInBrowser) statusBits.push(`in CCF: ${row.ccfMatchReason || 'linked'}`);
+  else if (row?.ccfPossibleNameMatch) statusBits.push('possible same-name card in CCF');
   const meta = [
     row?.sessionCount ? `${row.sessionCount} sessions` : '',
     row?.avatarCount ? `${row.avatarCount} avatars` : '',
     row?.groupReferenceCount ? `${row.groupReferenceCount} group refs` : '',
-    updated ? `updated ${updated}` : ''
+    updated ? `updated ${updated}` : '',
+    ...statusBits,
   ].filter(Boolean).join(' · ');
-  const input = mode === 'import'
-    ? `<input type="radio" name="frontPorchImportCharacter" value="${escapeAttr(id)}" ${checked ? 'checked' : ''} />`
-    : `<input type="checkbox" class="front-porch-character-checkbox" value="${escapeAttr(id)}" ${checked ? 'checked' : ''} />`;
-  return `<label class="front-porch-character-row">${input}<span class="front-porch-character-main"><span class="front-porch-character-name">${escapeHtml(name)}</span><span class="front-porch-character-meta">${escapeHtml(meta || id)}</span>${tags.length ? `<span class="front-porch-character-tags">${tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join('')}</span>` : ''}</span></label>`;
+  let input = `<input type="checkbox" class="front-porch-character-checkbox" value="${escapeAttr(id)}" ${checked ? 'checked' : ''} />`;
+  if (mode === 'import') input = `<input type="radio" name="frontPorchImportCharacter" value="${escapeAttr(id)}" ${checked ? 'checked' : ''} />`;
+  if (mode === 'mass') input = `<input type="checkbox" class="browser-front-porch-mass-checkbox" value="${escapeAttr(id)}" ${checked ? 'checked' : ''} />`;
+  const ccfBadge = row?.ccfInBrowser ? '<span class="tag-pill">Already in CCF</span>' : (row?.ccfPossibleNameMatch ? '<span class="tag-pill">Name match</span>' : '');
+  return `<label class="front-porch-character-row">${input}<span class="front-porch-character-main"><span class="front-porch-character-name">${escapeHtml(name)}</span><span class="front-porch-character-meta">${escapeHtml(meta || id)}</span>${tags.length || ccfBadge ? `<span class="front-porch-character-tags">${ccfBadge}${tags.map(t => `<span class="tag-pill">${escapeHtml(t)}</span>`).join('')}</span>` : ''}</span></label>`;
 }
 
 function renderFrontPorchCharacterManager() {
@@ -12661,6 +12835,136 @@ async function deleteSelectedFrontPorchCharacters() {
 function setFrontPorchManagerSelectAll() {
   const checked = !!$('#frontPorchCharacterSelectAll')?.checked;
   $$('#frontPorchCharacterList .front-porch-character-checkbox').forEach(el => { el.checked = checked; });
+}
+
+
+function openBrowserFrontPorchMassImportModal() {
+  if (isInterfaceLocked()) return;
+  const modal = $('#browserFrontPorchMassImportModal');
+  if (!modal) return;
+  const currentTarget = $('#frontPorchExportTarget')?.value || settings?.frontPorchExportTarget || 'stable';
+  if ($('#browserFrontPorchMassTarget')) $('#browserFrontPorchMassTarget').value = currentTarget;
+  browserFrontPorchMassRows = [];
+  browserFrontPorchMassSelectedIds = new Set();
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  renderBrowserFrontPorchMassImportList();
+}
+
+function closeBrowserFrontPorchMassImportModal() {
+  const modal = $('#browserFrontPorchMassImportModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+function browserFrontPorchMassRowVisible(row) {
+  const mode = $('#browserFrontPorchMassMode')?.value || 'new_only';
+  if (mode === 'new_only' && row?.ccfInBrowser) return false;
+  const nameQ = String($('#browserFrontPorchMassNameFilter')?.value || '').trim().toLowerCase();
+  if (nameQ && !String(row?.name || '').toLowerCase().includes(nameQ)) return false;
+  const tagQ = String($('#browserFrontPorchMassTagFilter')?.value || '').trim().toLowerCase();
+  if (tagQ) {
+    const tags = Array.isArray(row?.tagsList) ? row.tagsList.map(t => String(t || '').toLowerCase()) : [];
+    const wanted = tagQ.split(',').map(x => x.trim()).filter(Boolean);
+    if (wanted.length && !wanted.every(q => tags.some(t => t.includes(q)))) return false;
+  }
+  const metaQ = String($('#browserFrontPorchMassMetaFilter')?.value || '').trim().toLowerCase();
+  if (metaQ) {
+    const hay = [row?.id, row?.image_path, row?.imageFile, row?.ccfMatchReason, row?.targetLabel, row?.sessionCount, row?.avatarCount, row?.groupReferenceCount, ...(Array.isArray(row?.tagsList) ? row.tagsList : [])].join(' ').toLowerCase();
+    if (!hay.includes(metaQ)) return false;
+  }
+  const imageMode = $('#browserFrontPorchMassImageFilter')?.value || 'any';
+  const hasImage = !!String(row?.imageFile || row?.image_path || '').trim();
+  if (imageMode === 'with_image' && !hasImage) return false;
+  if (imageMode === 'missing_image' && hasImage) return false;
+  return true;
+}
+
+function visibleBrowserFrontPorchMassRows() {
+  return (browserFrontPorchMassRows || []).filter(browserFrontPorchMassRowVisible);
+}
+
+function renderBrowserFrontPorchMassImportList() {
+  const holder = $('#browserFrontPorchMassList');
+  if (!holder) return;
+  const visible = visibleBrowserFrontPorchMassRows();
+  const status = $('#browserFrontPorchMassStatus');
+  const selectedCount = browserFrontPorchMassSelectedIds.size;
+  if (!browserFrontPorchMassRows.length) {
+    holder.innerHTML = '<p class="small muted">Scan Stable or Beta Front Porch to list cards for mass import.</p>';
+    if (status) status.textContent = 'Choose Stable or Beta, then scan. New-only mode hides cards that CCF can confidently link to an existing Character Browser card.';
+    return;
+  }
+  if (status) {
+    const already = browserFrontPorchMassRows.filter(r => r?.ccfInBrowser).length;
+    const possible = browserFrontPorchMassRows.filter(r => r?.ccfPossibleNameMatch && !r?.ccfInBrowser).length;
+    status.textContent = `${visible.length}/${browserFrontPorchMassRows.length} visible · ${selectedCount} selected · ${already} already linked in CCF · ${possible} possible same-name matches.`;
+  }
+  if (!visible.length) {
+    holder.innerHTML = '<p class="small muted">No Front Porch cards match the current filters.</p>';
+    return;
+  }
+  holder.innerHTML = visible.map(row => frontPorchCharacterRowHtml(row, { mode: 'mass', checked: browserFrontPorchMassSelectedIds.has(String(row.id || '')) })).join('');
+}
+
+async function scanBrowserFrontPorchMassImport() {
+  if (isInterfaceLocked()) return;
+  const target = $('#browserFrontPorchMassTarget')?.value || 'stable';
+  settings = collectSettings();
+  setBusy(`SCANNING ${frontPorchTargetLabel(target).toUpperCase()} FRONT PORCH FOR MASS IMPORT…`);
+  try {
+    const res = await window.pywebview.api.list_front_porch_characters(settings, target);
+    if (!res.ok) throw new Error(res.error || 'Front Porch scan failed.');
+    browserFrontPorchMassRows = Array.isArray(res.characters) ? res.characters : [];
+    browserFrontPorchMassSelectedIds = new Set();
+    renderBrowserFrontPorchMassImportList();
+    setStatus(`Scanned ${frontPorchTargetLabel(target)} Front Porch: ${browserFrontPorchMassRows.length} card(s).`, 'ok');
+  } catch (err) {
+    browserFrontPorchMassRows = [];
+    browserFrontPorchMassSelectedIds = new Set();
+    renderBrowserFrontPorchMassImportList();
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
+}
+
+function selectVisibleBrowserFrontPorchMassImportRows() {
+  visibleBrowserFrontPorchMassRows().forEach(row => {
+    const id = String(row?.id || '').trim();
+    if (id) browserFrontPorchMassSelectedIds.add(id);
+  });
+  renderBrowserFrontPorchMassImportList();
+}
+
+function clearBrowserFrontPorchMassImportSelection() {
+  browserFrontPorchMassSelectedIds = new Set();
+  renderBrowserFrontPorchMassImportList();
+}
+
+async function importSelectedBrowserFrontPorchMassRows() {
+  if (isInterfaceLocked()) return;
+  const ids = [...browserFrontPorchMassSelectedIds].filter(Boolean);
+  if (!ids.length) { setStatus('Select one or more Front Porch cards to import.', 'error'); return; }
+  const target = $('#browserFrontPorchMassTarget')?.value || 'stable';
+  const ok = confirm(`Import ${ids.length} ${frontPorchTargetLabel(target)} Front Porch card(s) into Character Browser?\n\nThis can take a while for large batches.`);
+  if (!ok) return;
+  settings = collectSettings();
+  setBusy(`IMPORTING ${ids.length} FRONT PORCH CARD(S)…`);
+  try {
+    const res = await window.pywebview.api.import_front_porch_characters_to_browser(ids, settings, target);
+    if (!res.ok) throw new Error(res.error || 'Mass import failed.');
+    await refreshCharacterBrowser(false);
+    browserFrontPorchMassSelectedIds = new Set();
+    await scanBrowserFrontPorchMassImport();
+    const failed = Array.isArray(res.failed) && res.failed.length ? ` ${res.failed.length} failed.` : '';
+    setStatus(`Imported ${res.imported || 0}/${ids.length} Front Porch card(s) into Character Browser.${failed}`, failed ? 'warn' : 'ok');
+  } catch (err) {
+    setStatus(err.message || String(err), 'error');
+  } finally {
+    setBusy('');
+  }
 }
 
 function openFrontPorchImportModal() {

@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Character Card Forge Mobile</title>
   <style>
-    :root{color-scheme:dark;--bg:#11131a;--card:#1b1f2b;--soft:#252b3a;--text:#f2f4ff;--muted:#a9b0c5;--accent:#8eb6ff;--danger:#ff8e9e;--ok:#9df0be}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(160deg,#0f1118,#171b26 55%,#1d2230);color:var(--text);min-height:100vh}main{max-width:780px;margin:0 auto;padding:18px}header{padding:8px 0 18px}h1{font-size:1.45rem;margin:0 0 6px}.subtitle{color:var(--muted);line-height:1.45}.card{background:rgba(27,31,43,.92);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:14px 0;box-shadow:0 16px 40px rgba(0,0,0,.28)}label{display:block;font-size:.92rem;color:var(--muted);margin:12px 0 6px}textarea,input{width:100%;border:1px solid rgba(255,255,255,.1);background:var(--soft);color:var(--text);border-radius:14px;padding:12px;font:inherit}textarea{min-height:220px;resize:vertical}button{border:0;border-radius:14px;padding:12px 16px;font-weight:700;background:var(--accent);color:#10131b;width:100%;margin-top:12px}button.secondary{background:#32394c;color:var(--text)}button:disabled{opacity:.55}.status{white-space:pre-wrap;color:var(--muted);font-size:.92rem}.ok{color:var(--ok)}.error{color:var(--danger)}details{margin-top:12px}summary{cursor:pointer;color:var(--accent);font-weight:700}pre{white-space:pre-wrap;word-break:break-word;background:#11141d;border-radius:14px;padding:12px;max-height:360px;overflow:auto}.small{font-size:.84rem;color:var(--muted)}a{color:var(--accent)}
+    :root{color-scheme:dark;--bg:#10131a;--card:#1b202c;--soft:#252c3b;--soft2:#30384c;--text:#f3f6ff;--muted:#a9b1c8;--accent:#8eb6ff;--danger:#ff8e9e;--ok:#9df0be;--warn:#ffd28e}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:linear-gradient(160deg,#0d1017,#171c27 55%,#1d2332);color:var(--text);min-height:100vh}main{max-width:900px;margin:0 auto;padding:16px}header{padding:8px 0 14px}h1{font-size:1.45rem;margin:0 0 6px}.subtitle{color:var(--muted);line-height:1.45}.card{background:rgba(27,32,44,.94);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:14px;margin:12px 0;box-shadow:0 16px 40px rgba(0,0,0,.28)}label{display:block;font-size:.92rem;color:var(--muted);margin:10px 0 6px}textarea,input,select{width:100%;border:1px solid rgba(255,255,255,.1);background:var(--soft);color:var(--text);border-radius:14px;padding:11px;font:inherit}textarea{min-height:150px;resize:vertical}button{border:0;border-radius:14px;padding:12px 14px;font-weight:750;background:var(--accent);color:#10131b;width:100%;margin-top:10px}button.secondary{background:#323a4f;color:var(--text)}button.danger{background:#4a2730;color:#ffdce2}button:disabled{opacity:.55}.status{white-space:pre-wrap;color:var(--muted);font-size:.92rem}.ok{color:var(--ok)}.error{color:var(--danger)}.warn{color:var(--warn)}details{margin-top:12px}summary{cursor:pointer;color:var(--accent);font-weight:700}pre{white-space:pre-wrap;word-break:break-word;background:#11141d;border-radius:14px;padding:12px;max-height:420px;overflow:auto}.small{font-size:.84rem;color:var(--muted)}a{color:var(--accent)}.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;position:sticky;top:0;background:rgba(14,17,24,.94);backdrop-filter:blur(12px);padding:8px 0;z-index:3}.tabs button{margin:0;padding:10px 8px;background:#293144;color:var(--text);font-size:.9rem}.tabs button.active{background:var(--accent);color:#10131b}.panel{display:none}.panel.active{display:block}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}.list{display:grid;gap:10px}.tile{display:grid;grid-template-columns:74px 1fr;gap:10px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:10px}.tile.selected{outline:2px solid var(--accent)}.thumb{width:74px;height:98px;border-radius:12px;background:#111722;display:flex;align-items:center;justify-content:center;overflow:hidden;color:var(--muted);font-size:.78rem;text-align:center}.thumb img{width:100%;height:100%;object-fit:cover}.tile h3{font-size:1rem;margin:0 0 4px}.meta{font-size:.8rem;color:var(--muted);line-height:1.35}.chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}.chip{font-size:.72rem;color:#dce7ff;background:#2c354b;border-radius:999px;padding:3px 7px}.toolbar{display:flex;gap:8px}.toolbar button{width:auto;flex:1}.hidden{display:none!important}@media(max-width:640px){main{padding:12px}.row,.row3{grid-template-columns:1fr}.tabs{grid-template-columns:repeat(2,1fr)}.tile{grid-template-columns:64px 1fr}.thumb{width:64px;height:86px}.toolbar{display:grid;grid-template-columns:1fr 1fr}}
   </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Character Card Forge Mobile</h1>
-    <div class="subtitle">Type a Main Concept, generate using the desktop app's current prompt template, then find the saved card in Character Browser when you get home.</div>
+    <div class="subtitle">Generate cards, browse your library, revise or vary existing cards, export downloads, and import Front Porch cards while the desktop app is running.</div>
   </header>
 
   <section class="card">
@@ -21,40 +21,108 @@
     <input id="accessCode" autocomplete="one-time-code" placeholder="Optional" />
   </section>
 
-  <section class="card">
-    <label for="concept">Main Concept</label>
-    <textarea id="concept" placeholder="Example: A confident university gyaru who works part-time at a cafe and has a hidden soft side..."></textarea>
-    <label for="note">Optional note for this mobile generation</label>
-    <input id="note" placeholder="Example: keep it wholesome, make the scenario workplace-focused, etc." />
-    <button id="generateBtn">Generate Card</button>
-    <button id="clearBtn" class="secondary">Clear</button>
+  <nav class="tabs">
+    <button data-tab="generate" class="active">Generate</button>
+    <button data-tab="browser">Browser</button>
+    <button data-tab="edit">Edit</button>
+    <button data-tab="frontporch">Front Porch</button>
+  </nav>
+
+  <section id="panel-generate" class="panel active">
+    <div class="card">
+      <label for="concept">Main Concept</label>
+      <textarea id="concept" placeholder="Example: A confident university gyaru who works part-time at a cafe and has a hidden soft side..."></textarea>
+      <label for="note">Optional note for this mobile generation</label>
+      <input id="note" placeholder="Example: keep it wholesome, make the scenario workplace-focused, etc." />
+      <button id="generateBtn">Generate Card</button>
+      <button id="clearBtn" class="secondary">Clear</button>
+    </div>
+  </section>
+
+  <section id="panel-browser" class="panel">
+    <div class="card">
+      <div class="toolbar"><button id="refreshLibraryBtn">Refresh Library</button><button id="loadSelectedBtn" class="secondary">Load Selected</button></div>
+      <label for="libraryFilter">Search name, description, tags</label>
+      <input id="libraryFilter" placeholder="Search Character Browser" />
+      <div id="libraryCount" class="small">No cards loaded.</div>
+    </div>
+    <div id="libraryList" class="list"></div>
+  </section>
+
+  <section id="panel-edit" class="panel">
+    <div class="card">
+      <div id="selectedInfo" class="status">Select a card in Browser first.</div>
+      <div class="toolbar"><button id="exportPngBtn" class="secondary">Export PNG</button><button id="exportJsonBtn" class="secondary">Export JSON</button></div>
+      <label for="mobileRevisionText">Follow-up Revision</label>
+      <textarea id="mobileRevisionText" placeholder="Example: make the first message warmer and add two alternative greetings."></textarea>
+      <button id="reviseSelectedBtn">Revise Selected Card</button>
+      <label for="mobileVariationText">Make New Variation</label>
+      <textarea id="mobileVariationText" placeholder="Example: Variation Name: Yuki Married Route&#10;&#10;Time Passed: 2 years later&#10;Relationship to {{user}}: married"></textarea>
+      <button id="variationSelectedBtn">Create Variation</button>
+    </div>
+  </section>
+
+  <section id="panel-frontporch" class="panel">
+    <div class="card">
+      <div class="row">
+        <label>Target<select id="fpTarget"><option value="stable">Stable Front Porch</option><option value="beta">Beta Front Porch</option></select></label>
+        <label>View<select id="fpView"><option value="new">New cards only</option><option value="all">Show all cards</option></select></label>
+      </div>
+      <label for="fpFilter">Filter Front Porch cards</label>
+      <input id="fpFilter" placeholder="Name, tag, id" />
+      <p class="small warn">Importing a lot of cards can take a while. Keep this page open until it finishes.</p>
+      <div class="toolbar"><button id="scanFpBtn">Scan Front Porch</button><button id="importFpBtn" class="secondary">Import Selected</button></div>
+      <div id="fpCount" class="small">No Front Porch scan yet.</div>
+    </div>
+    <div id="fpList" class="list"></div>
   </section>
 
   <section class="card">
-    <div id="result" class="status">No mobile generation yet.</div>
-    <details id="outputDetails" hidden>
-      <summary>Output preview</summary>
-      <pre id="outputPreview"></pre>
-    </details>
-    <details id="qaDetails" hidden>
-      <summary>Q&A preview</summary>
-      <pre id="qaPreview"></pre>
-    </details>
+    <div id="result" class="status">No mobile action yet.</div>
+    <details id="outputDetails" hidden><summary>Output preview</summary><pre id="outputPreview"></pre></details>
+    <details id="qaDetails" hidden><summary>Q&A preview</summary><pre id="qaPreview"></pre></details>
   </section>
 </main>
 <script>
 const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
 const tokenFromUrl = new URLSearchParams(location.search).get('token') || '';
-if (tokenFromUrl) { localStorage.setItem('ccfMobileToken', tokenFromUrl); }
+if (tokenFromUrl) localStorage.setItem('ccfMobileToken', tokenFromUrl);
 $('#accessCode').value = tokenFromUrl || localStorage.getItem('ccfMobileToken') || '';
+let libraryCards = [], selectedProjectPath = '', fpCards = [], selectedFpIds = new Set();
 function token(){ const v=$('#accessCode').value.trim(); if(v) localStorage.setItem('ccfMobileToken', v); return v; }
 function setResult(text, cls=''){ const el=$('#result'); el.className='status '+cls; el.textContent=text; }
+function setPreview(output='', qa=''){ $('#outputPreview').textContent=output||''; $('#qaPreview').textContent=qa||''; $('#outputDetails').hidden=!output; $('#qaDetails').hidden=!qa; }
 async function api(path, opts={}){ const headers={...(opts.headers||{})}; const t=token(); if(t) headers['X-CCF-Mobile-Token']=t; const res=await fetch(path,{...opts,headers}); const data=await res.json().catch(()=>({ok:false,error:'Invalid server response'})); if(!res.ok && data.ok!==true) throw new Error(data.error||res.statusText); return data; }
-async function refreshStatus(){ try{ const s=await api('/api/status'); $('#serverStatus').innerHTML = `${s.running?'Running':'Stopped'} on port ${s.port||''}${s.authRequired?' — access code required':''}<br><span class="small">Keep the desktop app open while generating.</span>`; }catch(e){ $('#serverStatus').textContent='Status check failed: '+(e.message||e); } }
-$('#generateBtn').addEventListener('click', async()=>{ const concept=$('#concept').value.trim(); if(!concept){ setResult('Enter a Main Concept first.','error'); return; } $('#generateBtn').disabled=true; setResult('Generating… keep this page open. This can take a while depending on your model.'); $('#outputDetails').hidden=true; $('#qaDetails').hidden=true; try{ const data=await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({concept,note:$('#note').value.trim()})}); setResult(`Saved: ${data.name||'Character'}\nProject: ${data.projectPath||''}`,'ok'); $('#outputPreview').textContent=data.outputPreview||''; $('#qaPreview').textContent=data.qaPreview||''; $('#outputDetails').hidden=!data.outputPreview; $('#qaDetails').hidden=!data.qaPreview; }catch(e){ setResult(e.message||String(e),'error'); }finally{ $('#generateBtn').disabled=false; }});
-$('#clearBtn').addEventListener('click',()=>{ $('#concept').value=''; $('#note').value=''; setResult('Cleared.'); $('#outputDetails').hidden=true; $('#qaDetails').hidden=true; });
-$('#accessCode').addEventListener('input', refreshStatus);
-refreshStatus();
+async function post(path, body){ return api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); }
+function switchTab(name){ $$('.tabs button').forEach(b=>b.classList.toggle('active', b.dataset.tab===name)); $$('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name)); }
+$$('.tabs button').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
+async function refreshStatus(){ try{ const s=await api('/api/status'); $('#serverStatus').innerHTML = `${s.running?'Running':'Stopped'} on port ${s.port||''}${s.authRequired?' — access code required':''}<br><span class="small">Keep the desktop app open while using mobile tools.</span>`; }catch(e){ $('#serverStatus').textContent='Status check failed: '+(e.message||e); } }
+function cardMatches(c,q){ q=(q||'').toLowerCase().trim(); if(!q) return true; return [c.name,c.browserDescription,(c.tags||[]).join(' ')].join(' ').toLowerCase().includes(q); }
+function renderLibrary(){ const q=$('#libraryFilter').value; const shown=libraryCards.filter(c=>cardMatches(c,q)); $('#libraryCount').textContent=`${shown.length}/${libraryCards.length} card(s)`; $('#libraryList').innerHTML=shown.map(c=>`<div class="tile ${c.projectPath===selectedProjectPath?'selected':''}" data-project="${encodeURIComponent(c.projectPath)}"><div class="thumb">${c.thumbnail?`<img src="${c.thumbnail}" alt="">`:'No Image'}</div><div><h3>${escapeHtml(c.name||'Unnamed')}</h3><div class="meta">${escapeHtml(c.updated||'')} ${c.tokenTotal?`• ${c.tokenTotal} tokens`:''}</div><div class="meta">${escapeHtml((c.browserDescription||'').slice(0,180))}</div><div class="chips">${(c.tags||[]).slice(0,8).map(t=>`<span class="chip">${escapeHtml(t)}</span>`).join('')}</div></div></div>`).join(''); $$('#libraryList .tile').forEach(el=>el.addEventListener('click',()=>{ selectedProjectPath=decodeURIComponent(el.dataset.project||''); renderLibrary(); updateSelectedInfo(); })); }
+function updateSelectedInfo(name=''){ const c=libraryCards.find(x=>x.projectPath===selectedProjectPath); $('#selectedInfo').textContent=c?`Selected: ${c.name}\n${c.projectPath}`:'Select a card in Browser first.'; }
+async function refreshLibrary(){ setResult('Loading Character Browser…'); const data=await api('/api/library'); libraryCards=data.cards||[]; renderLibrary(); setResult(`Loaded ${libraryCards.length} cards.`, 'ok'); }
+async function loadSelected(){ if(!selectedProjectPath){setResult('Select a card first.','error');return;} setResult('Loading selected card…'); const data=await post('/api/load_project',{projectPath:selectedProjectPath}); setResult(`Loaded: ${data.name}`,'ok'); setPreview(data.outputPreview||'', data.qaPreview||''); switchTab('edit'); updateSelectedInfo(data.name); }
+async function reviseSelected(){ if(!selectedProjectPath){setResult('Select a card first.','error');return;} const instructions=$('#mobileRevisionText').value.trim(); if(!instructions){setResult('Enter revision instructions first.','error');return;} setResult('Revising selected card… keep this page open.'); const data=await post('/api/revise_project',{projectPath:selectedProjectPath,instructions}); setResult(`Revision saved: ${data.name}`,'ok'); setPreview(data.outputPreview||'',''); await refreshLibrary(); }
+async function variationSelected(){ if(!selectedProjectPath){setResult('Select a card first.','error');return;} const instructions=$('#mobileVariationText').value.trim(); if(!instructions){setResult('Enter variation instructions first.','error');return;} setResult('Creating variation… keep this page open.'); const data=await post('/api/variation',{projectPath:selectedProjectPath,instructions}); selectedProjectPath=data.projectPath||selectedProjectPath; setResult(`Variation saved: ${data.name}`,'ok'); setPreview(data.outputPreview||'',''); await refreshLibrary(); switchTab('edit'); }
+async function exportSelected(format){ if(!selectedProjectPath){setResult('Select a card first.','error');return;} setResult('Exporting…'); const data=await post('/api/export',{projectPath:selectedProjectPath,format}); setResult(`Exported: ${data.path}`,'ok'); if(data.downloadUrl){ const a=document.createElement('a'); a.href=data.downloadUrl; a.textContent='Download export'; a.target='_blank'; $('#result').append('\n'); $('#result').appendChild(a); } }
+function fpMatches(c,q){ q=(q||'').toLowerCase().trim(); if(!q) return true; return [c.name,c.id,(c.tags||[]).join(' ')].join(' ').toLowerCase().includes(q); }
+function renderFp(){ const q=$('#fpFilter').value; const newOnly=$('#fpView').value==='new'; const shown=fpCards.filter(c=>(!newOnly||!c.alreadyInCcf)&&fpMatches(c,q)); $('#fpCount').textContent=`${shown.length}/${fpCards.length} Front Porch card(s)`; $('#fpList').innerHTML=shown.map(c=>`<div class="tile ${selectedFpIds.has(c.id)?'selected':''}" data-id="${escapeHtml(c.id)}"><div class="thumb">${c.hasImage?'Image':'No Image'}</div><div><h3>${escapeHtml(c.name||'Unnamed')}</h3><div class="meta">${escapeHtml(c.targetLabel||'')} ${c.alreadyInCcf?'• already in CCF':''} ${c.possibleNameMatch?'• same-name match':''}</div><div class="meta">sessions ${c.sessionCount||0} • avatars ${c.avatarCount||0} • groups ${c.groupReferenceCount||0}</div><div class="chips">${(c.tags||[]).slice(0,8).map(t=>`<span class="chip">${escapeHtml(t)}</span>`).join('')}</div></div></div>`).join(''); $$('#fpList .tile').forEach(el=>el.addEventListener('click',()=>{ const id=el.dataset.id||''; if(selectedFpIds.has(id)) selectedFpIds.delete(id); else selectedFpIds.add(id); renderFp(); })); }
+async function scanFp(){ setResult('Scanning Front Porch…'); selectedFpIds=new Set(); const target=$('#fpTarget').value; const data=await api('/api/front_porch/list?target='+encodeURIComponent(target)); fpCards=data.characters||[]; renderFp(); setResult(`Scanned ${fpCards.length} ${data.targetLabel||target} Front Porch cards.`, 'ok'); }
+async function importFp(){ const ids=[...selectedFpIds]; if(!ids.length){setResult('Select one or more Front Porch cards first.','error');return;} setResult(`Importing ${ids.length} card(s)… this can take a while.`); const data=await post('/api/front_porch/import',{target:$('#fpTarget').value,characterIds:ids}); setResult(`Imported ${data.imported?.length||0}/${data.requested||ids.length}. Failed: ${data.failed?.length||0}`,(data.failed&&data.failed.length)?'warn':'ok'); selectedFpIds=new Set(); await refreshLibrary(); }
+function escapeHtml(s){ return String(s||'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])); }
+$('#generateBtn').addEventListener('click', async()=>{ const concept=$('#concept').value.trim(); if(!concept){ setResult('Enter a Main Concept first.','error'); return; } $('#generateBtn').disabled=true; setResult('Generating… keep this page open.'); setPreview(); try{ const data=await post('/api/generate',{concept,note:$('#note').value.trim()}); selectedProjectPath=data.projectPath||''; setResult(`Saved: ${data.name||'Character'}\nProject: ${data.projectPath||''}`,'ok'); setPreview(data.outputPreview||'',data.qaPreview||''); await refreshLibrary(); }catch(e){ setResult(e.message||String(e),'error'); }finally{ $('#generateBtn').disabled=false; }});
+$('#clearBtn').addEventListener('click',()=>{ $('#concept').value=''; $('#note').value=''; setResult('Cleared.'); setPreview(); });
+$('#refreshLibraryBtn').addEventListener('click',()=>refreshLibrary().catch(e=>setResult(e.message||String(e),'error')));
+$('#loadSelectedBtn').addEventListener('click',()=>loadSelected().catch(e=>setResult(e.message||String(e),'error')));
+$('#reviseSelectedBtn').addEventListener('click',()=>reviseSelected().catch(e=>setResult(e.message||String(e),'error')));
+$('#variationSelectedBtn').addEventListener('click',()=>variationSelected().catch(e=>setResult(e.message||String(e),'error')));
+$('#exportPngBtn').addEventListener('click',()=>exportSelected('chara_v2_png').catch(e=>setResult(e.message||String(e),'error')));
+$('#exportJsonBtn').addEventListener('click',()=>exportSelected('chara_v2_json').catch(e=>setResult(e.message||String(e),'error')));
+$('#scanFpBtn').addEventListener('click',()=>scanFp().catch(e=>setResult(e.message||String(e),'error')));
+$('#importFpBtn').addEventListener('click',()=>importFp().catch(e=>setResult(e.message||String(e),'error')));
+$('#libraryFilter').addEventListener('input',renderLibrary); $('#fpFilter').addEventListener('input',renderFp); $('#fpView').addEventListener('change',renderFp); $('#accessCode').addEventListener('input',()=>{ refreshStatus(); });
+refreshStatus(); refreshLibrary().catch(()=>{});
 </script>
 </body>
 </html>

@@ -61,7 +61,7 @@ def _safe_urlopen(req, *args, **kwargs):
     return urllib.request.urlopen(req, *args, **kwargs)
 
 import webview
-from PIL import Image
+from PIL import Image, ImageSequence
 from PIL.PngImagePlugin import PngInfo
 
 APP_NAME = "Character Card Forge"
@@ -302,8 +302,10 @@ LOG_FILE = DATA_DIR / "debug.log"
 LIBRARY_DB_FILE = DATA_DIR / "character_library.sqlite3"
 
 CARD_IMAGES_DIR = DATA_DIR / "card_images"
+BROWSER_WEBP_IMAGES_DIR = CARD_IMAGES_DIR / "webp"
 GENERATED_IMAGES_DIR = CARD_IMAGES_DIR / "generated"
 VISION_IMAGES_DIR = DATA_DIR / "vision_images"
+VISION_GIF_FRAMES_DIR = VISION_IMAGES_DIR / "gif_frames"
 CONCEPT_ATTACHMENTS_DIR = DATA_DIR / "concept_attachments"
 IMPORT_UPLOADS_DIR = DATA_DIR / "import_uploads"
 CHARACTER_LIBRARY_DIR = EXPORT_DIR
@@ -314,8 +316,10 @@ for _dir in (
     TEMPLATES_DIR,
     EXPORT_DIR,
     CARD_IMAGES_DIR,
+    BROWSER_WEBP_IMAGES_DIR,
     GENERATED_IMAGES_DIR,
     VISION_IMAGES_DIR,
+    VISION_GIF_FRAMES_DIR,
     CONCEPT_ATTACHMENTS_DIR,
     IMPORT_UPLOADS_DIR,
 ):
@@ -1538,15 +1542,16 @@ class Api:
                     and int(extra_fast.get("tokenBreakdownVersion") or 0) >= 3
                 )
                 thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
-                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 7
-                if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok and thumb_ok:
+                preview_cache_ok = self._browser_preview_cache_exists_for_project(path)
+                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 10
+                if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok and thumb_ok and preview_cache_ok:
                     return self._browser_card_from_db_row(row)
             except Exception:
                 pass
         project_hash = self._hash_file(path)
         if row and not force and str(row.get("project_hash") or "") == project_hash:
             # Older cache rows may not have stat metadata. Fall back to file hashes once,
-            # then refresh/upsert with browserIndexVersion 7 for future instant loads.
+            # then refresh/upsert with browserIndexVersion 10 for future instant loads.
             card_png_path = str(row.get("card_png_path") or "")
             image_path = str(row.get("image_path") or "")
             card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
@@ -1565,11 +1570,12 @@ class Api:
             needs_browser_index_refresh = True
             try:
                 extra_for_index = json.loads(row.get("metadata_json") or "{}")
-                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 7
+                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 10
             except Exception:
                 needs_browser_index_refresh = True
             thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
-            if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh and thumb_ok:
+            preview_cache_ok = self._browser_preview_cache_exists_for_project(path)
+            if card_hash_ok and image_hash_ok and not needs_token_counts and not needs_browser_index_refresh and thumb_ok and preview_cache_ok:
                 return self._browser_card_from_db_row(row)
 
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1582,18 +1588,52 @@ class Api:
         concept = project.get("concept") or ""
         image_path = project.get("imagePath") or project.get("cardImagePath") or workspace.get("cardImagePath") or ""
         resolved_image_path = self._ensure_local_card_image_path(image_path, "card", "browser_cache_project_image") if image_path else ""
-        if not resolved_image_path:
-            try:
-                resolved_image_path = self._front_porch_project_image_from_assets(path, image_path, "browser_cache_asset_image")
-            except Exception:
-                resolved_image_path = ""
+        asset_image_path = ""
+        json_image_path = ""
+        try:
+            asset_image_path = self._front_porch_project_image_from_assets(path, image_path, "browser_cache_asset_image")
+        except Exception:
+            asset_image_path = ""
+        try:
+            json_image_path = self._front_porch_project_image_from_json(path, image_path, "browser_cache_project_json_image")
+        except Exception:
+            json_image_path = ""
         if resolved_image_path:
             image_path = resolved_image_path
+        elif asset_image_path:
+            image_path = asset_image_path
+        elif json_image_path:
+            image_path = json_image_path
         card_png = self._latest_card_png_for_folder(folder, name)
-        # Prefer the selected card image for the Browser thumbnail. If an older
-        # autosaved card PNG was created with a blank fallback, the selected image
-        # from the workspace asset DB is still the source of truth.
-        thumb_source = image_path or (str(card_png) if card_png else "")
+        # Prefer the selected card image for the Browser thumbnail, but fall back
+        # through every durable place the image can live. Front Porch mass imports
+        # can restore the image in Quick Save / Image from workspace_assets or
+        # project JSON even when the first imagePath is not directly readable.
+        thumb_candidates = []
+        def add_thumb_candidate(value):
+            text = str(value or "").strip()
+            if text and text not in thumb_candidates:
+                thumb_candidates.append(text)
+        for value in (image_path, resolved_image_path, asset_image_path, json_image_path):
+            add_thumb_candidate(value)
+        for obj in (project, workspace, project.get("settings") if isinstance(project.get("settings"), dict) else {}, workspace.get("settings") if isinstance(workspace.get("settings"), dict) else {}):
+            if not isinstance(obj, dict):
+                continue
+            for key in ("imageDataUrl", "cardImageDataUrl", "cardImagePath", "imagePath", "exportedPath", "cardPath", "cardPngPath"):
+                add_thumb_candidate(obj.get(key))
+        tabs_for_thumb = project.get("characterTabs") or workspace.get("characterTabs") or []
+        if isinstance(tabs_for_thumb, list):
+            for tab in tabs_for_thumb:
+                if not isinstance(tab, dict):
+                    continue
+                for key in ("imageDataUrl", "cardImageDataUrl", "cardImagePath", "imagePath"):
+                    add_thumb_candidate(tab.get(key))
+        if row:
+            add_thumb_candidate(row.get("thumbnail_data_url") or "")
+            add_thumb_candidate(row.get("image_path") or "")
+        if card_png:
+            add_thumb_candidate(str(card_png))
+        thumb_source = next((str(x or "").strip() for x in thumb_candidates if str(x or "").strip()), "")
         browser_description = str(project.get("browserDescription") or "").strip()
         browser_description_source = str(project.get("browserDescriptionSource") or "").strip().lower()
         if browser_description:
@@ -1609,7 +1649,7 @@ class Api:
         if not tags:
             tags = self._extract_tags_from_output(output, project.get("template") or self.template)
         token_counts = self._card_browser_token_counts(output)
-        browser_thumb = self._browser_preview_reference(thumb_source or image_path, folder)
+        browser_thumb = self._browser_preview_reference_from_candidates(thumb_candidates, folder)
         old_assignment = self._get_virtual_folder_assignment(path, folder, name, project.get("virtualFolderId") or "")
         if row:
             virtual_folder_id = self._library_upsert_card(path, folder, name, None, path.stat().st_mtime, {
@@ -1619,7 +1659,7 @@ class Api:
                 "cardPngHash": self._hash_file(card_png) if card_png else "",
                 "imagePath": str(image_path or ""),
                 "imageHash": self._hash_file(image_path) if image_path else "",
-                "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
+                "thumbnail": browser_thumb or self._image_data_url(str(card_png) if card_png else thumb_source),
                 "browserDescription": browser_description,
                 "browserDescriptionSource": browser_description_source,
                 "tags": tags,
@@ -1634,7 +1674,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 7,
+                    "browserIndexVersion": 10,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1654,7 +1694,7 @@ class Api:
                 "cardPngHash": self._hash_file(card_png) if card_png else "",
                 "imagePath": str(image_path or ""),
                 "imageHash": self._hash_file(image_path) if image_path else "",
-                "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
+                "thumbnail": browser_thumb or self._image_data_url(str(card_png) if card_png else thumb_source),
                 "browserDescription": browser_description,
                 "browserDescriptionSource": browser_description_source,
                 "tags": tags,
@@ -1669,7 +1709,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 7,
+                    "browserIndexVersion": 10,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1695,7 +1735,7 @@ class Api:
                     "cardPngHash": self._hash_file(card_png) if card_png else "",
                     "imagePath": str(image_path or ""),
                     "imageHash": self._hash_file(image_path) if image_path else "",
-                    "thumbnail": browser_thumb or self._image_data_url(thumb_source or image_path),
+                    "thumbnail": browser_thumb or self._image_data_url(str(card_png) if card_png else thumb_source),
                     "browserDescription": browser_description,
                     "browserDescriptionSource": browser_description_source,
                     "tags": tags,
@@ -1710,7 +1750,7 @@ class Api:
                     "tokenTotal": int(token_counts.get("total") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
                     "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 7,
+                    "browserIndexVersion": 10,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -4050,6 +4090,181 @@ class Api:
             except Exception:
                 pass
 
+    def _mobile_card_summary(self, card):
+        if not isinstance(card, dict):
+            return {}
+        return {
+            "name": card.get("name") or "Unknown Card",
+            "projectPath": card.get("projectPath") or "",
+            "folder": card.get("folder") or "",
+            "updated": card.get("updated") or "",
+            "thumbnail": card.get("thumbnail") or "",
+            "browserDescription": card.get("browserDescription") or card.get("outputPreview") or "",
+            "tags": card.get("tags") if isinstance(card.get("tags"), list) else [],
+            "hasEmotionImages": bool(card.get("hasEmotionImages")),
+            "isGroupCard": bool(card.get("isGroupCard")),
+            "tokenTotal": int(card.get("tokenTotal") or 0),
+            "virtualFolderId": card.get("virtualFolderId") or "",
+        }
+
+    def _mobile_character_library(self):
+        res = self.list_character_library()
+        if not res.get("ok"):
+            return res
+        cards = [self._mobile_card_summary(c) for c in (res.get("cards") or [])]
+        return {"ok": True, "cards": cards, "folders": res.get("folders") or [], "count": len(cards)}
+
+    def _mobile_project_path(self, project_path):
+        try:
+            path = Path(str(project_path or "")).resolve()
+            path.relative_to(EXPORT_DIR.resolve())
+            if not path.exists() or not path.is_file():
+                raise ValueError("Project not found.")
+            return path
+        except Exception:
+            raise ValueError("Project path is not a saved Character Card Forge project.")
+
+    def _mobile_file_download_path(self, raw_path):
+        path = Path(str(raw_path or "")).resolve()
+        allowed_roots = [EXPORT_DIR.resolve(), DATA_DIR.resolve()]
+        if not path.exists() or not path.is_file():
+            raise ValueError("File not found.")
+        for root in allowed_roots:
+            try:
+                path.relative_to(root)
+                return path
+            except Exception:
+                pass
+        raise ValueError("File is outside the mobile download allow-list.")
+
+    def _mobile_loaded_project_payload(self, project_path):
+        path = self._mobile_project_path(project_path)
+        loaded = self.load_character_project(str(path))
+        if not loaded.get("ok"):
+            return loaded
+        output = str(loaded.get("output") or "")
+        qa = str(loaded.get("qnaAnswers") or loaded.get("qaAnswers") or "")
+        return {
+            "ok": True,
+            "name": loaded.get("name") or self._extract_name(output) or path.parent.name,
+            "projectPath": str(path),
+            "concept": loaded.get("concept") or "",
+            "output": output,
+            "outputPreview": output[:12000],
+            "qaPreview": qa[:6000],
+            "imagePath": loaded.get("imagePath") or loaded.get("cardImagePath") or "",
+            "thumbnail": self._image_data_url(loaded.get("imagePath") or loaded.get("cardImagePath") or loaded.get("imageDataUrl") or "", max_size=(360, 480)),
+        }
+
+    def _mobile_revise_project(self, project_path, instructions):
+        instructions = str(instructions or "").strip()
+        if not instructions:
+            return {"ok": False, "error": "Enter revision instructions first."}
+        if not self._mobile_generation_lock.acquire(blocking=False):
+            return {"ok": False, "error": "Another mobile AI task is already running. Wait for it to finish first."}
+        old_settings = dict(self.settings or {})
+        try:
+            path = self._mobile_project_path(project_path)
+            loaded = self.load_character_project(str(path))
+            if not loaded.get("ok"):
+                return loaded
+            output = str(loaded.get("output") or "").strip()
+            if not output:
+                return {"ok": False, "error": "Selected card has no output text to revise."}
+            concept = loaded.get("concept") or ""
+            template = loaded.get("template") or self.template
+            local_settings = self._normalise_settings({**old_settings, **(loaded.get("settings") if isinstance(loaded.get("settings"), dict) else {})})
+            prompt = "Revise the current card using these mobile instructions. Return the complete updated card only, not commentary.\n\n" + instructions
+            revised = self.revise_card(output, prompt, concept, template, local_settings)
+            if not revised.get("ok"):
+                return revised
+            new_output = str(revised.get("output") or "").strip()
+            loaded["output"] = new_output
+            loaded["name"] = self._extract_name(new_output) or loaded.get("name") or path.parent.name
+            loaded["template"] = template
+            loaded["settings"] = local_settings
+            tabs = loaded.get("characterTabs") if isinstance(loaded.get("characterTabs"), list) else []
+            if tabs and isinstance(tabs[0], dict):
+                tabs[0]["output"] = new_output
+                tabs[0]["fullTextOutput"] = new_output
+                tabs[0]["name"] = loaded["name"]
+                tabs[0]["focusName"] = loaded["name"]
+            else:
+                tabs = [{"name": loaded["name"], "focusName": loaded["name"], "output": new_output, "fullTextOutput": new_output, "cardImagePath": loaded.get("cardImagePath") or loaded.get("imagePath") or ""}]
+            loaded["characterTabs"] = tabs
+            saved = self.save_character_workspace(loaded)
+            if not saved.get("ok"):
+                return saved
+            return {"ok": True, "name": saved.get("name") or loaded["name"], "projectPath": saved.get("projectPath") or str(path), "outputPreview": new_output[:6000], "message": "Mobile revision saved."}
+        finally:
+            self.settings = self._normalise_settings(old_settings)
+            self._save_json(SETTINGS_FILE, self.settings)
+            try:
+                self._mobile_generation_lock.release()
+            except Exception:
+                pass
+
+    def _mobile_create_variation(self, project_path, instructions):
+        instructions = str(instructions or "").strip()
+        if not instructions:
+            return {"ok": False, "error": "Enter variation instructions first."}
+        if not self._mobile_generation_lock.acquire(blocking=False):
+            return {"ok": False, "error": "Another mobile AI task is already running. Wait for it to finish first."}
+        old_settings = dict(self.settings or {})
+        try:
+            path = self._mobile_project_path(project_path)
+            res = self.create_card_variation_from_project(str(path), instructions, old_settings)
+            if not res.get("ok"):
+                return res
+            return {"ok": True, "name": res.get("name") or "Variation", "projectPath": res.get("projectPath") or "", "outputPreview": str(res.get("output") or "")[:6000], "message": "Mobile variation saved."}
+        finally:
+            self.settings = self._normalise_settings(old_settings)
+            self._save_json(SETTINGS_FILE, self.settings)
+            try:
+                self._mobile_generation_lock.release()
+            except Exception:
+                pass
+
+    def _mobile_export_project(self, project_path, export_format="chara_v2_png"):
+        path = self._mobile_project_path(project_path)
+        fmt = str(export_format or "chara_v2_png").strip() or "chara_v2_png"
+        if fmt not in {"chara_v2_png", "chara_v2_json", "markdown"}:
+            fmt = "chara_v2_png"
+        res = self.export_character_from_project(str(path), fmt)
+        if not res.get("ok"):
+            return res
+        exported = str(res.get("path") or "")
+        download = "/api/download?path=" + urllib.parse.quote(exported) if exported else ""
+        return {"ok": True, "name": res.get("name") or path.parent.name, "path": exported, "downloadUrl": download, "exportFormat": res.get("exportFormat") or fmt}
+
+    def _mobile_list_front_porch(self, target="stable"):
+        res = self.list_front_porch_characters(self.settings, target)
+        if not res.get("ok"):
+            return res
+        characters = []
+        for c in res.get("characters") or []:
+            if not isinstance(c, dict):
+                continue
+            tags = c.get("tagsList") if isinstance(c.get("tagsList"), list) else []
+            characters.append({
+                "id": str(c.get("id") or ""),
+                "name": c.get("name") or "Unnamed",
+                "target": c.get("target") or target,
+                "targetLabel": c.get("targetLabel") or ("Beta" if target == "beta" else "Stable"),
+                "tags": tags,
+                "alreadyInCcf": bool(c.get("alreadyInCcf") or c.get("ccfImported") or c.get("ccfLinked")),
+                "possibleNameMatch": bool(c.get("possibleNameMatch")),
+                "hasImage": bool(c.get("imageFile")),
+                "sessionCount": int(c.get("sessionCount") or 0),
+                "avatarCount": int(c.get("avatarCount") or 0),
+                "groupReferenceCount": int(c.get("groupReferenceCount") or 0),
+            })
+        return {"ok": True, "target": res.get("target") or target, "targetLabel": res.get("targetLabel") or target.title(), "count": len(characters), "characters": characters}
+
+    def _mobile_import_front_porch(self, character_ids, target="stable"):
+        ids = character_ids if isinstance(character_ids, list) else [character_ids]
+        return self.import_front_porch_characters_to_browser(ids, self.settings, target)
+
     def _mobile_make_handler(self):
         api = self
 
@@ -4068,6 +4283,7 @@ class Api:
             def do_GET(self):
                 parsed = urllib.parse.urlparse(self.path)
                 path = parsed.path or "/"
+                query = urllib.parse.parse_qs(parsed.query or "")
                 if path in {"/", "/mobile.html"}:
                     api._mobile_send_file(self, APP_DIR / "frontend" / "mobile.html", "text/html; charset=utf-8")
                     return
@@ -4077,19 +4293,58 @@ class Api:
                     status["authenticated"] = api._mobile_server_auth_ok(self)
                     api._mobile_send_json(self, status)
                     return
+                if not api._mobile_server_auth_ok(self):
+                    api._mobile_send_json(self, {"ok": False, "error": "Invalid or missing mobile access code."}, 401)
+                    return
+                try:
+                    if path == "/api/library":
+                        api._mobile_send_json(self, api._mobile_character_library())
+                        return
+                    if path == "/api/front_porch/list":
+                        target = str((query.get("target") or ["stable"])[0] or "stable").strip().lower()
+                        api._mobile_send_json(self, api._mobile_list_front_porch(target))
+                        return
+                    if path == "/api/download":
+                        raw_path = str((query.get("path") or [""])[0] or "")
+                        file_path = api._mobile_file_download_path(raw_path)
+                        ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+                        data = file_path.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Disposition", f'attachment; filename="{file_path.name}"')
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                except Exception as e:
+                    api._mobile_send_json(self, {"ok": False, "error": str(e)}, 500)
+                    return
                 api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
 
             def do_POST(self):
                 parsed = urllib.parse.urlparse(self.path)
-                if parsed.path != "/api/generate":
-                    api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
-                    return
+                path = parsed.path or ""
                 if not api._mobile_server_auth_ok(self):
                     api._mobile_send_json(self, {"ok": False, "error": "Invalid or missing mobile access code."}, 401)
                     return
                 try:
                     payload = api._mobile_read_json(self)
-                    res = api._mobile_generate_character(payload.get("concept") or "", payload.get("note") or "")
+                    if path == "/api/generate":
+                        res = api._mobile_generate_character(payload.get("concept") or "", payload.get("note") or "")
+                    elif path == "/api/load_project":
+                        res = api._mobile_loaded_project_payload(payload.get("projectPath") or "")
+                    elif path == "/api/revise_project":
+                        res = api._mobile_revise_project(payload.get("projectPath") or "", payload.get("instructions") or "")
+                    elif path == "/api/variation":
+                        res = api._mobile_create_variation(payload.get("projectPath") or "", payload.get("instructions") or "")
+                    elif path == "/api/export":
+                        res = api._mobile_export_project(payload.get("projectPath") or "", payload.get("format") or "chara_v2_png")
+                    elif path == "/api/front_porch/import":
+                        res = api._mobile_import_front_porch(payload.get("characterIds") or [], payload.get("target") or "stable")
+                    else:
+                        api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
+                        return
                     api._mobile_send_json(self, res, 200 if res.get("ok") else 400)
                 except Exception as e:
                     api._mobile_send_json(self, {"ok": False, "error": str(e)}, 500)
@@ -6108,12 +6363,13 @@ class Api:
             "image/jpeg": ".jpg",
             "image/jpg": ".jpg",
             "image/webp": ".webp",
+            "image/gif": ".gif",
         }
         if mime in mapping:
             return mapping[mime]
         if kind == "image" and mime.startswith("image/"):
             ext = "." + mime.split("/", 1)[1].replace("jpeg", "jpg")
-            return ext if ext in {".png", ".jpg", ".jpeg", ".webp"} else ""
+            return ext if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"} else ""
         return ""
 
     def _safe_name_with_extension(self, filename, fallback, data_url=None, kind="attachment"):
@@ -6212,6 +6468,7 @@ class Api:
 
         filters = {
             "image": "Images (*.png *.jpg *.jpeg *.webp)",
+            "vision_image": "Images / Animated GIFs (*.png *.jpg *.jpeg *.webp *.gif)",
             "saved": "Character Cards / Projects (*.json *.png *.md *.txt)",
             "card": "Character Cards / Projects (*.json *.png *.md *.txt)",
             "attachment": "Documents (*.txt *.srt *.vtt *.md *.pdf)",
@@ -6229,6 +6486,7 @@ class Api:
         if shutil.which("zenity"):
             zfilters = {
                 "image": "Images | *.png *.jpg *.jpeg *.webp",
+                "vision_image": "Images / Animated GIFs | *.png *.jpg *.jpeg *.webp *.gif",
                 "saved": "Character Cards / Projects | *.json *.png *.md *.txt",
                 "card": "Character Cards / Projects | *.json *.png *.md *.txt",
                 "attachment": "Documents | *.txt *.srt *.vtt *.md *.pdf",
@@ -6251,8 +6509,11 @@ class Api:
         if not src.exists():
             return {"ok": False, "error": f"Image not found: {src}"}
         suffix = src.suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-            return {"ok": False, "error": "Please select a PNG, JPG, JPEG, or WebP image."}
+        allowed = {".png", ".jpg", ".jpeg", ".webp"}
+        if str(kind).lower() == "vision":
+            allowed = allowed | {".gif"}
+        if suffix not in allowed:
+            return {"ok": False, "error": "Please select a PNG, JPG, JPEG, WebP, or animated GIF image." if str(kind).lower() == "vision" else "Please select a PNG, JPG, JPEG, or WebP image."}
         try:
             with Image.open(src) as img:
                 img.verify()
@@ -6265,7 +6526,7 @@ class Api:
 
     def pick_image_file(self, kind="card"):
         try:
-            paths = self._run_modern_file_dialog("Select Vision Image" if kind == "vision" else "Select Card Image", "image", False)
+            paths = self._run_modern_file_dialog("Select Vision Image" if kind == "vision" else "Select Card Image", "vision_image" if str(kind).lower() == "vision" else "image", False)
             if not paths:
                 return {"ok": False, "cancelled": True}
             return self._copy_image_from_path(paths[0], kind)
@@ -6563,7 +6824,10 @@ class Api:
 
     def save_image_from_url(self, url, kind="card"):
         folder = VISION_IMAGES_DIR if str(kind).lower() == "vision" else CARD_IMAGES_DIR
-        res = self._download_url_to_file(url, folder=folder, allowed_suffixes={".png", ".jpg", ".jpeg", ".webp"}, fallback_name="image", max_bytes=40 * 1024 * 1024, prefix="url_image")
+        allowed_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+        if str(kind).lower() == "vision":
+            allowed_suffixes = allowed_suffixes | {".gif"}
+        res = self._download_url_to_file(url, folder=folder, allowed_suffixes=allowed_suffixes, fallback_name="image", max_bytes=40 * 1024 * 1024, prefix="url_image")
         if not res.get("ok"):
             return res
         path = Path(res["path"])
@@ -6605,8 +6869,11 @@ class Api:
         try:
             filename = self._safe_name_with_extension(filename, "image.png", data_url, "image")
             suffix = Path(filename).suffix.lower()
-            if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-                return {"ok": False, "error": "Please select a PNG, JPG, JPEG, or WebP image."}
+            allowed = {".png", ".jpg", ".jpeg", ".webp"}
+            if str(kind).lower() == "vision":
+                allowed = allowed | {".gif"}
+            if suffix not in allowed:
+                return {"ok": False, "error": "Please select a PNG, JPG, JPEG, WebP, or animated GIF image." if str(kind).lower() == "vision" else "Please select a PNG, JPG, JPEG, or WebP image."}
             raw = self._decode_data_payload(data_url)
             if not raw:
                 return {"ok": False, "error": "Image upload was empty."}
@@ -7744,6 +8011,43 @@ class Api:
         except Exception:
             return ""
 
+    def _browser_preview_cache_path_for_folder(self, project_folder):
+        try:
+            folder = Path(str(project_folder or "")).resolve()
+            if not folder.exists():
+                return None
+            # Store Browser thumbnails in one visible, central folder instead of
+            # hidden per-card folders. The SQLite cache stores the small data URL
+            # sent to the UI, while this WebP file is the durable on-disk cache.
+            BROWSER_WEBP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+            slug = self._safe_slug(folder.name or "card")[:80] or "card"
+            key = hashlib.sha1(str(folder).encode("utf-8", "ignore")).hexdigest()[:12]
+            return BROWSER_WEBP_IMAGES_DIR / f"{slug}_{key}.webp"
+        except Exception:
+            return None
+
+    def _legacy_browser_preview_cache_path_for_folder(self, project_folder):
+        try:
+            folder = Path(str(project_folder or "")).resolve()
+            if not folder.exists():
+                return None
+            return folder / ".ccf_browser_cache" / "browser_thumb.webp"
+        except Exception:
+            return None
+
+    def _browser_preview_cache_exists_for_folder(self, project_folder):
+        try:
+            p = self._browser_preview_cache_path_for_folder(project_folder)
+            return bool(p and p.exists() and p.is_file() and p.stat().st_size > 0)
+        except Exception:
+            return False
+
+    def _browser_preview_cache_exists_for_project(self, project_path):
+        try:
+            return self._browser_preview_cache_exists_for_folder(Path(str(project_path or "")).parent)
+        except Exception:
+            return False
+
     def _thumbnail_reference_exists(self, value):
         try:
             text = str(value or "").strip()
@@ -7768,16 +8072,19 @@ class Api:
         """
         preview_path = None
         try:
-            folder = Path(str(project_folder or "")).resolve()
-            if folder.exists():
-                cache_dir = folder / ".ccf_browser_cache"
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                preview_path = cache_dir / "browser_thumb.webp"
+            preview_path = self._browser_preview_cache_path_for_folder(project_folder)
+            if preview_path is not None:
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             preview_path = None
 
         try:
-            src = Path(str(source_path or "")).resolve()
+            source_text = str(source_path or "").strip()
+            materialized_temp = ""
+            if source_text.lower().startswith("data:image"):
+                materialized_temp = self._materialize_image_data_url(source_text, "card", "browser_preview_data_url") or ""
+                source_text = materialized_temp
+            src = Path(source_text).resolve()
             if src.exists() and not src.is_dir() and preview_path is not None:
                 src_stat = src.stat()
                 needs_refresh = True
@@ -7808,22 +8115,61 @@ class Api:
                 fallback = self._image_data_url(src, max_size=max_size)
                 if fallback:
                     return fallback
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                self._log_event("browser_webp_preview_generation_failed", {"source": str(source_path or "")[:500], "previewPath": str(preview_path or ""), "error": str(e)})
+            except Exception:
+                pass
 
         # If the original image cannot be found but an earlier cached WebP exists,
-        # keep using it instead of breaking existing Browser tiles.
-        try:
-            if preview_path is not None and preview_path.exists() and preview_path.stat().st_size > 0:
-                data_url = self._image_file_data_url(preview_path, "image/webp")
-                if data_url:
-                    return data_url
-        except Exception:
-            pass
+        # keep using it instead of breaking existing Browser tiles. Check the new
+        # central cache first, then migrate the older hidden per-card cache if found.
+        for cached_path in (
+            preview_path,
+            self._legacy_browser_preview_cache_path_for_folder(project_folder),
+        ):
+            try:
+                if cached_path is not None and cached_path.exists() and cached_path.stat().st_size > 0:
+                    if preview_path is not None and cached_path != preview_path and not preview_path.exists():
+                        try:
+                            preview_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(cached_path, preview_path)
+                        except Exception:
+                            pass
+                    data_url = self._image_file_data_url(cached_path, "image/webp")
+                    if data_url:
+                        return data_url
+            except Exception:
+                pass
         try:
             return self._image_data_url(source_path, max_size=max_size)
         except Exception:
             return ""
+
+    def _browser_preview_reference_from_candidates(self, candidates, project_folder, max_size=(320, 420), quality=48):
+        """Return the first usable Browser thumbnail from multiple possible image sources.
+
+        Some Front Porch imports keep the original image path in the project, but the
+        durable autosaved card PNG may be the only path Pillow can read during the
+        Browser cache refresh. Try the selected image first, then the saved card PNG
+        before giving up so mass imports do not show blank Browser tiles.
+        """
+        seen = set()
+        for source in candidates or []:
+            text = str(source or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            try:
+                preview = self._browser_preview_reference(text, project_folder, max_size=max_size, quality=quality)
+                if preview:
+                    return preview
+            except Exception as e:
+                try:
+                    self._log_event("browser_preview_candidate_failed", {"source": text[:500], "error": str(e)})
+                except Exception:
+                    pass
+        return ""
 
     def image_preview_data_url(self, path):
         try:
@@ -11763,17 +12109,99 @@ class Api:
 
     def select_vision_image(self):
         try:
-            paths = self._run_modern_file_dialog("Select Vision Image", "image", False)
+            paths = self._run_modern_file_dialog("Select Vision Image", "vision_image", False)
             if not paths:
                 return {"ok": False, "cancelled": True}
             path = str(paths[0])
-            if Path(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
-                return {"ok": False, "error": "Please select a PNG, JPG, JPEG, or WebP image."}
+            if Path(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+                return {"ok": False, "error": "Please select a PNG, JPG, JPEG, WebP, or animated GIF image."}
             return {"ok": True, "path": path}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def analyze_vision_image(self, image_path, settings=None, mode="character", custom_instructions=""):
+    def _extract_vision_gif_frame(self, gif_path, frame_mode="auto", frame_index=None):
+        """Extract one still PNG frame from an animated GIF for vision models."""
+        try:
+            gif_path = Path(str(gif_path or "")).expanduser()
+            if not gif_path.exists():
+                return {"ok": False, "error": f"GIF not found: {gif_path}"}
+            frame_mode = str(frame_mode or "auto").strip().lower().replace("-", "_")
+            with Image.open(gif_path) as gif:
+                try:
+                    frame_count = int(getattr(gif, "n_frames", 1) or 1)
+                except Exception:
+                    frame_count = 1
+                if frame_count <= 0:
+                    frame_count = 1
+
+                def clamp_index(idx):
+                    try:
+                        idx = int(idx)
+                    except Exception:
+                        idx = 0
+                    return max(0, min(frame_count - 1, idx))
+
+                if frame_mode in {"first", "start"}:
+                    chosen_index = 0
+                    reason = "first"
+                elif frame_mode in {"last", "end"}:
+                    chosen_index = frame_count - 1
+                    reason = "last"
+                elif frame_mode in {"middle", "mid", "center", "centre"}:
+                    chosen_index = frame_count // 2
+                    reason = "middle"
+                elif frame_mode in {"frame", "index", "manual", "custom"}:
+                    chosen_index = clamp_index(frame_index)
+                    reason = "manual"
+                else:
+                    sample_count = min(9, frame_count)
+                    sample_indices = [0] if sample_count <= 1 else sorted(set(round(i * (frame_count - 1) / (sample_count - 1)) for i in range(sample_count)))
+                    best = (None, -1.0)
+                    previous = None
+                    for idx in sample_indices:
+                        try:
+                            gif.seek(idx)
+                            frame = gif.convert("RGBA")
+                            if previous is not None and frame.getbbox() is None:
+                                frame = previous.copy()
+                            previous = frame.copy()
+                            sample = frame.convert("RGB")
+                            sample.thumbnail((96, 96), Image.LANCZOS)
+                            gray = sample.convert("L")
+                            hist = gray.histogram()
+                            total = sum(hist) or 1
+                            mean = sum(i * c for i, c in enumerate(hist)) / total
+                            variance = sum(((i - mean) ** 2) * c for i, c in enumerate(hist)) / total
+                            score = variance + (sample.width * sample.height / 10000.0)
+                            if score > best[1]:
+                                best = (idx, score)
+                        except Exception:
+                            continue
+                    chosen_index = clamp_index(best[0] if best[0] is not None else frame_count // 2)
+                    reason = "auto_richest_frame"
+
+                gif.seek(chosen_index)
+                frame = gif.convert("RGBA")
+                bg = Image.new("RGBA", frame.size, (255, 255, 255, 255))
+                frame = Image.alpha_composite(bg, frame).convert("RGB")
+                VISION_GIF_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+                out_name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{self._safe_slug(gif_path.stem) or 'gif'}_frame_{chosen_index + 1}_of_{frame_count}.png"
+                out_path = VISION_GIF_FRAMES_DIR / out_name
+                frame.save(out_path, format="PNG", optimize=True)
+                return {
+                    "ok": True,
+                    "path": str(out_path),
+                    "originalPath": str(gif_path),
+                    "frameIndex": chosen_index,
+                    "frameNumber": chosen_index + 1,
+                    "frameCount": frame_count,
+                    "mode": frame_mode or "auto",
+                    "reason": reason,
+                }
+        except Exception as e:
+            return {"ok": False, "error": f"Could not extract GIF frame: {e}"}
+
+    def analyze_vision_image(self, image_path, settings=None, mode="character", custom_instructions="", gif_frame_mode="auto", gif_frame_index=None):
         self._reset_cancel()
         self._raise_if_cancelled()
         merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
@@ -11794,6 +12222,15 @@ class Api:
         path = Path(image_path)
         if not path.exists():
             return {"ok": False, "error": f"Image not found: {image_path}"}
+        original_gif_path = ""
+        gif_frame_info = None
+        if path.suffix.lower() == ".gif":
+            frame_res = self._extract_vision_gif_frame(path, gif_frame_mode, gif_frame_index)
+            if not frame_res.get("ok"):
+                return frame_res
+            original_gif_path = str(path)
+            gif_frame_info = {k: frame_res.get(k) for k in ("originalPath", "path", "frameIndex", "frameNumber", "frameCount", "mode", "reason")}
+            path = Path(frame_res.get("path") or path)
         vision_check = self._validate_vision_api_settings(merged_settings)
         if not vision_check.get("ok"):
             return vision_check
@@ -12096,7 +12533,10 @@ class Api:
             return {"ok": False, "error": "Vision analysis produced no usable description after cleanup. Try a different vision model or enter the visual description manually."}
 
         self._log_event("vision_analyze_response", {"retry_used": retry_used, "mode": "full_card" if full_card_mode else "character", "description": description})
-        result = {"ok": True, "description": description, "imagePath": str(path), "sourceUrl": downloaded_from_url, "retryUsed": retry_used, "mode": "full_card" if full_card_mode else "character"}
+        result = {"ok": True, "description": description, "imagePath": original_gif_path or str(path), "sourceUrl": downloaded_from_url, "retryUsed": retry_used, "mode": "full_card" if full_card_mode else "character"}
+        if gif_frame_info:
+            result["analyzedFramePath"] = gif_frame_info.get("path") or ""
+            result["gifFrameInfo"] = gif_frame_info
         if full_card_mode:
             result["concept"] = description
         return result
@@ -13717,21 +14157,54 @@ class Api:
             return copy.deepcopy(default)
 
     def _front_porch_character_image_path(self, km, image_path):
-        raw = str(image_path or "").strip()
+        raw = str(image_path or "").strip().strip('"').strip("'")
         if not raw:
             return ""
+        root = Path(km)
+        try:
+            if raw.lower().startswith("file://"):
+                parsed = urllib.parse.urlparse(raw)
+                file_path = Path(urllib.parse.unquote(parsed.path or "")).expanduser()
+                if file_path.exists() and file_path.is_file():
+                    return str(file_path)
+        except Exception:
+            pass
         p = Path(raw).expanduser()
-        if p.is_absolute() and p.exists():
+        if p.is_absolute() and p.exists() and p.is_file():
             return str(p)
-        chars_dir = Path(km) / "Characters"
-        candidates = [chars_dir / raw, Path(km) / raw]
+        cleaned = raw.replace("\\", "/").lstrip("/")
+        basename = Path(cleaned).name
+        candidates = []
+        def add_candidate(value):
+            try:
+                candidate = Path(value)
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            except Exception:
+                pass
+        for base in (root / "Characters", root / "characters", root / "images", root / "Images", root / "avatars", root / "Avatars", root):
+            add_candidate(base / cleaned)
+            if basename and basename != cleaned:
+                add_candidate(base / basename)
         for candidate in candidates:
             try:
                 if candidate.exists() and candidate.is_file():
                     return str(candidate)
             except Exception:
                 pass
-        return str(candidates[0])
+        # Last-resort basename search. This handles Front Porch installs that keep
+        # DB image_path as a bare filename while the physical file is nested below
+        # Characters/<character>/avatars/ or a migrated image cache folder.
+        if basename:
+            for base in (root / "Characters", root / "characters", root):
+                try:
+                    if base.exists():
+                        for candidate in list(base.rglob(basename))[:40]:
+                            if candidate.exists() and candidate.is_file():
+                                return str(candidate)
+                except Exception:
+                    pass
+        return str(candidates[0]) if candidates else raw
 
     def _front_porch_session_state_tracking_text(self, cursor, character_id):
         try:
@@ -13805,6 +14278,93 @@ class Api:
         }
         return {"spec": "chara_card_v2", "spec_version": "2.0", "data": card_data}
 
+    def _front_porch_ccf_browser_import_index(self):
+        index = {
+            "names": set(),
+            "project_paths": set(),
+            "source_keys": set(),
+            "output_hashes": set(),
+            "fingerprints": set(),
+        }
+        try:
+            self._init_library_db()
+            with self._library_connect() as conn:
+                rows = conn.execute("SELECT project_path, name, output_hash FROM browser_cards WHERE deleted=0").fetchall()
+            for row in rows:
+                project_path = str(row["project_path"] or "").strip()
+                name = str(row["name"] or "").strip()
+                if name:
+                    index["names"].add(name.casefold())
+                if project_path:
+                    pp = Path(project_path)
+                    index["project_paths"].add(pp.as_posix())
+                    index["source_keys"].add(self._front_porch_ccf_source_key(project_path, None))
+                    try:
+                        if pp.exists():
+                            payload = json.loads(pp.read_text(encoding="utf-8"))
+                            project = payload.get("project", payload) if isinstance(payload, dict) else {}
+                            output = str(project.get("output") or "") if isinstance(project, dict) else ""
+                            if output:
+                                index["output_hashes"].add(self._hash_text(output))
+                                card_name = self._extract_name(output) or name or "Character"
+                                index["fingerprints"].add(self._front_porch_card_data_fingerprint((self._to_chara_card_v2(output, card_name) or {}).get("data") or {}))
+                    except Exception:
+                        pass
+                out_hash = str(row["output_hash"] or "").strip()
+                if out_hash:
+                    index["output_hashes"].add(out_hash)
+        except Exception as e:
+            self._log_event("front_porch_ccf_import_index_failed", {"error": str(e)})
+        return index
+
+    def _front_porch_import_status_for_row(self, row, km, ccf_index):
+        status = {
+            "ccfInBrowser": False,
+            "ccfMatchReason": "",
+            "ccfPossibleNameMatch": False,
+        }
+        try:
+            row = dict(row or {})
+            name = str(row.get("name") or "").strip()
+            if name and name.casefold() in ccf_index.get("names", set()):
+                status["ccfPossibleNameMatch"] = True
+            existing_payload = self._front_porch_existing_payload_from_image(km, row.get("image_path"))
+            existing_meta = self._front_porch_payload_ccf_metadata(existing_payload) if existing_payload else {}
+            if existing_meta:
+                src_key = str(existing_meta.get("source_project_key") or "").strip()
+                src_path = str(existing_meta.get("source_project_path") or "").strip()
+                out_hash = str(existing_meta.get("source_output_hash") or "").strip()
+                if src_key and src_key in ccf_index.get("source_keys", set()):
+                    status.update({"ccfInBrowser": True, "ccfMatchReason": "CCF source project metadata"})
+                    return status
+                if src_path and Path(src_path).as_posix() in ccf_index.get("project_paths", set()):
+                    status.update({"ccfInBrowser": True, "ccfMatchReason": "CCF source path metadata"})
+                    return status
+                if out_hash and out_hash in ccf_index.get("output_hashes", set()):
+                    status.update({"ccfInBrowser": True, "ccfMatchReason": "CCF output hash metadata"})
+                    return status
+            existing_data = (existing_payload or {}).get("data") if isinstance(existing_payload, dict) else None
+            if not isinstance(existing_data, dict):
+                existing_data = self._front_porch_row_card_data(row)
+            fp = self._front_porch_card_data_fingerprint(existing_data)
+            if fp and fp in ccf_index.get("fingerprints", set()):
+                status.update({"ccfInBrowser": True, "ccfMatchReason": "core card fields match"})
+                return status
+        except Exception as e:
+            status["ccfMatchReason"] = f"status check failed: {e}"
+        return status
+
+    def _unique_front_porch_import_name(self, name, used_names=None):
+        base = self._clean_character_name_value(name or "Front Porch Character") or "Front Porch Character"
+        used = {str(x or "").casefold() for x in (used_names or set())}
+        candidate = base
+        n = 2
+        while (EXPORT_DIR / self._safe_slug(candidate)).exists() or candidate.casefold() in used:
+            candidate = f"{base} (Front Porch {n})"
+            n += 1
+        used.add(candidate.casefold())
+        return candidate
+
     def list_front_porch_characters(self, settings=None, target=None, *args):
         if target is None and args:
             target = args[0]
@@ -13841,12 +14401,14 @@ class Api:
                             group_refs[str(cid)] = group_refs.get(str(cid), 0) + int(count or 0)
                     except Exception:
                         pass
+            ccf_index = self._front_porch_ccf_browser_import_index()
             out = []
             for row in rows:
                 item = {k: row[k] for k in row.keys()}
                 cid = str(item.get("id") or "")
                 item["target"] = selected_target
                 item["targetLabel"] = "Beta" if selected_target == "beta" else "Stable"
+                item.update(self._front_porch_import_status_for_row(item, km, ccf_index))
                 item["imageFile"] = self._front_porch_character_image_path(km, item.get("image_path"))
                 item["tagsList"] = self._front_porch_json_value(item.get("tags"), []) if "tags" in item else []
                 item["sessionCount"] = 0
@@ -13908,6 +14470,79 @@ class Api:
             except Exception:
                 pass
             return {"ok": False, "error": f"Could not import Front Porch character: {e}", "target": selected_target}
+
+    def import_front_porch_characters_to_browser(self, character_ids, settings=None, target=None, *args):
+        if target is None and args:
+            target = args[0]
+        if isinstance(character_ids, str):
+            character_ids = [character_ids]
+        ids = [str(x or "").strip() for x in (character_ids or []) if str(x or "").strip()]
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {"ok": False, "error": "Select at least one Front Porch character to import."}
+        imported = []
+        failed = []
+        used_names = set()
+        merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        for cid in ids:
+            try:
+                loaded = self.load_front_porch_character(cid, merged_settings, target)
+                if not loaded.get("ok"):
+                    raise RuntimeError(loaded.get("error") or "Front Porch import failed.")
+                output = str(loaded.get("output") or "").strip()
+                if not output:
+                    raise RuntimeError("Imported Front Porch card had no card text.")
+                original_name = self._extract_name(output) or loaded.get("name") or "Front Porch Character"
+                save_name = original_name
+                # Mass import must not overwrite an existing CCF folder when Front Porch
+                # contains same-name characters or a user imports a same-name duplicate.
+                if (EXPORT_DIR / self._safe_slug(save_name)).exists() or save_name.casefold() in used_names:
+                    save_name = self._unique_front_porch_import_name(save_name, used_names)
+                    output = self._replace_name_section_for_variant(output, save_name)
+                used_names.add(save_name.casefold())
+                workspace = {
+                    "name": save_name,
+                    "concept": "",
+                    "output": output,
+                    "template": self.template,
+                    "settings": merged_settings,
+                    "imagePath": loaded.get("imagePath") or "",
+                    "cardImagePath": loaded.get("imagePath") or "",
+                    "sourcePath": loaded.get("sourcePath") or "",
+                    "frontPorchCharacterId": cid,
+                    "frontPorchImportTarget": loaded.get("loadedType") or target or "",
+                    "frontend": "front_porch_import",
+                    "exportFormat": "front_porch_import",
+                    "_disableSettingsCardImageFallback": True,
+                    "characterTabs": [{
+                        "name": save_name,
+                        "focusName": save_name,
+                        "output": output,
+                        "fullTextOutput": output,
+                        "cardImagePath": loaded.get("imagePath") or "",
+                        "imagePath": loaded.get("imagePath") or "",
+                    }],
+                }
+                saved = self.save_character_workspace(workspace)
+                if not saved.get("ok"):
+                    raise RuntimeError(saved.get("error") or "Could not save imported card.")
+                # Ensure mass-imported cards get a Browser thumbnail immediately,
+                # even when the original Front Porch image path only becomes usable
+                # after workspace/image hydration.
+                try:
+                    project_path = saved.get("projectPath") or ""
+                    if project_path:
+                        self._refresh_library_cache_for_project(project_path, force=True)
+                except Exception as thumb_e:
+                    self._log_event("front_porch_mass_import_browser_thumb_refresh_failed", {"id": cid, "error": str(thumb_e)})
+                imported.append({"id": cid, "name": save_name, "projectPath": saved.get("projectPath"), "folder": saved.get("folder")})
+            except Exception as e:
+                failed.append({"id": cid, "error": str(e)})
+        try:
+            self._log_event("front_porch_mass_import", {"target": target, "requested": len(ids), "imported": len(imported), "failed": len(failed)})
+        except Exception:
+            pass
+        return {"ok": bool(imported) or not failed, "requested": len(ids), "imported": len(imported), "failed": failed, "characters": imported, "target": target}
 
     def delete_front_porch_characters(self, character_ids, settings=None, target=None, *args):
         if target is None and args:
@@ -14648,6 +15283,201 @@ class Api:
             ivalue = 0
         return max(0, min(7, ivalue))
 
+    def _front_porch_ccf_source_key(self, project_path=None, output=None):
+        raw_project = str(project_path or "").strip()
+        if raw_project:
+            return hashlib.sha256(raw_project.encode("utf-8", "replace")).hexdigest()
+        return hashlib.sha256(str(output or "").encode("utf-8", "replace")).hexdigest()
+
+    def _front_porch_ccf_export_metadata(self, output, project_path=None, char_id="", target="", name=""):
+        return {
+            "app": "Character Card Forge",
+            "app_version": self.get_app_version(),
+            "source_project_path": str(project_path or ""),
+            "source_project_key": self._front_porch_ccf_source_key(project_path, output),
+            "source_output_hash": self._hash_text(output or ""),
+            "front_porch_character_id": str(char_id or ""),
+            "front_porch_target": str(target or ""),
+            "exported_at": int(time.time()),
+            "export_name": str(name or ""),
+        }
+
+    def _front_porch_card_data_fingerprint(self, data):
+        try:
+            if not isinstance(data, dict):
+                return ""
+            relevant = {
+                "name": str(data.get("name") or "").strip(),
+                "description": str(data.get("description") or "").strip(),
+                "personality": str(data.get("personality") or "").strip(),
+                "scenario": str(data.get("scenario") or "").strip(),
+                "first_mes": str(data.get("first_mes") or data.get("first_message") or "").strip(),
+                "mes_example": str(data.get("mes_example") or "").strip(),
+                "system_prompt": str(data.get("system_prompt") or "").strip(),
+                "post_history_instructions": str(data.get("post_history_instructions") or "").strip(),
+                "tags": sorted([str(x or "").strip().casefold() for x in (data.get("tags") or []) if str(x or "").strip()]),
+            }
+            compact = json.dumps(relevant, ensure_ascii=False, sort_keys=True)
+            return hashlib.sha256(compact.encode("utf-8", "replace")).hexdigest()
+        except Exception:
+            return ""
+
+    def _front_porch_payload_ccf_metadata(self, payload):
+        try:
+            data = (payload or {}).get("data") if isinstance(payload, dict) else {}
+            ext = data.get("extensions") if isinstance(data, dict) else {}
+            meta = ext.get("character_card_forge") if isinstance(ext, dict) else {}
+            return meta if isinstance(meta, dict) else {}
+        except Exception:
+            return {}
+
+    def _front_porch_existing_payload_from_image(self, km, image_path):
+        try:
+            resolved = self._front_porch_character_image_path(km, image_path)
+            if not resolved or not Path(resolved).exists():
+                return None
+            payload, _ = self._extract_card_payload_from_png(resolved)
+            return self._normalise_loaded_card_payload(payload)
+        except Exception:
+            return None
+
+    def _front_porch_row_card_data(self, row):
+        row = dict(row or {})
+        tags = self._front_porch_json_value(row.get("tags"), [])
+        if not isinstance(tags, list):
+            tags = []
+        alt = self._front_porch_json_value(row.get("alternate_greetings"), [])
+        if not isinstance(alt, list):
+            alt = []
+        return {
+            "name": str(row.get("name") or ""),
+            "description": str(row.get("description") or ""),
+            "personality": str(row.get("personality") or ""),
+            "scenario": str(row.get("scenario") or ""),
+            "first_mes": str(row.get("first_message") or row.get("first_mes") or ""),
+            "mes_example": str(row.get("mes_example") or ""),
+            "system_prompt": str(row.get("system_prompt") or ""),
+            "post_history_instructions": str(row.get("post_history_instructions") or ""),
+            "alternate_greetings": [str(x) for x in alt if str(x).strip()],
+            "tags": [str(x) for x in tags if str(x).strip()],
+        }
+
+    def _front_porch_find_export_conflicts_for_output(self, output, settings=None, project_path=None, target=None, export_name_override=""):
+        output = self._normalise_card_output_for_save(output or "", self.template)
+        merged_settings = self._normalise_settings({**self.settings, **(settings or {})})
+        km, db, err, selected_target = self._front_porch_paths(merged_settings, target=target)
+        if err:
+            return {"ok": False, "error": err, "target": selected_target, "matches": []}
+        name = str(export_name_override or "").strip() or self._extract_name(output) or "Character Card"
+        candidate = self._to_chara_card_v2(output, name)
+        candidate_data = candidate.get("data") or {}
+        candidate_source_key = self._front_porch_ccf_source_key(project_path, output)
+        candidate_output_hash = self._hash_text(output or "")
+        candidate_fingerprint = self._front_porch_card_data_fingerprint(candidate_data)
+        con = None
+        matches = []
+        try:
+            con = sqlite3.connect(str(db))
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cols = self._sqlite_table_columns(cur, "characters")
+            if not cols:
+                return {"ok": True, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "matches": []}
+            wanted = [c for c in ["id", "name", "description", "personality", "scenario", "first_message", "first_mes", "mes_example", "system_prompt", "post_history_instructions", "alternate_greetings", "tags", "image_path", "created_at", "updated_at", "deleted_at"] if c in cols]
+            where = ""
+            if "deleted_at" in cols:
+                where = " WHERE deleted_at IS NULL OR deleted_at = 0 OR deleted_at = ''"
+            rows = cur.execute(f"SELECT {', '.join(wanted)} FROM characters{where}").fetchall()
+            for r in rows:
+                row = {k: r[k] for k in r.keys()}
+                reasons = []
+                score = 0
+                existing_payload = self._front_porch_existing_payload_from_image(km, row.get("image_path"))
+                existing_meta = self._front_porch_payload_ccf_metadata(existing_payload) if existing_payload else {}
+                if existing_meta:
+                    src_key = str(existing_meta.get("source_project_key") or "")
+                    src_path = str(existing_meta.get("source_project_path") or "")
+                    out_hash = str(existing_meta.get("source_output_hash") or "")
+                    fp_char_id = str(existing_meta.get("front_porch_character_id") or "")
+                    metadata_matched_current_card = False
+                    if src_key and src_key == candidate_source_key:
+                        reasons.append("CCF metadata source project match")
+                        score += 100
+                        metadata_matched_current_card = True
+                    elif src_path and project_path and Path(src_path).as_posix() == Path(str(project_path)).as_posix():
+                        reasons.append("CCF metadata source path match")
+                        score += 95
+                        metadata_matched_current_card = True
+                    if out_hash and out_hash == candidate_output_hash:
+                        reasons.append("CCF metadata output hash match")
+                        score += 85
+                        metadata_matched_current_card = True
+                    # The Front Porch row id stored inside an already-exported PNG only
+                    # proves that that PNG belongs to its own DB row. It does NOT prove
+                    # the card being exported now is the same character. Treat it as
+                    # supporting detail only after source/hash metadata matched the
+                    # current CCF card; never let it create a duplicate warning by itself.
+                    if metadata_matched_current_card and fp_char_id and fp_char_id == str(row.get("id") or ""):
+                        reasons.append("CCF metadata confirms this Front Porch row")
+                existing_data = (existing_payload or {}).get("data") if isinstance(existing_payload, dict) else None
+                if not isinstance(existing_data, dict):
+                    existing_data = self._front_porch_row_card_data(row)
+                if str(row.get("name") or "").strip().casefold() == str(name or "").strip().casefold():
+                    reasons.append("exact name match")
+                    score += 35
+                existing_fp = self._front_porch_card_data_fingerprint(existing_data)
+                if existing_fp and candidate_fingerprint and existing_fp == candidate_fingerprint:
+                    reasons.append("core card metadata fields match")
+                    score += 75
+                else:
+                    same_fields = []
+                    for label, key in [("description", "description"), ("personality", "personality"), ("scenario", "scenario"), ("first message", "first_mes"), ("system prompt", "system_prompt")]:
+                        a = re.sub(r"\s+", " ", str(candidate_data.get(key) or "")).strip().casefold()
+                        b = re.sub(r"\s+", " ", str(existing_data.get(key) or "")).strip().casefold()
+                        if a and b and a == b:
+                            same_fields.append(label)
+                    if len(same_fields) >= 2:
+                        reasons.append("matching fields: " + ", ".join(same_fields[:4]))
+                        score += min(60, len(same_fields) * 15)
+                if score > 0:
+                    matches.append({
+                        "id": str(row.get("id") or ""),
+                        "name": str(row.get("name") or ""),
+                        "imagePath": str(row.get("image_path") or ""),
+                        "target": selected_target,
+                        "targetLabel": "Beta" if selected_target == "beta" else "Stable",
+                        "score": score,
+                        "reasons": reasons,
+                        "createdAt": row.get("created_at"),
+                        "updatedAt": row.get("updated_at"),
+                    })
+            con.close()
+            matches.sort(key=lambda x: int(x.get("score") or 0), reverse=True)
+            return {"ok": True, "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "database": str(db), "name": name, "matches": matches[:12], "matchCount": len(matches)}
+        except Exception as e:
+            try:
+                if con:
+                    con.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Could not check Front Porch duplicates: {e}", "target": selected_target, "matches": []}
+
+    def check_front_porch_export_conflicts(self, project_path, settings=None, target=None, *args):
+        if target is None and args:
+            target = args[0]
+        loaded = self.load_character_project(project_path)
+        if not loaded.get("ok"):
+            return loaded
+        if self._loaded_project_is_group_card(loaded):
+            return {"ok": True, "matches": [], "groupCard": True}
+        merged_settings = {**(loaded.get("settings") or {}), **self.settings}
+        if isinstance(settings, dict):
+            merged_settings = {**merged_settings, **settings}
+        if target:
+            merged_settings["frontPorchExportTarget"] = str(target or "stable").strip().lower()
+        export_name_override = str(merged_settings.get("frontPorchExportNameOverride") or "").strip()
+        return self._front_porch_find_export_conflicts_for_output(loaded.get("output") or "", merged_settings, project_path, target=target or merged_settings.get("frontPorchExportTarget"), export_name_override=export_name_override)
+
     def export_to_front_porch(self, output, image_path=None, settings=None, project_path=None):
         if not output or not output.strip():
             return {"ok": False, "error": "Generate or load a character first."}
@@ -14658,12 +15488,28 @@ class Api:
             return {"ok": False, "error": err, "target": selected_target}
         chars_dir = km / "Characters"
         chars_dir.mkdir(parents=True, exist_ok=True)
-        name = self._extract_name(output) or "Character Card"
+        name_override = str(merged_settings.get("frontPorchExportNameOverride") or "").strip()
+        if name_override:
+            output = self._replace_name_section_for_variant(output, name_override)
+        name = name_override or self._extract_name(output) or "Character Card"
+        if not bool(merged_settings.get("frontPorchDuplicateOverride")):
+            conflicts = self._front_porch_find_export_conflicts_for_output(output, merged_settings, project_path=project_path, target=selected_target, export_name_override=name_override)
+            if conflicts.get("ok") and conflicts.get("matches"):
+                top = conflicts.get("matches", [])[0]
+                return {"ok": False, "duplicateFound": True, "error": f"Front Porch already has a possible match for {name}: {top.get('name') or top.get('id')} ({', '.join(top.get('reasons') or [])}).", "matches": conflicts.get("matches") or [], "target": selected_target, "targetLabel": ("Beta" if selected_target == "beta" else "Stable"), "name": name}
+            if not conflicts.get("ok"):
+                return conflicts
         safe = self._safe_front_porch_character_folder(name)
         now = int(time.time())
         ms = int(time.time() * 1000)
         char_id = f"{safe}_{ms}"
         card_v2 = self._to_chara_card_v2(output, name)
+        try:
+            ccf_ext = ((card_v2.setdefault("data", {}).setdefault("extensions", {})).setdefault("character_card_forge", {}))
+            if isinstance(ccf_ext, dict):
+                ccf_ext.update(self._front_porch_ccf_export_metadata(output, project_path=project_path, char_id=char_id, target=selected_target, name=name))
+        except Exception:
+            pass
         data = card_v2.get("data", {})
         image_filename = f"{safe}_{ms}.png"
         image_dest = chars_dir / image_filename
