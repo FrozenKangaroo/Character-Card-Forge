@@ -37,6 +37,10 @@ let browserNeedsRefresh = false;
 let browserFolderContextMenuId = "";
 let browserFolderScope = "global";
 let outputEditorSaveTimer = null;
+let structuredOutputSections = [];
+let structuredOutputRenderTimer = null;
+let syncingStructuredOutput = false;
+let structuredOutputCollapsed = new Set();
 let browserShowSubfolders = false;
 let browserTagSearchTerm = "";
 let browserContextMenuPaths = [];
@@ -46,6 +50,7 @@ let browserExpandedCardGroups = new Set();
 let browserPendingMovePaths = [];
 let browserPendingGroupCardPaths = [];
 let browserPendingVariationPaths = [];
+let browserPendingLitePaths = [];
 let browserMoveTargetFolderId = "";
 let browserExpandedMoveFolders = new Set();
 let browserRenderLimit = 160;
@@ -365,6 +370,7 @@ function startUpdateChecks() {
 function setTextareaValue(id, value) {
   const el = $('#' + id);
   if (el) el.value = value || '';
+  if (id === 'outputText') scheduleStructuredOutputRender();
 }
 
 function currentOutputTabName() {
@@ -1621,6 +1627,7 @@ window.ccfStreamUpdate = function(payload) {
     if (!el) return;
     el.value = text || (el.value + chunk);
     el.scrollTop = el.scrollHeight;
+    if (id === 'outputText') scheduleStructuredOutputRender();
     updateAvailability();
   } catch (_) {}
 };
@@ -1673,14 +1680,358 @@ const CARD_SECTION_KEYS_FOR_EXTRACTION = new Set([
   'creator notes', 'post history instructions', 'post-history instructions'
 ]);
 
+
+function isStructuredOutputSeparatorLine(line) {
+  return /^[-—_=*~]{3,}$/.test(String(line || '').trim());
+}
+
 function normaliseCardHeadingKey(line) {
   let value = String(line || '').trim();
-  if (!value || /^[-—_=*~]{3,}$/.test(value)) return '';
+  if (!value || isStructuredOutputSeparatorLine(value)) return '';
   value = value.replace(/^#{1,6}\s*/, '').trim();
   value = value.replace(/^[*_`]+|[*_`]+$/g, '').trim();
   value = value.replace(/\s*[:：]\s*$/, '').trim();
   value = value.replace(/^[-•]\s*/, '').trim();
   return value.replace(/\s+/g, ' ').toLowerCase();
+}
+
+function estimateOutputTokens(text) {
+  const value = String(text || '').trim();
+  if (!value) return 0;
+  const wordCount = (value.match(/[\p{L}\p{N}_'’"“”]+/gu) || []).length;
+  const charEstimate = Math.ceil(value.length / 4);
+  return Math.max(1, Math.round((wordCount * 0.75 + charEstimate) / 2));
+}
+
+function structuredOutputSectionSendMode(title) {
+  const key = sectionKeyFromTitle(title || '');
+  if (['stable_diffusion_prompt', 'natural_english_image_prompt', 'tags', 'creator_notes'].includes(key)) return 'not_sent';
+  if (key === 'lorebook_entries') return 'activated_only';
+  if (key === 'alternative_first_messages') return 'selected_only';
+  return 'sent';
+}
+
+function structuredOutputSectionSentTokenEstimate(section) {
+  const body = String(section?.body || '');
+  const mode = structuredOutputSectionSendMode(section?.title || '');
+  if (mode === 'sent') return estimateOutputTokens(body);
+  if (mode === 'selected_only') {
+    // Most frontends send only the selected greeting. Treat alternates as not in
+    // the normal context estimate until one is selected as the opener.
+    return 0;
+  }
+  return 0;
+}
+
+function structuredOutputRealWorldTokenEstimate(sections = structuredOutputSections) {
+  return (sections || []).reduce((sum, section) => sum + structuredOutputSectionSentTokenEstimate(section), 0);
+}
+
+function structuredOutputSectionStatsText(sectionOrText) {
+  const section = typeof sectionOrText === 'object' && sectionOrText !== null ? sectionOrText : { title: '', body: String(sectionOrText || '') };
+  const value = String(section.body || '');
+  const chars = value.length;
+  const tokens = estimateOutputTokens(value);
+  const sentTokens = structuredOutputSectionSentTokenEstimate(section);
+  const mode = structuredOutputSectionSendMode(section.title || '');
+  const modeText = mode === 'sent' ? ` · ~${sentTokens.toLocaleString()} sent` : (mode === 'activated_only' ? ' · activated only' : (mode === 'selected_only' ? ' · selected only' : ' · not usually sent'));
+  return `${chars.toLocaleString()} chars · ~${tokens.toLocaleString()} full tokens${modeText}`;
+}
+
+const STRUCTURED_OUTPUT_SECTION_ALIASES = new Map([
+  ['name', 'Name'],
+  ['description', 'Description'],
+  ['appearance', 'Description'],
+  ['personality', 'Personality'],
+  ['sexual traits', 'Sexual Traits'],
+  ['sexual traits / nsfw', 'Sexual Traits'],
+  ['background', 'Background'],
+  ['backstory', 'Background'],
+  ['scenario', 'Scenario'],
+  ['first message', 'First Message'],
+  ['first_mes', 'First Message'],
+  ['opening message', 'First Message'],
+  ['alternative first messages', 'Alternative First Messages'],
+  ['alternate first messages', 'Alternative First Messages'],
+  ['additional first messages', 'Alternative First Messages'],
+  ['alternate greetings', 'Alternative First Messages'],
+  ['example dialogue', 'Example Dialogues'],
+  ['example dialogues', 'Example Dialogues'],
+  ['mes example', 'Example Dialogues'],
+  ['lorebook', 'Lorebook Entries'],
+  ['lorebook entries', 'Lorebook Entries'],
+  ['character book', 'Lorebook Entries'],
+  ['tags', 'Tags'],
+  ['state tracking', 'State Tracking'],
+  ['stable diffusion prompt', 'Stable Diffusion Prompt'],
+  ['stable diffusion', 'Stable Diffusion Prompt'],
+  ['sd prompt', 'Stable Diffusion Prompt'],
+  ['natural english image prompt', 'Natural English Image Prompt'],
+  ['natural image prompt', 'Natural English Image Prompt'],
+  ['natural prompt', 'Natural English Image Prompt'],
+  ['custom system prompt', 'System Prompt'],
+  ['system prompt', 'System Prompt'],
+  ['post history instructions', 'Post History Instructions'],
+  ['post-history instructions', 'Post History Instructions'],
+  ['creator notes', 'Creator Notes'],
+  ['notes', 'Creator Notes']
+]);
+
+const STRUCTURED_OUTPUT_LONG_SECTIONS = new Set([
+  'Personality', 'Background', 'First Message', 'Alternative First Messages', 'Example Dialogues', 'Lorebook Entries', 'System Prompt'
+]);
+
+function structuredOutputSectionKey(title, index = 0) {
+  const key = sectionKeyFromTitle(title || 'section') || 'section';
+  return `${index}:${key}`;
+}
+
+function structuredOutputTitleForHeading(line) {
+  const key = normaliseCardHeadingKey(line);
+  if (!key) return '';
+  if (/^alternative first message\s+\d+$/i.test(key)) return '';
+  if (/^alternate greeting\s+\d+$/i.test(key)) return '';
+  if (/^example dialogue\s+\d+$/i.test(key)) return '';
+  return STRUCTURED_OUTPUT_SECTION_ALIASES.get(key) || '';
+}
+
+function defaultStructuredSectionOpen(section) {
+  const title = String(section?.title || '').trim();
+  const bodyLength = String(section?.body || '').length;
+  if (!title || title === 'Raw / Unsectioned Text') return true;
+  if (title === 'Name' || title === 'Tags' || title === 'Stable Diffusion Prompt' || title === 'Natural English Image Prompt') return true;
+  if (STRUCTURED_OUTPUT_LONG_SECTIONS.has(title) && bodyLength > 1400) return false;
+  return true;
+}
+
+function parseStructuredOutputSections(text) {
+  const source = String(text || '').replace(/\r\n/g, '\n');
+  if (!source.trim()) return [];
+  const lines = source.split('\n');
+  const sections = [];
+  let preamble = [];
+  let current = null;
+  const cleanSectionBody = sectionLines => {
+    const cleaned = [...(sectionLines || [])];
+    while (cleaned.length && isStructuredOutputSeparatorLine(cleaned[0])) cleaned.shift();
+    while (cleaned.length && isStructuredOutputSeparatorLine(cleaned[cleaned.length - 1])) cleaned.pop();
+    return cleaned.join('\n').replace(/^\s+|\s+$/g, '');
+  };
+  const pushCurrent = () => {
+    if (!current) return;
+    const body = cleanSectionBody(current.lines);
+    if (body || current.title) sections.push({ title: current.title || 'Section', body });
+    current = null;
+  };
+  lines.forEach(line => {
+    if (isStructuredOutputSeparatorLine(line)) return;
+    const title = structuredOutputTitleForHeading(line);
+    if (title) {
+      if (!current && preamble.join('\n').trim()) {
+        const rawBody = cleanSectionBody(preamble);
+        if (rawBody) sections.push({ title: 'Raw / Unsectioned Text', body: rawBody });
+      }
+      preamble = [];
+      pushCurrent();
+      current = { title, lines: [] };
+      return;
+    }
+    if (current) current.lines.push(line);
+    else preamble.push(line);
+  });
+  pushCurrent();
+  {
+    const rawBody = cleanSectionBody(preamble);
+    if (rawBody) sections.push({ title: 'Raw / Unsectioned Text', body: rawBody });
+  }
+  if (!sections.length && source.trim()) sections.push({ title: 'Full Card', body: source.trim() });
+  return sections.map((section, index) => ({
+    id: structuredOutputSectionKey(section.title, index),
+    title: section.title || `Section ${index + 1}`,
+    body: section.body || ''
+  }));
+}
+
+function buildStructuredOutputText(sections = structuredOutputSections) {
+  return (sections || [])
+    .map(section => {
+      const title = String(section?.title || 'Section').trim() || 'Section';
+      const body = String(section?.body || '').trim();
+      if (title === 'Raw / Unsectioned Text' || title === 'Full Card') return body;
+      return `${title}\n\n${body}`.trim();
+    })
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function structuredOutputTextareaRows(section) {
+  const title = String(section?.title || '');
+  const lines = String(section?.body || '').split(/\n/).length;
+  if (title === 'Name' || title === 'Tags') return Math.min(5, Math.max(2, lines + 1));
+  if (title === 'Stable Diffusion Prompt' || title === 'Natural English Image Prompt' || title === 'State Tracking') return Math.min(12, Math.max(5, lines + 1));
+  return Math.min(22, Math.max(7, lines + 1));
+}
+
+function structuredOutputHintForSection(title) {
+  const key = sectionKeyFromTitle(title || '');
+  const hints = {
+    name: 'Card display name used by exports and browser tabs.',
+    description: 'Appearance and visible character details.',
+    personality: 'Behavior, voice, preferences, relationships, and internal logic.',
+    sexual_traits: 'Optional adult/intimacy traits if the card uses them.',
+    scenario: 'Initial situation or roleplay setup.',
+    first_message: 'The default opening message.',
+    alternative_first_messages: 'Additional greetings/openers kept together in one editable block.',
+    example_dialogues: 'Example dialogue snippets used by card frontends.',
+    lorebook_entries: 'Lorebook / character book entries and trigger keys.',
+    tags: 'Comma-separated tags used by Browser and exports.',
+    state_tracking: 'Front Porch realism/state tracking seed values.',
+    stable_diffusion_prompt: 'Positive/negative image prompt text for local SD generation.',
+    natural_english_image_prompt: 'Natural prose image prompt for API image models.',
+    system_prompt: 'Optional instructions injected as a system prompt.',
+    post_history_instructions: 'Optional post-history instructions.'
+  };
+  return hints[key] || 'Editable card section. Changes sync into the raw Full Text Output automatically.';
+}
+
+function renderStructuredOutputEditor(force = false) {
+  const root = $('#structuredOutputEditor');
+  const summary = $('#structuredOutputSummary');
+  const raw = $('#outputText');
+  if (!root || !raw) return;
+  const text = raw.value || '';
+  if (!force && !syncingStructuredOutput && buildStructuredOutputText(structuredOutputSections) === text.trim() && root.children.length) return;
+  structuredOutputSections = parseStructuredOutputSections(text);
+  if (!structuredOutputSections.length) {
+    root.innerHTML = '<div class="empty structured-output-empty">Generate, import, or load a card and the section editor will appear here.</div>';
+    if (summary) summary.textContent = 'No generated card loaded yet.';
+    return;
+  }
+  root.innerHTML = structuredOutputSections.map((section, index) => {
+    const id = structuredOutputSectionKey(section.title, index);
+    const collapsed = structuredOutputCollapsed.has(id);
+    const open = collapsed ? '' : (defaultStructuredSectionOpen(section) ? ' open' : '');
+    const count = structuredOutputSectionStatsText(section);
+    const rows = structuredOutputTextareaRows(section);
+    const hint = structuredOutputHintForSection(section.title);
+    return `
+      <details class="structured-output-section" data-structured-section="${escapeAttr(index)}" data-structured-key="${escapeAttr(id)}"${open}>
+        <summary><span class="structured-output-section-title">${escapeHtml(section.title || `Section ${index + 1}`)}</span><span class="structured-output-count">${escapeHtml(count)}</span></summary>
+        <div class="structured-output-section-body">
+          <label class="structured-output-title-label">Section title<input class="structured-output-title-input" data-structured-title="${escapeAttr(index)}" value="${escapeAttr(section.title || '')}" /></label>
+          <div class="small muted structured-output-section-hint">${escapeHtml(hint)}</div>
+          <textarea class="structured-output-textarea" data-structured-body="${escapeAttr(index)}" rows="${escapeAttr(rows)}" spellcheck="true">${escapeText(section.body || '')}</textarea>
+          <div class="actions structured-output-section-actions"><button type="button" class="danger-ghost small" data-structured-remove="${escapeAttr(index)}">Remove Section</button></div>
+        </div>
+      </details>`;
+  }).join('');
+  if (summary) {
+    const charCount = text.length;
+    const tokenCount = estimateOutputTokens(text);
+    const sentTokenCount = structuredOutputRealWorldTokenEstimate(structuredOutputSections);
+    summary.textContent = `${structuredOutputSections.length} editable section${structuredOutputSections.length === 1 ? '' : 's'} · ${charCount.toLocaleString()} raw characters · ~${tokenCount.toLocaleString()} full-card tokens · ~${sentTokenCount.toLocaleString()} usually sent to AI. Raw output remains available below for compatibility.`;
+  }
+  wireStructuredOutputEditorEvents();
+}
+
+function scheduleStructuredOutputRender() {
+  if (structuredOutputRenderTimer) clearTimeout(structuredOutputRenderTimer);
+  structuredOutputRenderTimer = setTimeout(() => renderStructuredOutputEditor(true), 150);
+}
+
+function syncStructuredOutputToRaw({ autosave = true } = {}) {
+  const raw = $('#outputText');
+  if (!raw) return;
+  const next = buildStructuredOutputText(structuredOutputSections);
+  syncingStructuredOutput = true;
+  raw.value = next;
+  syncingStructuredOutput = false;
+  updateImportedCardToolsHint();
+  updateAvailability();
+  if (autosave) scheduleOutputEditorAutosave();
+}
+
+function wireStructuredOutputEditorEvents() {
+  const root = $('#structuredOutputEditor');
+  if (!root) return;
+  $$('.structured-output-section', root).forEach(details => {
+    details.addEventListener('toggle', () => {
+      const key = details.dataset.structuredKey || '';
+      if (!key) return;
+      if (details.open) structuredOutputCollapsed.delete(key);
+      else structuredOutputCollapsed.add(key);
+    });
+  });
+  $$('.structured-output-title-input', root).forEach(input => {
+    input.addEventListener('input', () => {
+      const idx = Number(input.dataset.structuredTitle);
+      if (!Number.isFinite(idx) || !structuredOutputSections[idx]) return;
+      structuredOutputSections[idx].title = input.value || `Section ${idx + 1}`;
+      const parent = input.closest('.structured-output-section');
+      const titleEl = parent?.querySelector?.('.structured-output-section-title');
+      if (titleEl) titleEl.textContent = structuredOutputSections[idx].title;
+      syncStructuredOutputToRaw();
+    });
+  });
+  $$('.structured-output-textarea', root).forEach(textarea => {
+    textarea.addEventListener('input', () => {
+      const idx = Number(textarea.dataset.structuredBody);
+      if (!Number.isFinite(idx) || !structuredOutputSections[idx]) return;
+      structuredOutputSections[idx].body = textarea.value || '';
+      const parent = textarea.closest('.structured-output-section');
+      const count = parent?.querySelector?.('.structured-output-count');
+      if (count) count.textContent = structuredOutputSectionStatsText(structuredOutputSections[idx]);
+      syncStructuredOutputToRaw();
+    });
+  });
+  $$('[data-structured-remove]', root).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.structuredRemove);
+      if (!Number.isFinite(idx) || !structuredOutputSections[idx]) return;
+      const title = structuredOutputSections[idx].title || 'this section';
+      if (!confirm(`Remove ${title}? This also removes it from the raw Full Text Output.`)) return;
+      structuredOutputSections.splice(idx, 1);
+      syncStructuredOutputToRaw();
+      renderStructuredOutputEditor(true);
+    });
+  });
+}
+
+function refreshStructuredOutputFromRaw() {
+  renderStructuredOutputEditor(true);
+  setStatus('Structured editor refreshed from raw Full Text Output.', 'ok');
+}
+
+function addStructuredOutputSection() {
+  const raw = $('#outputText');
+  if (!structuredOutputSections.length && raw?.value) structuredOutputSections = parseStructuredOutputSections(raw.value);
+  structuredOutputSections.push({
+    id: structuredOutputSectionKey('New Section', structuredOutputSections.length),
+    title: 'New Section',
+    body: ''
+  });
+  syncStructuredOutputToRaw();
+  renderStructuredOutputEditor(true);
+  const last = $('#structuredOutputEditor .structured-output-section:last-child');
+  if (last) {
+    last.open = true;
+    last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    last.querySelector('.structured-output-title-input')?.focus?.();
+  }
+}
+
+function setAllStructuredOutputSections(open) {
+  const root = $('#structuredOutputEditor');
+  if (!root) return;
+  $$('.structured-output-section', root).forEach(details => {
+    details.open = !!open;
+    const key = details.dataset.structuredKey || '';
+    if (key) {
+      if (open) structuredOutputCollapsed.delete(key);
+      else structuredOutputCollapsed.add(key);
+    }
+  });
 }
 
 function extractOutputSectionByHeadingAliases(startAliases, extraStopAliases = []) {
@@ -2021,7 +2372,7 @@ function isAiActionElement(el) {
   if (el.closest && (el.closest('.ai-suggest-field') || el.closest('.ai-tag-cleanup-card'))) return true;
   if (el.classList && el.classList.contains('regen-emotion-btn')) return true;
   const aiIds = new Set([
-    'generateBtn','generateIdeaBtn','reviseBtn','makeVariationBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
+    'generateBtn','generateIdeaBtn','reviseBtn','makeVariationBtn','makeLiteVersionBtn','transferToBuildersBtn','transferToBuildersMainBtn','analyzeVisionBtn','startVisionAnalyzeOptionsBtn',
     'builderGenerateBtn','personalityBuilderGenerateBtn','sceneBuilderGenerateBtn','aiRandomPresetBtn','aiRandomPresetBuildBtn',
     'generateImagesBtn','generateEmotionImagesBtn','generateSdPromptFromVisionBtn','generateSdPromptFromOutputBtn','generateNaturalPromptFromOutputBtn','aiTagCleanupBtn','aiTagMergeAllBtn','aiTagRenameAllBtn','browserAiDescriptionBtn'
   ]);
@@ -2326,7 +2677,7 @@ function updateAvailability() {
 
   if (!hardLocked) {
     ['copyBtn','exportBtn','zipEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
-    ['reviseBtn','makeVariationBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
+    ['reviseBtn','makeVariationBtn','makeLiteVersionBtn','generateEmotionImagesBtn'].forEach(id => { const el = $('#'+id); if (el) el.disabled = !output; });
     const genCard = $('#generateBtn');
     if (genCard) genCard.disabled = false;
     const genImg = $('#generateImagesBtn');
@@ -2554,6 +2905,7 @@ function hydrateSettings() {
   $('#cardMode').value = (!FRONT_PORCH_GROUP_CARDS_ENABLED && settings.cardMode === 'group_cards') ? 'split_cards' : (settings.cardMode || 'single');
   $('#multiCharacterCount').value = settings.multiCharacterCount ?? 2;
   if ($('#sharedScenePolicy')) $('#sharedScenePolicy').value = settings.sharedScenePolicy || 'ai_reconcile';
+  syncQuickModeControlsFromMain();
   const exportFormat = ['chara_v2_png','chara_v2_json','markdown'].includes(settings.exportFormat) ? settings.exportFormat : 'chara_v2_png';
   $('#exportFormat').value = exportFormat;
   $('#cardImagePath').value = settings.cardImagePath || '';
@@ -4498,6 +4850,73 @@ function switchMultiBuilderCharacter(index) {
   setStatus(`Editing ${getMultiBuilderCharacterName(multiBuilderSelectedIndex)} across all Builder tabs.`, 'ok');
 }
 
+function syncQuickModeControlsFromMain() {
+  const quickMode = $('#quickModeSelect');
+  const quickCardMode = $('#quickCardMode');
+  const quickCount = $('#quickMultiCharacterCount');
+  const quickScene = $('#quickSharedScenePolicy');
+  const mainMode = $('#modeSelect');
+  const mainCardMode = $('#cardMode');
+  const mainCount = $('#multiCharacterCount');
+  const mainScene = $('#sharedScenePolicy');
+  if (quickMode && mainMode) quickMode.value = mainMode.value || 'full';
+  if (quickCardMode && mainCardMode) quickCardMode.value = mainCardMode.value || 'single';
+  if (quickCount && mainCount) {
+    quickCount.value = mainCount.value || '2';
+    quickCount.max = mainCount.max || '12';
+  }
+  if (quickScene && mainScene) quickScene.value = mainScene.value || 'ai_reconcile';
+  const currentMode = quickCardMode?.value || mainCardMode?.value || 'single';
+  const isMulti = ['multi','split_cards','group_cards'].includes(currentMode);
+  const countWrap = $('#quickMultiCountWrap');
+  const sceneWrap = $('#quickSharedScenePolicyWrap');
+  if (countWrap) countWrap.style.display = isMulti ? '' : 'none';
+  if (sceneWrap) sceneWrap.style.display = (isMulti && currentMode !== 'group_cards') ? '' : 'none';
+  const hint = $('#quickModeHint');
+  if (hint) {
+    const labels = {
+      single: 'Single Character creates one normal card. Use this for most cards.',
+      multi: 'Multi-Character Single Card creates one card containing multiple primary characters.',
+      split_cards: 'Split into Multiple Cards generates one card per primary character and keeps support references together.',
+      group_cards: 'Multi-Card Group Card creates member cards and prepares them as a Front Porch group card.'
+    };
+    hint.textContent = labels[currentMode] || labels.single;
+  }
+}
+
+function dispatchInputEvent(el, type='change') {
+  if (!el) return;
+  el.dispatchEvent(new Event(type, { bubbles: true }));
+}
+
+function applyQuickModeControlsToMain(source='quick') {
+  const quickMode = $('#quickModeSelect');
+  const quickCardMode = $('#quickCardMode');
+  const quickCount = $('#quickMultiCharacterCount');
+  const quickScene = $('#quickSharedScenePolicy');
+  const mainMode = $('#modeSelect');
+  const mainCardMode = $('#cardMode');
+  const mainCount = $('#multiCharacterCount');
+  const mainScene = $('#sharedScenePolicy');
+  if (quickMode && mainMode && mainMode.value !== quickMode.value) {
+    mainMode.value = quickMode.value;
+    dispatchInputEvent(mainMode, 'change');
+  }
+  if (quickCardMode && mainCardMode && mainCardMode.value !== quickCardMode.value) {
+    mainCardMode.value = quickCardMode.value;
+    dispatchInputEvent(mainCardMode, 'change');
+  }
+  if (quickCount && mainCount && mainCount.value !== quickCount.value) {
+    mainCount.value = quickCount.value;
+    dispatchInputEvent(mainCount, 'input');
+  }
+  if (quickScene && mainScene && mainScene.value !== quickScene.value) {
+    mainScene.value = quickScene.value;
+    dispatchInputEvent(mainScene, 'change');
+  }
+  if (source === 'quick') syncQuickModeControlsFromMain();
+}
+
 function updateCardModeHint() {
   const wasMulti = isMultiBuilderMode();
   if (wasMulti) {
@@ -4505,6 +4924,7 @@ function updateCardModeHint() {
     if (!Object.keys(multiBuilderStates[multiBuilderSelectedIndex] || {}).length) multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState();
   }
   updateMultiBuilderSelectors(true);
+  syncQuickModeControlsFromMain();
 }
 
 let saveTimer = null;
@@ -4515,6 +4935,11 @@ function saveTemplateDebounced() {
 
 function bindActions() {
   $('#newCardBtn').addEventListener('click', addConceptWorkspaceTab);
+  $('#openModeStyleTabBtn')?.addEventListener('click', () => switchSubTab('concept', 'concept-mode'));
+  $('#quickModeSelect')?.addEventListener('change', () => applyQuickModeControlsToMain('quick'));
+  $('#quickCardMode')?.addEventListener('change', () => applyQuickModeControlsToMain('quick'));
+  $('#quickMultiCharacterCount')?.addEventListener('input', () => applyQuickModeControlsToMain('quick'));
+  $('#quickSharedScenePolicy')?.addEventListener('change', () => applyQuickModeControlsToMain('quick'));
   $('#nextTipBtn')?.addEventListener('click', () => showRandomTip(true));
   $('#closeWelcomeModalBtn')?.addEventListener('click', () => closeWelcomeModal(false));
   $('#welcomeModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'welcomeModal') closeWelcomeModal(false); });
@@ -4642,9 +5067,10 @@ function bindActions() {
     if (mode === 'multi') { ensureMultiBuilderStates(); multiBuilderStates[multiBuilderSelectedIndex] = readBuilderDomState(); }
     updateCardModeHint();
     updateAvailability();
+    syncQuickModeControlsFromMain();
   });
-  $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); });
-  $('#sharedScenePolicy')?.addEventListener('change', () => { if ($('#sharedScenePolicy')?.value === 'split_cards' && $('#cardMode')) $('#cardMode').value = 'split_cards'; settings = collectSettings(); updateAvailability(); updateMultiBuilderSelectors(false); });
+  $('#multiCharacterCount').addEventListener('input', () => { settings = collectSettings(); captureCurrentMultiBuilderState(); ensureMultiBuilderStates(); updateMultiBuilderSelectors(true); updateAvailability(); syncQuickModeControlsFromMain(); });
+  $('#sharedScenePolicy')?.addEventListener('change', () => { if ($('#sharedScenePolicy')?.value === 'split_cards' && $('#cardMode')) $('#cardMode').value = 'split_cards'; settings = collectSettings(); updateAvailability(); updateMultiBuilderSelectors(false); syncQuickModeControlsFromMain(); });
   $('#builderGenerateBtn')?.addEventListener('click', generateBuilderDescription);
   $('#builderAppendConceptBtn')?.addEventListener('click', appendBuilderToConcept);
   $('#builderClearBtn')?.addEventListener('click', clearCharacterBuilder);
@@ -4670,7 +5096,11 @@ function bindActions() {
   $('#visionGifFrameMode')?.addEventListener('change', updateVisionGifControls);
   $('#visionAnalyzeOptionsModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'visionAnalyzeOptionsModal') closeVisionAnalyzeOptionsModal(); });
   $('#clearVisionBtn').addEventListener('click', clearVisionDescription);
-  $('#outputText').addEventListener('input', () => { updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
+  $('#outputText').addEventListener('input', () => { if (!syncingStructuredOutput) scheduleStructuredOutputRender(); updateAvailability(); scheduleOutputEditorAutosave(); updateImportedCardToolsHint(); });
+  $('#refreshStructuredOutputBtn')?.addEventListener('click', refreshStructuredOutputFromRaw);
+  $('#addStructuredOutputSectionBtn')?.addEventListener('click', addStructuredOutputSection);
+  $('#expandStructuredOutputBtn')?.addEventListener('click', () => setAllStructuredOutputSections(true));
+  $('#collapseStructuredOutputBtn')?.addEventListener('click', () => setAllStructuredOutputSections(false));
   $('#stopTaskBtn').addEventListener('click', stopCurrentTask);
   $('#viewAiQueueBtn')?.addEventListener('click', openAiQueueModal);
   $('#closeAiQueueModalBtn')?.addEventListener('click', closeAiQueueModal);
@@ -4749,6 +5179,10 @@ function bindActions() {
   $('#cancelBrowserVariationBtn')?.addEventListener('click', closeBrowserVariationModal);
   $('#createBrowserVariationBtn')?.addEventListener('click', createBrowserVariationFromModal);
   $('#browserVariationModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserVariationModal') closeBrowserVariationModal(); });
+  $('#closeBrowserLiteModalBtn')?.addEventListener('click', closeBrowserLiteModal);
+  $('#cancelBrowserLiteBtn')?.addEventListener('click', closeBrowserLiteModal);
+  $('#createBrowserLiteBtn')?.addEventListener('click', createBrowserLiteFromModal);
+  $('#browserLiteModal')?.addEventListener('click', (e) => { if (e.target && e.target.id === 'browserLiteModal') closeBrowserLiteModal(); });
   $('#browserCardContextMenu')?.addEventListener('click', (e) => {
     const btn = e.target?.closest?.('[data-browser-context-action]');
     if (!btn || btn.disabled) return;
@@ -4760,7 +5194,7 @@ function bindActions() {
     runBrowserFolderContextAction(btn.dataset.browserFolderAction || '');
   });
   document.addEventListener('click', (e) => { if (!e.target?.closest?.('#browserCardContextMenu') && !e.target?.closest?.('#browserFolderContextMenu')) { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); } });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); closeBrowserGroupCardModal(); closeBrowserVariationModal(); closeBrowserFrontPorchMassImportModal(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); closeBrowserFilterModal(); closeBrowserMoveModal(); closeBrowserGroupCardModal(); closeBrowserVariationModal(); closeBrowserLiteModal(); closeBrowserFrontPorchMassImportModal(); } });
   window.addEventListener('scroll', () => { hideBrowserContextMenu(); hideBrowserFolderContextMenu(); }, true);
   $('#browserAiDescriptionBtn')?.addEventListener('click', regenerateSelectedBrowserDescription);
   $('#browserImproveFromRatingBtn')?.addEventListener('click', generateRatingImprovementPreview);
@@ -4794,6 +5228,7 @@ function bindActions() {
   $('#loadCardToConceptUrlModeBtn')?.addEventListener('click', loadCardToMainConceptUrl);
   $('#reviseBtn').addEventListener('click', reviseCard);
   $('#makeVariationBtn')?.addEventListener('click', makeVariationFromFollowup);
+  $('#makeLiteVersionBtn')?.addEventListener('click', makeLiteFromCurrentOutput);
   $('#loadSavedBtn')?.addEventListener('click', loadSavedCardOrProject);
   $('#loadSavedUrlBtn')?.addEventListener('click', loadSavedCardOrProjectFromUrl);
   const viewLogBtn = $('#viewLogBtn'); if (viewLogBtn) viewLogBtn.addEventListener('click', viewDebugLog);
@@ -4859,7 +5294,7 @@ function bindActions() {
   $('#frontPorchCharacterTarget')?.addEventListener('change', () => { frontPorchCharacterRows = []; renderFrontPorchCharacterManager(); const s = $('#frontPorchCharacterStatus'); if (s) s.textContent = 'Target changed. Scan characters again.'; });
   $('#sdImageCount')?.addEventListener('input', () => { if ($('#sdImageCountSettings')) $('#sdImageCountSettings').value = $('#sdImageCount').value; settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
   $('#sdImageCountSettings')?.addEventListener('input', () => { if ($('#sdImageCount')) $('#sdImageCount').value = $('#sdImageCountSettings').value; settings = collectSettings(); window.pywebview?.api?.save_settings(settings); updateImageGenerationProviderHint(); });
-  $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } });
+  $('#modeSelect')?.addEventListener('change', () => { if ($('#modeSelect').value === 'compact_lite') { if (Number($('#maxInputTokens').value || 0) > 8192) $('#maxInputTokens').value = 8000; if (Number($('#maxOutputTokens').value || 0) > 4096) $('#maxOutputTokens').value = 2500; setStatus('Compact Lite selected: token budgets adjusted for an ~8k context model.', 'ok'); } settings = collectSettings(); syncQuickModeControlsFromMain(); updateAvailability(); });
   $('#attachConceptFilesBtn').addEventListener('click', attachConceptFiles);
   $('#attachConceptUrlBtn')?.addEventListener('click', attachConceptUrl);
   $('#clearConceptAttachmentsBtn').addEventListener('click', clearConceptAttachments);
@@ -6753,6 +7188,7 @@ async function generateSdPromptFromLoadedOutput() {
     const res = await window.pywebview.api.generate_sd_prompt_from_output($('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Could not generate Stable Diffusion Prompt.');
     $('#outputText').value = res.output || $('#outputText').value;
+    renderStructuredOutputEditor(true);
     updateImportedCardToolsHint();
     await saveCurrentWorkspace('silent');
     setStatus('Generated Stable Diffusion Prompt from Full Text Output and saved it to the current card.', 'ok');
@@ -6773,6 +7209,7 @@ async function generateNaturalPromptFromLoadedOutput() {
     const res = await window.pywebview.api.generate_natural_prompt_from_output($('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Could not generate Natural English Image Prompt.');
     $('#outputText').value = res.output || $('#outputText').value;
+    renderStructuredOutputEditor(true);
     updateImportedCardToolsHint();
     await saveCurrentWorkspace('silent');
     setStatus('Generated Natural English Image Prompt from Full Text Output and saved it to the current card.', 'ok');
@@ -6798,6 +7235,7 @@ async function generateSdPromptFromLoadedVision() {
     const res = await window.pywebview.api.generate_sd_prompt_from_vision(imagePath, $('#outputText').value, settings);
     if (!res.ok) throw new Error(res.error || 'Could not generate Stable Diffusion Prompt from vision.');
     $('#outputText').value = res.output || $('#outputText').value;
+    renderStructuredOutputEditor(true);
     if (typeof res.visionDescription === 'string' && $('#visionDescription')) $('#visionDescription').value = res.visionDescription;
     updateImportedCardToolsHint();
     await saveCurrentWorkspace('silent');
@@ -9760,6 +10198,11 @@ function showBrowserContextMenu(event, projectPath) {
     btn.textContent = count > 1 ? `Make ${count} AI Variations…` : 'Make AI Variation…';
     btn.title = count > 1 ? `Use one instruction prompt to make a new grouped variation for each selected card.` : 'Use AI instructions to make a new grouped variation from this card.';
   });
+  $$('[data-browser-context-action="make_lite"]', menu).forEach(btn => {
+    btn.disabled = false;
+    btn.textContent = count > 1 ? `Create ${count} Lite Versions…` : 'Create Lite Version…';
+    btn.title = count > 1 ? `Create grouped smaller-context lite versions for ${count} selected cards.` : 'Create a grouped smaller-context lite version of this card.';
+  });
   $$('[data-browser-context-action="make_group_card"]', menu).forEach(btn => {
     const groupCardPaths = browserGroupCardPathsFromContext(browserContextMenuPaths, clickedPath);
     const groupCount = groupCardPaths.length;
@@ -10259,6 +10702,143 @@ async function makeVariationsFromBrowserPaths(paths) {
   openBrowserVariationModal(paths);
 }
 
+function openBrowserLiteModal(paths) {
+  browserPendingLitePaths = (paths || []).map(path => String(path || '').trim()).filter(Boolean);
+  if (!browserPendingLitePaths.length) { setStatus('Select one or more cards first.', 'error'); return; }
+  const summary = $('#browserLiteSummary');
+  const names = browserPendingLitePaths.slice(0, 4).map(browserCardLabelForProject).join(', ');
+  if (summary) summary.textContent = browserPendingLitePaths.length > 1
+    ? `Create lite versions for ${browserPendingLitePaths.length} selected cards: ${names}${browserPendingLitePaths.length > 4 ? ', ...' : ''}`
+    : `Create a smaller-context lite version grouped under ${names || 'the selected card'}.`;
+  const defaults = {
+    browserLiteNameSuffix: 'Lite',
+    browserLiteAggressiveness: 'balanced',
+    browserLiteTargetTokens: '3500',
+    browserLiteGreetingMode: 'default_only',
+    browserLiteExampleMode: 'short',
+    browserLiteCustomInstructions: '',
+  };
+  Object.entries(defaults).forEach(([id, value]) => {
+    const el = $('#' + id);
+    if (el) el.value = value;
+  });
+  const checks = {
+    browserLiteRemoveSdPrompts: true,
+    browserLiteKeepTags: true,
+    browserLiteKeepLorebook: false,
+    browserLiteKeepStateTracking: true,
+    browserLiteKeepSexualTraits: true,
+  };
+  Object.entries(checks).forEach(([id, checked]) => { const el = $('#' + id); if (el) el.checked = checked; });
+  const modal = $('#browserLiteModal');
+  if (modal) {
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+  $('#browserLiteTargetTokens')?.focus();
+}
+
+function closeBrowserLiteModal() {
+  const modal = $('#browserLiteModal');
+  if (modal) {
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+  browserPendingLitePaths = [];
+}
+
+function collectBrowserLiteOptions() {
+  return {
+    nameSuffix: ($('#browserLiteNameSuffix')?.value || 'Lite').trim() || 'Lite',
+    aggressiveness: ($('#browserLiteAggressiveness')?.value || 'balanced').trim(),
+    targetTokens: Number($('#browserLiteTargetTokens')?.value || 3500) || 3500,
+    greetingMode: ($('#browserLiteGreetingMode')?.value || 'default_only').trim(),
+    exampleMode: ($('#browserLiteExampleMode')?.value || 'short').trim(),
+    removeSdPrompts: !!$('#browserLiteRemoveSdPrompts')?.checked,
+    keepTags: !!$('#browserLiteKeepTags')?.checked,
+    keepLorebook: !!$('#browserLiteKeepLorebook')?.checked,
+    keepStateTracking: !!$('#browserLiteKeepStateTracking')?.checked,
+    keepSexualTraits: !!$('#browserLiteKeepSexualTraits')?.checked,
+    customInstructions: ($('#browserLiteCustomInstructions')?.value || '').trim(),
+  };
+}
+
+async function createBrowserLiteVersionsWithOptions(paths, options) {
+  const clean = (paths || []).map(path => String(path || '').trim()).filter(Boolean);
+  if (!clean.length) { setStatus('Select one or more cards first.', 'error'); return; }
+  settings = collectSettings();
+  const settingsError = validateTextApiSettings(settings);
+  if (settingsError) {
+    await window.pywebview.api.save_settings(settings);
+    setStatus(settingsError, 'error');
+    switchToSettingsTab();
+    updateAvailability();
+    return;
+  }
+  setBusy(clean.length > 1 ? `CREATING ${clean.length} LITE CARD VERSIONS — waiting for AI…` : 'CREATING LITE CARD VERSION — waiting for AI…');
+  const results = [];
+  const failures = [];
+  try {
+    for (let i = 0; i < clean.length; i += 1) {
+      const projectPath = clean[i];
+      pendingAiQueueLabel = clean.length > 1 ? `Create Lite ${i + 1}/${clean.length}: ${browserCardLabelForProject(projectPath)}` : `Create Lite: ${browserCardLabelForProject(projectPath)}`;
+      try {
+        const res = await window.pywebview.api.create_lite_card_from_project(projectPath, options, settings);
+        if (!res?.ok) throw new Error(res?.error || 'Lite-card creation failed.');
+        results.push({ originalPath: projectPath, projectPath: res.projectPath, name: res.name || browserCardLabelForProject(projectPath) });
+      } catch (err) {
+        failures.push({ path: projectPath, error: err.cancelled ? 'Cancelled' : (err.message || String(err)) });
+      }
+    }
+    await refreshCharacterBrowser(false);
+    for (const item of results) await addBrowserCardToOriginalGroup(item.originalPath, item.projectPath);
+    await saveBrowserCardGroups();
+    renderCharacterBrowser();
+    if (results[0]?.projectPath) {
+      await loadCharacterWorkspacesFromPaths(results.map(item => item.projectPath));
+      selectCharacterBrowserCard(results[0].projectPath);
+    }
+    const okText = `${results.length} lite version${results.length === 1 ? '' : 's'} created, opened, and grouped with original card${results.length === 1 ? '' : 's'}.`;
+    if (failures.length) {
+      const preview = failures.slice(0, 3).map(f => `${browserCardLabelForProject(f.path)}: ${f.error}`).join(' | ');
+      setStatus(`${okText} ${failures.length} failed. ${preview}`, results.length ? 'warn' : 'error');
+    } else {
+      setStatus(okText, 'ok');
+    }
+  } finally {
+    setBusy('');
+    pendingAiQueueLabel = '';
+  }
+}
+
+async function createBrowserLiteFromModal() {
+  const paths = browserPendingLitePaths.slice().filter(Boolean);
+  const options = collectBrowserLiteOptions();
+  if (!Number.isFinite(Number(options.targetTokens)) || Number(options.targetTokens) < 600) {
+    setStatus('Enter a target token estimate of at least 600.', 'error');
+    return;
+  }
+  closeBrowserLiteModal();
+  await createBrowserLiteVersionsWithOptions(paths, options);
+}
+
+async function makeLiteFromCurrentOutput() {
+  if (!hasOutput()) { setStatus('Generate or load a card first.', 'error'); return; }
+  captureActiveOutputTab();
+  let originalPath = canonicalWorkspaceProjectPath(characterOutputTabs[activeOutputTabIndex]?.projectPath || characterOutputTabs[activeOutputTabIndex]?.workspaceProjectPath || selectedCharacterProjectPath || '');
+  if (!originalPath) {
+    setStatus('Saving the current card first so the lite version can be grouped with it…', '');
+    const saved = await saveCurrentWorkspace('silent');
+    originalPath = canonicalWorkspaceProjectPath(saved?.projectPath || '');
+    if (originalPath && characterOutputTabs[activeOutputTabIndex]) {
+      characterOutputTabs[activeOutputTabIndex].projectPath = originalPath;
+      characterOutputTabs[activeOutputTabIndex].workspaceProjectPath = originalPath;
+    }
+  }
+  if (!originalPath) { setStatus('Could not save current card before lite-card creation.', 'error'); return; }
+  openBrowserLiteModal([originalPath]);
+}
+
 async function makeVariationFromFollowup() {
   settings = collectSettings();
   const instructions = ($('#followupText')?.value || '').trim();
@@ -10428,13 +11008,15 @@ async function runBrowserContextAction(action) {
   const clickedPath = String(browserContextMenuProjectPath || '').trim();
   hideBrowserContextMenu();
   if (!paths.length) { setStatus('Select one or more characters first.', 'error'); return; }
-  if (paths.length > 1 && ['load','export_png','export_json','emotion_zip','front_porch','move','delete','group','duplicate','make_variation','make_group_card'].includes(action)) {
+  if (paths.length > 1 && ['load','export_png','export_json','emotion_zip','front_porch','move','delete','group','duplicate','make_variation','make_lite','make_group_card'].includes(action)) {
     setStatus(`Context action will affect ${paths.length} selected cards.`, 'warn');
   }
   if (action === 'duplicate') {
     await duplicateBrowserCards(paths);
   } else if (action === 'make_variation') {
     await makeVariationsFromBrowserPaths(paths);
+  } else if (action === 'make_lite') {
+    openBrowserLiteModal(paths);
   } else if (action === 'make_group_card') {
     if (!FRONT_PORCH_GROUP_CARDS_ENABLED) { frontPorchGroupCardsComingSoon(); return; }
     openBrowserGroupCardModal(browserGroupCardPathsFromContext(paths, clickedPath));
@@ -10469,6 +11051,12 @@ function browserGroupArrowSvg(expanded = false) {
   return `<svg class="browser-group-arrow-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m8.5 5.5 6.5 6.5-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
+function browserLiteBadgeHtml(card) {
+  if (!card?.isLiteVersion) return '';
+  const parent = card.liteParentName ? ` of ${card.liteParentName}` : '';
+  return `<div class="browser-group-child-badge lite-card-badge" title="Lite smaller-context version${escapeAttr(parent)}">Lite</div>`;
+}
+
 function browserGroupBadgeHtml(card) {
   const group = browserGroupForPath(card?.projectPath);
   if (!group) return '';
@@ -10494,11 +11082,24 @@ function browserTokenTotal(card) {
   const direct = Number(card?.tokenTotal || 0);
   if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
   const counts = card?.tokenCounts && typeof card.tokenCounts === 'object' ? card.tokenCounts : {};
-  const fromCounts = Object.values(counts).reduce((sum, value) => {
+  const fromCounts = Object.entries(counts).reduce((sum, [key, value]) => {
+    if (key === 'greetings') return sum;
     const n = Number(value || 0);
     return sum + (Number.isFinite(n) && n > 0 ? n : 0);
   }, 0);
   return Math.round(fromCounts || 0);
+}
+
+function browserContextTokenTotal(card) {
+  const direct = Number(card?.contextTokenTotal || 0);
+  if (Number.isFinite(direct) && direct > 0) return Math.round(direct);
+  const counts = card?.tokenCounts && typeof card.tokenCounts === 'object' ? card.tokenCounts : {};
+  const keys = ['description','personality','sexualTraits','background','scenario','firstMessage','exampleMessages','stateTracking','systemPrompt','postHistoryInstructions','other'];
+  const total = keys.reduce((sum, key) => {
+    const n = Number(counts[key] || 0);
+    return sum + (Number.isFinite(n) && n > 0 ? n : 0);
+  }, 0);
+  return Math.round(total || browserTokenTotal(card));
 }
 
 function formatBrowserTokenCount(value) {
@@ -10523,25 +11124,30 @@ function browserTokenBadgeHtml(card) {
 function browserTokenBreakdownRows(card) {
   const counts = card?.tokenCounts && typeof card.tokenCounts === 'object' ? card.tokenCounts : {};
   return [
-    ['Description', counts.description],
-    ['Personality', counts.personality],
-    ['Sexual Traits', counts.sexualTraits],
-    ['Background', counts.background],
-    ['Scenario', counts.scenario],
-    ['Greetings', counts.greetings],
-    ['Example Messages', counts.exampleMessages],
-    ['Lorebook', counts.lorebook],
-    ['Tags', counts.tags],
-    ['State Tracking', counts.stateTracking],
-    ['Stable Diffusion', counts.stableDiffusion],
-    ['Other Sections', counts.other],
-  ].map(([label, value]) => ({ label, value: Math.max(0, Math.round(Number(value || 0))) }));
+    ['Description', counts.description, true],
+    ['Personality', counts.personality, true],
+    ['Sexual Traits', counts.sexualTraits, true],
+    ['Background', counts.background, true],
+    ['Scenario', counts.scenario, true],
+    ['First Message', counts.firstMessage || counts.greetings, true],
+    ['Alternative Greetings', counts.alternativeGreetings, false],
+    ['Example Messages', counts.exampleMessages, true],
+    ['Lorebook', counts.lorebook, false],
+    ['Tags', counts.tags, false],
+    ['State Tracking', counts.stateTracking, true],
+    ['System Prompt', counts.systemPrompt, true],
+    ['Post History', counts.postHistoryInstructions, true],
+    ['Stable Diffusion / Image Prompts', counts.stableDiffusion, false],
+    ['Creator Notes', counts.creatorNotes, false],
+    ['Other Sections', counts.other, true],
+  ].map(([label, value, sent]) => ({ label, value: Math.max(0, Math.round(Number(value || 0))), sent: !!sent }));
 }
 
 function renderBrowserTokenDetails(card) {
   const wrap = $('#browserTokenDetails');
   if (!wrap) return;
   const total = browserTokenTotal(card);
+  const contextTotal = browserContextTokenTotal(card);
   wrap.open = false;
   wrap.removeAttribute('open');
   if (!card) {
@@ -10560,14 +11166,15 @@ function renderBrowserTokenDetails(card) {
     <summary class="browser-token-details-summary">
       <div class="browser-token-details-head">
         ${browserTokenIconSvg()}
-        <div><strong>Token Estimate</strong><span>Approximate card size from saved output text. Other only means unrecognised top-level sections.</span></div>
-        <b>${escapeHtml(formatBrowserTokenCount(total))}</b>
+        <div><strong>Token Estimate</strong><span>~${escapeHtml(formatBrowserTokenCount(total))} full card · ~${escapeHtml(formatBrowserTokenCount(contextTotal))} usually sent to AI. Excludes image prompts, tags, and lorebook-by-default.</span></div>
+        <b>${escapeHtml(formatBrowserTokenCount(contextTotal))}</b>
       </div>
     </summary>
     <div class="browser-token-breakdown">
       ${rows.map(row => {
         const pct = total ? Math.max(2, Math.min(100, Math.round((row.value / total) * 100))) : 0;
-        return `<div class="browser-token-row"><span>${escapeHtml(row.label)}</span><strong>${escapeHtml(formatBrowserTokenCount(row.value))}</strong><div class="browser-token-meter" aria-hidden="true"><i style="width:${pct}%"></i></div></div>`;
+        const sentLabel = row.sent ? 'usually sent' : 'not usually sent';
+        return `<div class="browser-token-row"><span>${escapeHtml(row.label)} <em>${escapeHtml(sentLabel)}</em></span><strong>${escapeHtml(formatBrowserTokenCount(row.value))}</strong><div class="browser-token-meter" aria-hidden="true"><i style="width:${pct}%"></i></div></div>`;
       }).join('')}
     </div>`;
 }
@@ -10627,7 +11234,7 @@ function renderCharacterBrowser() {
     const groupClass = group ? (browserGroupPrimaryPath(group) === card.projectPath ? 'group-primary-card' : 'group-child-card') : '';
     return `
     <div class="character-card-tile ${card.projectPath === selectedCharacterProjectPath ? 'selected' : ''} ${multiSelected ? 'multi-selected' : ''} ${privacyClass} ${groupClass}" data-project="${escapeAttr(card.projectPath)}" data-letter="${escapeAttr(letter)}" data-group-id="${escapeAttr(group?.id || '')}" draggable="true">
-      ${browserGroupBadgeHtml(card)}
+      ${browserGroupBadgeHtml(card)}${browserLiteBadgeHtml(card)}
       <label class="character-multi-check"><input type="checkbox" class="browser-card-checkbox" data-project="${escapeAttr(card.projectPath)}" ${multiSelected ? 'checked' : ''} /> Select</label>
       <div class="character-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" alt="${escapeAttr(name)}" loading="lazy" />` : '<div class="no-thumb">No Image</div>'}${cardRatingBadgeHtml(card)}${isNsfw && browserPrivacyMode() === 'blur' ? '<div class="nsfw-overlay">NSFW</div>' : ''}</div>
       <div class="character-tile-name">${escapeHtml(name)}</div>
@@ -12240,6 +12847,7 @@ async function generateCard(options = {}) {
     const res = await window.pywebview.api.generate_with_qa_answers(conceptForModel, template, settings, qaAnswers);
     if (!res.ok) throw new Error(res.error || 'Generation failed.');
     $('#outputText').value = res.output;
+    renderStructuredOutputEditor(true);
     currentBrowserDescription = '';
   currentCardRating = '';
   currentCardRatingReasoning = '';
@@ -12294,6 +12902,7 @@ async function reviseCard() {
     );
     if (!res.ok) throw new Error(res.error || 'Revision failed.');
     $('#outputText').value = res.output;
+    renderStructuredOutputEditor(true);
     currentBrowserDescription = '';
   currentCardRating = '';
   currentCardRatingReasoning = '';

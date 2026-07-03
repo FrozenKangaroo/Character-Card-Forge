@@ -3103,6 +3103,43 @@ main {
   padding: 0;
   flex: 0 0 auto;
 }
+
+/* Lite-card modal checkbox rows need their own layout because the generic
+   form label rule makes checkbox inputs float away from their text. */
+.browser-group-card-form .stacked-toggles {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 4px;
+}
+.browser-group-card-form .stacked-toggles .toggle-inline {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 12px;
+  background: rgba(9,10,15,.35);
+  color: var(--text);
+  line-height: 1.25;
+}
+.browser-group-card-form .stacked-toggles .toggle-inline input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  padding: 0;
+  justify-self: start;
+  flex: 0 0 auto;
+}
+.browser-group-card-form .stacked-toggles .toggle-inline:hover {
+  border-color: rgba(236,72,153,.36);
+  background: rgba(236,72,153,.08);
+}
+
 @media (max-width: 760px) {
   .browser-group-card-settings {
     grid-template-columns: 1fr;
@@ -3185,3 +3222,113 @@ main {
 .welcome-panel ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.45; }
 .welcome-panel li { margin: 0 0 7px; }
 @media (max-width: 920px) { .welcome-grid { grid-template-columns: 1fr; } }
+
+/* v1.0.13-beta5 structured full-text card editor */
+.structured-output-card {
+  margin-bottom: 14px;
+}
+.structured-output-card .card-title {
+  align-items: flex-start;
+  gap: 12px;
+}
+.structured-output-summary {
+  margin: 4px 0 12px;
+}
+.structured-output-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.structured-output-empty {
+  border: 1px dashed var(--border, rgba(148, 163, 184, 0.35));
+  border-radius: 12px;
+  padding: 18px;
+  text-align: center;
+}
+.structured-output-section {
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.24));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel, #111827) 92%, transparent);
+  overflow: hidden;
+}
+.structured-output-section summary {
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 14px;
+  font-weight: 700;
+  user-select: none;
+}
+.structured-output-section[open] summary {
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, 0.22));
+}
+.structured-output-count {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--muted, #94a3b8);
+  white-space: nowrap;
+}
+.structured-output-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 14px;
+}
+.structured-output-title-label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.82rem;
+  color: var(--muted, #94a3b8);
+}
+.structured-output-title-input {
+  width: min(520px, 100%);
+}
+.structured-output-section-hint {
+  margin-top: -2px;
+}
+.structured-output-textarea {
+  width: 100%;
+  min-height: 78px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.45;
+}
+.structured-output-section-actions {
+  justify-content: flex-end;
+}
+.raw-output-details {
+  margin-bottom: 14px;
+}
+.raw-output-details > summary {
+  cursor: pointer;
+  font-weight: 700;
+  padding: 4px 0 12px;
+}
+.raw-output-details .output {
+  width: 100%;
+}
+@media (max-width: 760px) {
+  .structured-output-card .card-title {
+    flex-direction: column;
+  }
+  .structured-output-section summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+.lite-card-badge {
+  top: 38px;
+  border-color: rgba(168, 85, 247, .45);
+  color: rgba(233, 213, 255, .95);
+}
+.browser-token-row em {
+  color: var(--muted);
+  font-size: .74rem;
+  font-style: normal;
+  font-weight: 600;
+  margin-left: 6px;
+}

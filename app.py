@@ -1471,6 +1471,10 @@ class Api:
         except Exception:
             token_total = 0
         try:
+            context_token_total = int(extra.get("contextTokenTotal") or token_counts.get("sentTotal") or 0)
+        except Exception:
+            context_token_total = 0
+        try:
             token_breakdown_version = int(extra.get("tokenBreakdownVersion") or 0)
         except Exception:
             token_breakdown_version = 0
@@ -1488,6 +1492,7 @@ class Api:
             "cardRatingDetails": extra.get("cardRatingDetails") if isinstance(extra.get("cardRatingDetails"), list) else [],
             "cardRatingSourceHash": extra.get("cardRatingSourceHash") or "",
             "tokenTotal": token_total,
+            "contextTokenTotal": context_token_total,
             "tokenCounts": token_counts,
             "tokenBreakdownVersion": token_breakdown_version,
             "tags": tags,
@@ -1501,6 +1506,8 @@ class Api:
             "isGroupCard": bool(extra.get("isGroupCard")),
             "exportFormat": extra.get("exportFormat") or "",
             "groupCardPath": extra.get("groupCardPath") or "",
+            "isLiteVersion": bool(extra.get("isLiteVersion")),
+            "liteParentName": extra.get("liteParentName") or "",
         }
 
     def _refresh_library_cache_for_project(self, project_path, force=False):
@@ -1539,11 +1546,11 @@ class Api:
                 token_ok = (
                     isinstance(extra_fast.get("tokenCounts"), dict)
                     and int(extra_fast.get("tokenTotal") or 0) > 0
-                    and int(extra_fast.get("tokenBreakdownVersion") or 0) >= 3
+                    and int(extra_fast.get("tokenBreakdownVersion") or 0) >= 4
                 )
                 thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
                 preview_cache_ok = self._browser_preview_cache_exists_for_project(path)
-                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 10
+                index_ok = int(extra_fast.get("browserIndexVersion") or 0) >= 11
                 if project_stat_ok and card_stat_ok and image_stat_ok and token_ok and index_ok and thumb_ok and preview_cache_ok:
                     return self._browser_card_from_db_row(row)
             except Exception:
@@ -1551,7 +1558,7 @@ class Api:
         project_hash = self._hash_file(path)
         if row and not force and str(row.get("project_hash") or "") == project_hash:
             # Older cache rows may not have stat metadata. Fall back to file hashes once,
-            # then refresh/upsert with browserIndexVersion 10 for future instant loads.
+            # then refresh/upsert with browserIndexVersion 11 for future instant loads.
             card_png_path = str(row.get("card_png_path") or "")
             image_path = str(row.get("image_path") or "")
             card_hash_ok = (not card_png_path) or self._hash_file(card_png_path) == str(row.get("card_png_hash") or "")
@@ -1563,14 +1570,14 @@ class Api:
                     isinstance(extra_for_tokens, dict)
                     and isinstance(extra_for_tokens.get("tokenCounts"), dict)
                     and int(extra_for_tokens.get("tokenTotal") or 0) > 0
-                    and int(extra_for_tokens.get("tokenBreakdownVersion") or 0) >= 3
+                    and int(extra_for_tokens.get("tokenBreakdownVersion") or 0) >= 4
                 )
             except Exception:
                 needs_token_counts = True
             needs_browser_index_refresh = True
             try:
                 extra_for_index = json.loads(row.get("metadata_json") or "{}")
-                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 10
+                needs_browser_index_refresh = int(extra_for_index.get("browserIndexVersion") or 0) < 11
             except Exception:
                 needs_browser_index_refresh = True
             thumb_ok = self._thumbnail_reference_exists(row.get("thumbnail_data_url") or "")
@@ -1672,9 +1679,10 @@ class Api:
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
                     "tokenTotal": int(token_counts.get("total") or 0),
+                    "contextTokenTotal": int(token_counts.get("sentTotal") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
-                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 10,
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 4),
+                    "browserIndexVersion": 11,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1684,6 +1692,9 @@ class Api:
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
+                    "isLiteVersion": bool(project.get("isLiteVersion") or workspace.get("isLiteVersion")),
+                    "liteParentName": project.get("liteParentName") or workspace.get("liteParentName") or "",
+                    "liteOptions": project.get("liteOptions") if isinstance(project.get("liteOptions"), dict) else (workspace.get("liteOptions") if isinstance(workspace.get("liteOptions"), dict) else {}),
                 },
             })
         else:
@@ -1707,9 +1718,10 @@ class Api:
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
                     "tokenTotal": int(token_counts.get("total") or 0),
+                    "contextTokenTotal": int(token_counts.get("sentTotal") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
-                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 10,
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 4),
+                    "browserIndexVersion": 11,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1719,6 +1731,9 @@ class Api:
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
+                    "isLiteVersion": bool(project.get("isLiteVersion") or workspace.get("isLiteVersion")),
+                    "liteParentName": project.get("liteParentName") or workspace.get("liteParentName") or "",
+                    "liteOptions": project.get("liteOptions") if isinstance(project.get("liteOptions"), dict) else (workspace.get("liteOptions") if isinstance(workspace.get("liteOptions"), dict) else {}),
                 },
             })
         if virtual_folder_id != str(project.get("virtualFolderId") or ""):
@@ -1748,9 +1763,10 @@ class Api:
                     "cardRatingDetails": card_rating_details,
                     "cardRatingSourceHash": card_rating_source_hash,
                     "tokenTotal": int(token_counts.get("total") or 0),
+                    "contextTokenTotal": int(token_counts.get("sentTotal") or 0),
                     "tokenCounts": token_counts.get("sections") if isinstance(token_counts.get("sections"), dict) else {},
-                    "tokenBreakdownVersion": int(token_counts.get("version") or 3),
-                    "browserIndexVersion": 10,
+                    "tokenBreakdownVersion": int(token_counts.get("version") or 4),
+                    "browserIndexVersion": 11,
                     "projectMtimeNs": int(getattr(path.stat(), "st_mtime_ns", int(path.stat().st_mtime * 1_000_000_000))) if path.exists() else 0,
                     "projectSize": int(path.stat().st_size) if path.exists() else 0,
                     "cardPngMtimeNs": int(getattr(Path(card_png).stat(), "st_mtime_ns", int(Path(card_png).stat().st_mtime * 1_000_000_000))) if card_png and Path(card_png).exists() else 0,
@@ -1760,6 +1776,9 @@ class Api:
                     "isGroupCard": bool(project.get("isGroupCard") or workspace.get("isGroupCard")),
                     "exportFormat": project.get("exportFormat") or workspace.get("exportFormat") or "",
                     "groupCardPath": project.get("groupCardPath") or workspace.get("groupCardPath") or project.get("exportedPath") or "",
+                    "isLiteVersion": bool(project.get("isLiteVersion") or workspace.get("isLiteVersion")),
+                    "liteParentName": project.get("liteParentName") or workspace.get("liteParentName") or "",
+                    "liteOptions": project.get("liteOptions") if isinstance(project.get("liteOptions"), dict) else (workspace.get("liteOptions") if isinstance(workspace.get("liteOptions"), dict) else {}),
                 },
                 })
             except Exception:
@@ -4237,6 +4256,26 @@ class Api:
         download = "/api/download?path=" + urllib.parse.quote(exported) if exported else ""
         return {"ok": True, "name": res.get("name") or path.parent.name, "path": exported, "downloadUrl": download, "exportFormat": res.get("exportFormat") or fmt}
 
+    def _mobile_export_front_porch_project(self, project_path, target="stable", duplicate_override=False, name_override=""):
+        path = self._mobile_project_path(project_path)
+        selected_target = str(target or "stable").strip().lower()
+        if selected_target not in {"stable", "beta"}:
+            selected_target = "stable"
+        mobile_settings = dict(self.settings or {})
+        mobile_settings["frontPorchExportTarget"] = selected_target
+        mobile_settings["frontPorchDuplicateOverride"] = bool(duplicate_override)
+        clean_name_override = str(name_override or "").strip()
+        if clean_name_override:
+            mobile_settings["frontPorchExportNameOverride"] = clean_name_override
+        else:
+            mobile_settings.pop("frontPorchExportNameOverride", None)
+        res = self.export_front_porch_from_project(str(path), mobile_settings, selected_target)
+        if isinstance(res, dict):
+            res.setdefault("mobileFrontPorchExport", True)
+            res.setdefault("target", selected_target)
+            res.setdefault("targetLabel", "Beta" if selected_target == "beta" else "Stable")
+        return res
+
     def _mobile_list_front_porch(self, target="stable"):
         res = self.list_front_porch_characters(self.settings, target)
         if not res.get("ok"):
@@ -4340,12 +4379,19 @@ class Api:
                         res = api._mobile_create_variation(payload.get("projectPath") or "", payload.get("instructions") or "")
                     elif path == "/api/export":
                         res = api._mobile_export_project(payload.get("projectPath") or "", payload.get("format") or "chara_v2_png")
+                    elif path == "/api/front_porch/export":
+                        res = api._mobile_export_front_porch_project(
+                            payload.get("projectPath") or "",
+                            payload.get("target") or "stable",
+                            bool(payload.get("duplicateOverride")),
+                            payload.get("nameOverride") or "",
+                        )
                     elif path == "/api/front_porch/import":
                         res = api._mobile_import_front_porch(payload.get("characterIds") or [], payload.get("target") or "stable")
                     else:
                         api._mobile_send_json(self, {"ok": False, "error": "Not found."}, 404)
                         return
-                    api._mobile_send_json(self, res, 200 if res.get("ok") else 400)
+                    api._mobile_send_json(self, res, 200 if (res.get("ok") or res.get("duplicateFound")) else 400)
                 except Exception as e:
                     api._mobile_send_json(self, {"ok": False, "error": str(e)}, 500)
 
@@ -4557,7 +4603,15 @@ class Api:
         return sections
 
     def _card_browser_token_counts(self, output):
-        """Return total and section-level token estimates for Character Browser cards."""
+        """Return full-card and practical roleplay token estimates.
+
+        ``total`` is the whole saved card text. ``sentTotal`` is a more useful
+        real-world estimate for what a typical roleplay frontend sends to the
+        model by default: core card fields plus the default greeting/system-ish
+        fields, excluding SD/image prompts, tags, creator notes, and lorebook
+        entries that only activate when triggered. Alternative greetings are
+        kept separate because most frontends send only the selected greeting.
+        """
         text = str(output or "")
         counts = {
             "description": 0,
@@ -4565,12 +4619,17 @@ class Api:
             "sexualTraits": 0,
             "background": 0,
             "scenario": 0,
+            "firstMessage": 0,
+            "alternativeGreetings": 0,
             "greetings": 0,
             "exampleMessages": 0,
             "lorebook": 0,
             "tags": 0,
             "stateTracking": 0,
             "stableDiffusion": 0,
+            "systemPrompt": 0,
+            "postHistoryInstructions": 0,
+            "creatorNotes": 0,
             "other": 0,
         }
         for title, section_text in self._split_card_output_sections_for_tokens(text):
@@ -4586,11 +4645,13 @@ class Api:
                 key = "background"
             elif norm.startswith("scenario"):
                 key = "scenario"
-            elif norm.startswith("first message") or norm.startswith("alternative first messages") or norm.startswith("alternate first messages") or norm in {"greeting", "greetings"}:
-                key = "greetings"
+            elif norm.startswith("first message") or norm in {"greeting", "default greeting"}:
+                key = "firstMessage"
+            elif norm.startswith("alternative first messages") or norm.startswith("alternate first messages") or norm.startswith("alternate greetings") or norm in {"greetings", "alternative greetings"}:
+                key = "alternativeGreetings"
             elif norm.startswith("example dialogue") or norm.startswith("example message") or norm.startswith("example dialogues") or norm.startswith("example messages"):
                 key = "exampleMessages"
-            elif norm.startswith("lorebook") or norm.startswith("lore book"):
+            elif norm.startswith("lorebook") or norm.startswith("lore book") or norm.startswith("character book"):
                 key = "lorebook"
             elif norm == "tags" or norm.startswith("tag"):
                 key = "tags"
@@ -4598,15 +4659,21 @@ class Api:
                 key = "stateTracking"
             elif norm.startswith("stable diffusion") or norm.startswith("sd prompt") or norm.startswith("image prompt") or norm.startswith("natural english image prompt") or norm.startswith("natural image prompt") or norm.startswith("natural prompt"):
                 key = "stableDiffusion"
+            elif norm.startswith("system prompt") or norm.startswith("custom system prompt"):
+                key = "systemPrompt"
+            elif norm.startswith("post history") or norm.startswith("post history instructions"):
+                key = "postHistoryInstructions"
+            elif norm.startswith("creator note") or norm == "notes":
+                key = "creatorNotes"
             counts[key] += self._estimate_card_browser_tokens(section_text)
-        # Keep the headline total mathematically consistent with the rows
-        # displayed in the Character Browser token details panel. Earlier builds
-        # estimated the full raw card text separately, so separators/blank lines
-        # could make the headline total look larger than the visible section
-        # rows. For the browser UI, a sum-of-sections total is clearer and
-        # debuggable: every token shown belongs to a displayed bucket.
-        total = sum(int(v or 0) for v in counts.values())
-        return {"total": total, "sections": counts, "version": 3}
+        counts["greetings"] = int(counts.get("firstMessage") or 0) + int(counts.get("alternativeGreetings") or 0)
+        full_total = sum(int(v or 0) for k, v in counts.items() if k != "greetings")
+        sent_keys = (
+            "description", "personality", "sexualTraits", "background", "scenario",
+            "firstMessage", "exampleMessages", "stateTracking", "systemPrompt", "postHistoryInstructions", "other",
+        )
+        sent_total = sum(int(counts.get(k) or 0) for k in sent_keys)
+        return {"total": full_total, "sentTotal": sent_total, "sections": counts, "version": 4}
 
     def _context_check(self, prompt, settings, mode_label="Full Prompt"):
         estimated = self._estimate_tokens(prompt)
@@ -10171,6 +10238,153 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": f"Could not duplicate character project: {e}"}
 
+    def _normalise_lite_card_options(self, options=None):
+        raw = options if isinstance(options, dict) else {}
+        def truthy(key, default=False):
+            value = raw.get(key, default)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            return bool(value)
+        def clean_choice(key, allowed, default):
+            value = str(raw.get(key) or default).strip().lower()
+            return value if value in allowed else default
+        try:
+            target_tokens = int(raw.get("targetTokens") or 0)
+        except Exception:
+            target_tokens = 0
+        if target_tokens <= 0:
+            target_tokens = 3500
+        target_tokens = max(600, min(50000, target_tokens))
+        return {
+            "nameSuffix": str(raw.get("nameSuffix") or "Lite").strip()[:80] or "Lite",
+            "aggressiveness": clean_choice("aggressiveness", {"gentle", "balanced", "aggressive", "extreme"}, "balanced"),
+            "targetTokens": target_tokens,
+            "removeSdPrompts": truthy("removeSdPrompts", True),
+            "keepTags": truthy("keepTags", True),
+            "keepLorebook": truthy("keepLorebook", False),
+            "keepStateTracking": truthy("keepStateTracking", True),
+            "keepSexualTraits": truthy("keepSexualTraits", True),
+            "greetingMode": clean_choice("greetingMode", {"default_only", "short_alternates", "none"}, "default_only"),
+            "exampleMode": clean_choice("exampleMode", {"short", "very_short", "none"}, "short"),
+            "customInstructions": str(raw.get("customInstructions") or "").strip()[:4000],
+        }
+
+    def _lite_card_followup_prompt(self, original_name, suggested_name, options=None):
+        opts = self._normalise_lite_card_options(options)
+        aggressiveness_text = {
+            "gentle": "Gentle compression: preserve most major sections and detail, but remove repetition and verbose prose.",
+            "balanced": "Balanced compression: keep the playable identity, relationship logic, scenario hook, voice, and essential history while cutting flavour repetition.",
+            "aggressive": "Aggressive compression: keep only high-impact details needed for roleplay consistency; merge overlapping traits and remove minor trivia.",
+            "extreme": "Extreme compression: produce a compact small-context card; keep only the core identity, personality engine, scenario, and default greeting.",
+        }.get(opts["aggressiveness"], "Balanced compression.")
+        greeting_rule = {
+            "default_only": "Keep one concise default First Message. Remove Alternative First Messages unless one is truly essential.",
+            "short_alternates": "Keep one concise default First Message and at most 1-2 short alternate greetings.",
+            "none": "Remove greetings only if the card can still be imported safely; otherwise keep a very short default First Message.",
+        }.get(opts["greetingMode"], "Keep one concise default First Message.")
+        example_rule = {
+            "short": "Condense Example Dialogues into a very short sample that demonstrates voice only.",
+            "very_short": "Reduce Example Dialogues to 2-4 short exchanges, or remove if the voice is already clear.",
+            "none": "Remove Example Dialogues unless they are absolutely required to preserve voice separation.",
+        }.get(opts["exampleMode"], "Condense Example Dialogues.")
+        section_rules = []
+        section_rules.append("Remove Stable Diffusion Prompt and Natural English Image Prompt sections." if opts["removeSdPrompts"] else "Keep image prompt sections, but make them concise.")
+        section_rules.append("Keep Tags, but reduce them to a short comma-separated list." if opts["keepTags"] else "Remove Tags unless the export format requires them.")
+        section_rules.append("Keep only critical Lorebook Entries that are likely to activate in normal play." if opts["keepLorebook"] else "Remove Lorebook Entries because they are usually activated separately and should not be counted in small-context payloads.")
+        section_rules.append("Keep State Tracking, but compact it to the essential values." if opts["keepStateTracking"] else "Remove State Tracking unless it is required for the frontend.")
+        section_rules.append("Keep Sexual Traits if present, but condense hard and remove repeated examples." if opts["keepSexualTraits"] else "Remove Sexual Traits and merge any essential relationship/intimacy boundaries into Personality.")
+        return "\n".join([
+            "Create a NEW LITE VERSION of this fictional character card for roleplay with a smaller-context model.",
+            "Return the COMPLETE lite card only, not commentary, not a diff, and not analysis.",
+            "The lite card must remain importable and should keep the same section-heading style/order when useful.",
+            "Do not rewrite the premise into a different character. Preserve the core personality, voice, scenario, relationship to {{user}}, and roleplay hook.",
+            "Cut fluff, repeated wording, minor trivia, duplicated background beats, overlong examples, and prose that does not change model behaviour.",
+            "Prefer dense, direct, roleplay-useful bullet points over long explanation.",
+            f"Original card name: {original_name}",
+            f"Use this name in the Name section: {suggested_name}",
+            f"Compression target: about {opts['targetTokens']:,} saved-card tokens or less if possible.",
+            f"Compression style: {aggressiveness_text}",
+            greeting_rule,
+            example_rule,
+            *section_rules,
+            "Do not mention that this is AI-generated or that it is a lite version except through the Name section.",
+            "Do not include Stable Diffusion/image prompt material in description/personality unless it is essential character appearance.",
+            "",
+            "OPTIONAL USER INSTRUCTIONS",
+            opts["customInstructions"] or "None.",
+        ]).strip()
+
+    def create_lite_card_from_workspace(self, workspace, options=None, settings=None):
+        try:
+            workspace = workspace or {}
+            opts = self._normalise_lite_card_options(options)
+            output = str(workspace.get("output") or "").strip()
+            if not output:
+                return {"ok": False, "error": "No card output was supplied for lite-card creation."}
+            template = workspace.get("template") or self.template
+            concept = workspace.get("concept") or ""
+            merged_settings = self._normalise_settings({**self.settings, **(settings or workspace.get("settings") or {})})
+            original_name = self._extract_name(output) or workspace.get("name") or "Character"
+            suggested_name = self._unique_character_variant_name(original_name, opts.get("nameSuffix") or "Lite")
+            prompt = self._lite_card_followup_prompt(original_name, suggested_name, opts)
+            revised = self.revise_card(output, prompt, concept, template, merged_settings)
+            if not revised.get("ok"):
+                return revised
+            new_output = str(revised.get("output") or "").strip()
+            new_name = self._extract_name(new_output) or suggested_name
+            if self._safe_slug(new_name).lower() == self._safe_slug(original_name).lower() or self._is_generic_character_name(new_name):
+                new_name = suggested_name
+                new_output = self._replace_name_section_for_variant(new_output, new_name)
+            elif (EXPORT_DIR / self._safe_slug(new_name)).exists():
+                unique_name = self._unique_character_variant_name(new_name, opts.get("nameSuffix") or "Lite")
+                new_name = unique_name
+                new_output = self._replace_name_section_for_variant(new_output, new_name)
+            lite_workspace = self._clear_project_identity_recursive(json.loads(json.dumps(workspace, ensure_ascii=False)))
+            lite_workspace["name"] = new_name
+            lite_workspace["output"] = new_output
+            lite_workspace["browserDescription"] = ""
+            lite_workspace["browserDescriptionSource"] = ""
+            lite_workspace["cardRating"] = ""
+            lite_workspace["cardRatingReasoning"] = ""
+            lite_workspace["cardRatingDetails"] = []
+            lite_workspace["cardRatingSourceHash"] = ""
+            lite_workspace["template"] = template
+            lite_workspace["settings"] = merged_settings
+            lite_workspace["isLiteVersion"] = True
+            lite_workspace["liteParentName"] = original_name
+            lite_workspace["liteOptions"] = opts
+            tabs = lite_workspace.get("characterTabs") if isinstance(lite_workspace.get("characterTabs"), list) else []
+            if tabs:
+                for tab in tabs:
+                    if isinstance(tab, dict):
+                        tab["name"] = new_name
+                        tab["focusName"] = new_name
+                        tab["output"] = new_output
+                        tab["fullTextOutput"] = new_output
+                        tab["isLiteVersion"] = True
+                        tab["liteParentName"] = original_name
+            else:
+                lite_workspace["characterTabs"] = [{"name": new_name, "focusName": new_name, "output": new_output, "fullTextOutput": new_output, "isLiteVersion": True, "liteParentName": original_name, "cardImagePath": lite_workspace.get("cardImagePath") or lite_workspace.get("imagePath") or ""}]
+            saved = self.save_character_workspace(lite_workspace)
+            if not saved.get("ok"):
+                return saved
+            saved["output"] = new_output
+            saved["backupInfo"] = revised.get("backupInfo") or {}
+            saved["originalName"] = original_name
+            saved["isLiteVersion"] = True
+            return saved
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create lite card: {e}"}
+
+    def create_lite_card_from_project(self, project_path, options=None, settings=None):
+        loaded = self.load_character_project(project_path)
+        if not loaded.get("ok"):
+            return loaded
+        workspace = loaded.get("workspace") if isinstance(loaded.get("workspace"), dict) else {}
+        merged = {**workspace, **loaded}
+        merged = self._clear_project_identity_recursive(merged)
+        return self.create_lite_card_from_workspace(merged, options, settings)
+
     def _variation_followup_prompt(self, original_name, suggested_name, instructions):
         return "\n".join([
             "Create a NEW alternate/future variation of this fictional character card from the current card.",
@@ -10608,6 +10822,9 @@ class Api:
                 "cardRatingSourceHash": card_rating_source_hash,
                 "cardRatingDetailSource": card_rating_detail_source,
                 "tags": tags,
+                "isLiteVersion": bool(workspace.get("isLiteVersion")),
+                "liteParentName": workspace.get("liteParentName") or "",
+                "liteOptions": workspace.get("liteOptions") if isinstance(workspace.get("liteOptions"), dict) else {},
                 "virtualFolderId": virtual_folder_id,
                 "projectPath": str(latest_project),
                 "exportedPath": str(latest_card) if str(latest_card) else "",
@@ -10872,6 +11089,9 @@ class Api:
                 tab["imagePath"] = tab["cardImagePath"]
                 tab["projectPath"] = str(path)
                 tab["workspaceProjectPath"] = str(path)
+                if res.get("isLiteVersion"):
+                    tab["isLiteVersion"] = True
+                    tab["liteParentName"] = res.get("liteParentName") or ""
                 if self._loaded_project_is_group_card(res):
                     tab["isGroupCard"] = True
                     tab["frontend"] = "front_porch_group"
@@ -11031,6 +11251,69 @@ class Api:
         )
 
 
+    def _front_porch_group_safe_member_id(self, name, seed_ms=None, used_ids=None):
+        """Return a Front Porch-style group/source character id.
+
+        Current Front Porch group exports use readable ids like
+        Name_Parts_1782733298581 for group realism maps.  Earlier CCF builds used
+        UUIDs here, which made the .group payload valid JSON but harder for newer
+        Front Porch group paths to resolve.
+        """
+        used_ids = used_ids if isinstance(used_ids, set) else set()
+        safe = self._safe_front_porch_character_folder(name or "Character")
+        if not safe:
+            safe = "Character"
+        try:
+            base_ms = int(seed_ms if seed_ms is not None else int(time.time() * 1000))
+        except Exception:
+            base_ms = int(time.time() * 1000)
+        candidate = f"{safe}_{base_ms}"
+        while candidate in used_ids:
+            base_ms += 1
+            candidate = f"{safe}_{base_ms}"
+        used_ids.add(candidate)
+        return candidate
+
+    def _front_porch_default_member_state(self):
+        """Default per-member group realism state matching Front Porch exports."""
+        return {
+            "affection": 35,
+            "trust": 40,
+            "emotion": "neutral",
+            "emotionIntensity": "mild",
+            "timeOfDay": "morning",
+            "dayCount": 1,
+            "needs": {
+                "hunger": 70,
+                "thirst": 75,
+                "rest": 65,
+                "social": 60,
+                "hygiene": 80,
+                "bladder": 85,
+            },
+            "enjoysLowHygiene": False,
+            "verificationEnabled": False,
+            "verificationMaxReprocesses": 1,
+            "verificationStrictness": 3,
+            "needsDirectorAuthority": False,
+            "needsSimStrength": 1,
+            "needsBaselineHunger": 80,
+            "needsBaselineBladder": 80,
+            "needsBaselineEnergy": 80,
+            "needsBaselineSocial": 80,
+            "needsBaselineFun": 80,
+            "needsBaselineHygiene": 80,
+            "needsBaselineComfort": 80,
+            "needsDecayHunger": 5,
+            "needsDecayBladder": 5,
+            "needsDecayEnergy": 5,
+            "needsDecaySocial": 5,
+            "needsDecayFun": 5,
+            "needsDecayHygiene": 5,
+            "needsDecayComfort": 5,
+            "relationships": {},
+        }
+
     def _group_card_member_from_project(self, project_path):
         """Build one high-fidelity Front Porch group-card member from a saved CCF project.
 
@@ -11055,7 +11338,7 @@ class Api:
         data.setdefault("tags", [])
         data.setdefault("extensions", {})
 
-        stable_id = str(uuid.uuid4())
+        stable_id = self._front_porch_group_safe_member_id(name)
 
         image_source = loaded.get("imagePath") or loaded.get("cardImagePath") or loaded.get("imageDataUrl") or loaded.get("cardImageDataUrl") or ""
         canonical_project_path = str(project_path)
@@ -11116,33 +11399,45 @@ class Api:
         return {"projectPath": str(project_path), "name": name, "output": output, "stableId": stable_id, "data": data}
 
     def _group_card_realism_payloads(self, members):
-        """Build Front Porch-style group realism seed payloads.
+        """Build Front Porch-compatible group realism seed payloads.
 
-        A Front Porch-exported group card (post-v30/v33) uses a slightly mixed
-        compatibility shape:
-        - baseline_realism_state: JSON string containing a flat stableId -> state map.
-        - default_member_realism_state: JSON string containing {"perChar": {...}}.
-        - realism_state / extensions.realism_state: flat stableId -> state map.
-        - extensions.default_member_realism_state: object containing {"perChar": {...}}.
-
-        Keep this aligned with actual Front Porch group exports rather than the
-        earlier draft-only all-in-one perChar state object.
+        Front Porch's current .group exports use a flat member-id -> baseline map
+        and a default_member_realism_state JSON string shaped as {"perChar": {...}}.
+        The perChar object now includes needs verification/director settings in
+        addition to the old affection/trust/emotion fields.
         """
         clean = []
-        for member in members or []:
+        used = set()
+        seed_ms = int(time.time() * 1000)
+        for idx, member in enumerate(members or []):
             if isinstance(member, dict):
                 data = member.get("data") if isinstance(member.get("data"), dict) else {}
-                sid = str(member.get("stableId") or data.get("_original_stable_id") or "").strip()
                 name = str(member.get("name") or data.get("name") or "Character").strip() or "Character"
+                sid = str(member.get("stableId") or data.get("_original_stable_id") or "").strip()
             else:
-                sid = ""
                 name = str(member or "Character").strip() or "Character"
-            if sid:
-                clean.append((sid, name))
+                sid = ""
+            # New Front Porch group payloads prefer readable member ids.  If an
+            # older member still has a UUID, translate it to a safe FP-style id for
+            # the group-level state maps while preserving the original stable id in
+            # raw_member_data._original_stable_id.
+            if not sid or re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", sid):
+                sid = self._front_porch_group_safe_member_id(name, seed_ms + idx, used)
+                if isinstance(member, dict):
+                    member["stableId"] = sid
+                    data = member.get("data") if isinstance(member.get("data"), dict) else {}
+                    if data is not None:
+                        # Do not overwrite a pre-existing raw member original id.
+                        data.setdefault("_original_stable_id", str(uuid.uuid4()))
+            elif sid in used:
+                sid = self._front_porch_group_safe_member_id(name, seed_ms + idx, used)
+            else:
+                used.add(sid)
+            clean.append((sid, name))
 
         baseline = {}
         per_char = {}
-        for sid, name in clean:
+        for sid, _name in clean:
             baseline[sid] = {
                 "affection": 35,
                 "trust": 40,
@@ -11151,24 +11446,7 @@ class Api:
                 "timeOfDay": "morning",
                 "dayCount": 1,
             }
-            per_char[sid] = {
-                "affection": 35,
-                "trust": 40,
-                "emotion": "neutral",
-                "emotionIntensity": "mild",
-                "timeOfDay": "morning",
-                "dayCount": 1,
-                "needs": {
-                    "hunger": 70,
-                    "thirst": 75,
-                    "rest": 65,
-                    "social": 60,
-                    "hygiene": 80,
-                    "bladder": 85,
-                },
-                "enjoysLowHygiene": False,
-                "relationships": {},
-            }
+            per_char[sid] = self._front_porch_default_member_state()
         default_state = {"perChar": per_char}
         return {
             "baseline": baseline,
@@ -11792,6 +12070,20 @@ class Api:
                 return {"ok": False, "error": "Front Porch group cards currently support a maximum of 4 members."}
 
             members = [self._group_card_member_from_project(self._project_path_inside_exports(path)) for path in clean_paths]
+            used_group_member_ids = set()
+            seed_ms = int(time.time() * 1000)
+            for idx, member in enumerate(members):
+                if not isinstance(member, dict):
+                    continue
+                data = member.get("data") if isinstance(member.get("data"), dict) else {}
+                name = str(member.get("name") or data.get("name") or f"Member {idx + 1}")
+                group_member_id = self._front_porch_group_safe_member_id(name, seed_ms + idx, used_group_member_ids)
+                # Keep raw_member_data._original_stable_id as the embedded card's
+                # source/stable id, but use the readable FP member id for root group
+                # state maps and Front Porch DB rows.
+                if data is not None:
+                    data.setdefault("_original_stable_id", str(uuid.uuid4()))
+                member["stableId"] = group_member_id
             mode = str(options.get("mode") or "insert").strip().lower()
             if mode == "ai":
                 fields = self._build_group_card_fields_ai(members, options, settings or {})
@@ -11862,7 +12154,7 @@ class Api:
                 "system_prompt": fields.get("system_prompt") or "",
                 "character_system_prompts": character_system_prompts,
                 "group_lorebook": json.dumps({"entries": []}, ensure_ascii=False, separators=(",", ":")),
-                "inherit_character_lorebooks": True,
+                "inherit_character_lorebooks": bool(options.get("inheritCharacterLorebooks", False)),
                 "chaos_mode_enabled": False,
                 "chaos_nsfw_enabled": False,
                 "baseline_realism_state": baseline_json,
@@ -16198,12 +16490,15 @@ class Api:
                         "deleted_at": None,
                     })
 
-                member_id = self._uuid_like_or_new("", used_ids)
+                # Current Front Porch group exports use the readable normal/source
+                # character id as the group member id and as the key in group realism
+                # blobs.  Older CCF used private UUID member ids here, which made the
+                # DB rows exist but left some Front Porch UI paths unable to resolve
+                # the group correctly.
+                member_id = source_character_id
+                used_ids.add(member_id)
                 member_ids.append(member_id)
                 avatar_name = f"{member_id}.png"
-                # The group-member snapshot points back to the normal character
-                # id used by Front Porch realism/system-prompt blobs, while the
-                # row id and avatar filename stay private UUIDs.
                 data["_original_stable_id"] = source_character_id
                 avatar_diag = self._write_group_member_avatar_file(avatar_dir / avatar_name, data, member_id)
                 ext = data.get("extensions") if isinstance(data.get("extensions"), dict) else {}
@@ -16282,7 +16577,7 @@ class Api:
                 "character_system_prompts": character_prompts,
                 "group_lorebook": self._json_string_or_default(group_lorebook, {"entries": []}),
                 "world_ids": self._json_string_or_default(payload.get("world_ids"), []),
-                "inherit_character_lorebooks": 1 if payload.get("inherit_character_lorebooks", True) else 0,
+                "inherit_character_lorebooks": 1 if payload.get("inherit_character_lorebooks", False) else 0,
                 "chaos_mode_enabled": 1 if payload.get("chaos_mode_enabled") else 0,
                 "chaos_nsfw_enabled": 1 if payload.get("chaos_nsfw_enabled") else 0,
                 "created_at": now,
