@@ -1,3 +1,16 @@
+> [!IMPORTANT]
+> ## Development has moved to Character Card Forge V2
+>
+> This original PyWebView version of Character Card Forge will remain available for download and reference, but it will receive **no further updates**.
+>
+> All current and future development has moved to the new Godot-based rewrite:
+>
+> **[Character Card Forge V2](https://github.com/FrozenKangaroo/Character-Card-Forge-V2)**
+>
+> Character Card Forge V2 is still under active development and is currently behind this version in overall feature coverage. It uses a new architecture and clean data model, and it will gradually replace the old version as its features are rebuilt.
+
+---
+
 ## v1.0.11-beta5
 
 - Optimised Character Browser → Load Workspace so it no longer re-indexes the Browser cache before opening a selected card.
